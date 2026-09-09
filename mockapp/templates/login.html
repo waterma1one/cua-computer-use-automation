@@ -1,0 +1,17 @@
+<html><body>
+<table border="0" cellpadding="6" cellspacing="0">
+  <tr><td colspan="2"><font size="4"><b>Sign in</b></font></td></tr>
+  {% if error %}<tr><td colspan="2"><font color="#a02c1f">{{ error }}</font></td></tr>{% endif %}
+  <form method="post" action="/login">
+  <tr>
+    <td><font size="2">User</font></td>
+    <td><input type="text" name="user" size="16" title="User"></td>
+  </tr>
+  <tr>
+    <td><font size="2">Password</font></td>
+    <td><input type="password" name="password" size="16" title="Password"></td>
+  </tr>
+  <tr><td colspan="2"><input type="submit" value="Sign in"></td></tr>
+  </form>
+</table>
+</body></html>
