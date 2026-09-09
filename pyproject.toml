@@ -1,0 +1,45 @@
+[project]
+name = "cua"
+version = "0.1.0"
+description = "Record-once, replay-many automation for applications with no API"
+requires-python = ">=3.12"
+dependencies = [
+    "playwright>=1.55",
+    "pydantic>=2.9",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "jinja2>=3.1",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "google-genai>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "ruff>=0.7", "mypy>=1.13"]
+
+[project.scripts]
+cua = "cua.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["cua"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Deliberately no asyncio_mode. This project uses Playwright's synchronous API, which raises
+# if called from inside a running event loop; letting pytest-asyncio wrap every test would
+# break every browser test in phase 2.
