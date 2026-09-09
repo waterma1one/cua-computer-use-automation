@@ -27,3 +27,7 @@ playwright-report/
 .DS_Store
 
 
+
+# uv writes this when the local pip is uv-shimmed; the documented
+# workflow is venv + pip and the dependency floors live in pyproject.toml
+uv.lock
