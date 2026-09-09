@@ -1,0 +1,28 @@
+# Assignment source material — not ours to publish
+*.pdf
+docs/context/ASSIGNMENT.md
+
+# Internal process notes
+.internal/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Playwright
+test-results/
+playwright-report/
+
+
+.DS_Store
+
