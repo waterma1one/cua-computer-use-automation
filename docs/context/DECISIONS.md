@@ -249,3 +249,68 @@ filtering known-sensitive fields before the snapshot text is stored or logged, r
 assuming Chromium's `aria_snapshot()` does this for us. Per the brief, the documented
 fallback (CDP `Accessibility.getFullAXTree`) is not evaluated here — that decision belongs to
 the controller design, not to this spike.
+
+### Model provider smoke test (`spike/probe_llm.py`)
+
+Ran `.venv/bin/python spike/probe_llm.py` (`google-genai` 2.22.0, installed in `.venv`) against
+`GEMINI_API_KEY` from the shell environment. Literal output, unedited except that the traceback
+below contains no secret material to begin with (checked programmatically before recording):
+
+```
+Traceback (most recent call last):
+  ...
+  File ".../.venv/lib/python3.14/site-packages/google/genai/errors.py", line 202, in raise_error
+    raise ClientError(status_code, response_json, response)
+google.genai.errors.ClientError: 401 UNAUTHENTICATED. {'error': {'code': 401, 'message': 'Request
+had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other
+valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.',
+'status': 'UNAUTHENTICATED', 'details': [{'@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+'reason': 'ACCESS_TOKEN_TYPE_UNSUPPORTED', 'metadata': {'method':
+'google.ai.generativelanguage.v1beta.GenerativeService.GenerateContent', 'service':
+'generativelanguage.googleapis.com'}}]}}
+```
+
+**Credential shape.** `GEMINI_API_KEY` is 53 characters, does not start with `AIza` (the standard
+Google AI Studio API key prefix), and is structured as two dot-separated segments starting `AQ...`
+— not a bare API key. A preliminary `client.models.list()` call, made only to characterize
+authentication before spending a generation call, failed with the identical
+`401 / ACCESS_TOKEN_TYPE_UNSUPPORTED` error. The credential in the environment is some kind of
+OAuth-style access token, not a Gemini Developer API key, and the `generativelanguage.googleapis.com`
+REST endpoint used by `client.models.generate_content(...)` / `client.models.list()` when the
+`google-genai` `Client` is constructed with `api_key=...` does not accept it. No alternative auth
+mechanism (service account, ADC, Vertex AI project/location credentials) was attempted — out of
+scope per the brief.
+
+**Documentation check (performed before running, per the brief's warning that the design-time
+snippet may be stale).** Fetched `ai.google.dev/gemini-api/docs/models` and
+`ai.google.dev/gemini-api/docs/pricing` directly:
+- The design-time snippet's model, `gemini-2.0-flash`, is listed as shut down. The cheapest
+  current stable model is `gemini-2.5-flash-lite` ($0.10/$0.40 per million input/output tokens),
+  confirmed consistently across the models page and the pricing page. `spike/probe_llm.py` was
+  updated to use `gemini-2.5-flash-lite`.
+- The call shape in the design-time snippet — `client.models.generate_content(model=..., contents=...,
+  config=types.GenerateContentConfig(tools=[types.Tool(function_declarations=[...])]))` — is still
+  current and matches the installed SDK's live signature
+  (`google.genai.models.Models.generate_content`), so no correction was needed there.
+- One correction to the design-time snippet's *extraction* code: rather than manually walking
+  `response.candidates[i].content.parts`, use the SDK's own `response.function_calls` property
+  (`google.genai.types.GenerateContentResponse.function_calls`), which returns `None` safely when
+  candidates/content/parts are absent instead of raising. `spike/probe_llm.py` uses this form.
+- A newer `client.interactions.create(...)` surface also exists on the installed SDK (2.22.0) and
+  appeared in one documentation fetch, but `generate_content` remains supported and is what the
+  probe uses; adopting `interactions` was treated as an unforced, unverified deviation and skipped.
+
+**Outcome: the API call did not succeed.** The probe never reached the point of proving a
+structured tool call because authentication itself failed. This is a credential problem, not a
+model-identifier or call-shape problem: everything downstream of auth (model choice, call shape,
+tool-call extraction) was confirmed against current documentation and is believed correct, but is
+**unverified end-to-end** because no request with this credential has ever returned a 200 from
+`generativelanguage.googleapis.com`.
+
+**Recommendation for phase 7.** Before phase 7, obtain a genuine Gemini Developer API key (starts
+`AIza...`, issued from Google AI Studio / a Google Cloud API-keys page) and export it as
+`GEMINI_API_KEY`, or reconfigure `spike/probe_llm.py`'s replacement to authenticate against Vertex
+AI (`genai.Client(vertexai=True, project=..., location=...)`) using the OAuth-style credential
+already present, if that is in fact a Vertex-scoped token — that determination was out of scope
+here. Do not assume the call shape recorded above is end-to-end proven; re-run the equivalent of
+this probe with working credentials as the first step of phase 7, not as an afterthought.
