@@ -6,7 +6,7 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from mockapp.data import MEMBERS
+from mockapp.data import NOT_FOUND_MESSAGE, RESTRICTED_MESSAGE, resolve_member
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -34,10 +34,10 @@ def create_app(variant: str = "base") -> FastAPI:
     def search(mid: str = Form(...)) -> RedirectResponse:
         if not (len(mid) == 5 and mid.isdigit()):
             return RedirectResponse("/search?error=Member+ID+must+be+five+digits", status_code=303)
-        member = MEMBERS.get(mid)
-        if member is None:
+        result = resolve_member(mid)
+        if result == NOT_FOUND_MESSAGE:
             return RedirectResponse("/search?error=No+member+found", status_code=303)
-        if member.restricted:
+        if result == RESTRICTED_MESSAGE:
             return RedirectResponse(
                 "/search?error=You+are+not+authorized+to+view+this+record", status_code=303
             )
@@ -45,6 +45,15 @@ def create_app(variant: str = "base") -> FastAPI:
 
     @app.get("/member/{member_id}", response_class=HTMLResponse)
     def member_detail(request: Request, member_id: str) -> HTMLResponse:
-        return TEMPLATES.TemplateResponse(request, "member.html", {"m": MEMBERS[member_id]})
+        result = resolve_member(member_id)
+        if result == NOT_FOUND_MESSAGE:
+            return TEMPLATES.TemplateResponse(
+                request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
+            )
+        if result == RESTRICTED_MESSAGE:
+            return TEMPLATES.TemplateResponse(
+                request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
+            )
+        return TEMPLATES.TemplateResponse(request, "member.html", {"m": result})
 
     return app

@@ -21,6 +21,10 @@ class Member:
     restricted: bool = False
 
 
+NOT_FOUND_MESSAGE = "No member found"
+RESTRICTED_MESSAGE = "You are not authorized to view this record"
+
+
 MEMBERS: dict[str, Member] = {
     "12345": Member(
         member_id="12345",
@@ -48,3 +52,21 @@ MEMBERS: dict[str, Member] = {
         restricted=True,
     ),
 }
+
+
+def resolve_member(member_id: str) -> Member | str:
+    """The single place that decides whether a member record may be shown.
+
+    Every route that accepts a member_id calls this instead of reading MEMBERS
+    directly, so "not found" and "restricted" stay business outcomes owned by the
+    record itself rather than something each route re-derives (or forgets to).
+
+    Returns the Member when it may be displayed, or one of NOT_FOUND_MESSAGE /
+    RESTRICTED_MESSAGE when it may not.
+    """
+    member = MEMBERS.get(member_id)
+    if member is None:
+        return NOT_FOUND_MESSAGE
+    if member.restricted:
+        return RESTRICTED_MESSAGE
+    return member
