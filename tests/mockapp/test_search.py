@@ -2,6 +2,8 @@ from collections.abc import Callable
 
 from fastapi.testclient import TestClient
 
+from mockapp.data import MEMBERS
+
 
 def test_found_member_reaches_the_detail_screen(client: Callable[..., TestClient]) -> None:
     r = client().post("/search", data={"mid": "12345"})
@@ -33,3 +35,29 @@ def test_detail_screen_has_two_identically_named_row_buttons(
 ) -> None:
     r = client().get("/member/12345")
     assert r.text.count('value="Select"') == 2, "scope resolution needs an ambiguous name"
+
+
+def test_unknown_member_detail_is_not_found_not_a_crash(
+    client: Callable[..., TestClient],
+) -> None:
+    r = client().get("/member/00000")
+    assert r.status_code == 404, "an unknown id is a business outcome, not a server error"
+    assert "No member found" in r.text
+
+
+def test_restricted_member_detail_is_denied_not_rendered(
+    client: Callable[..., TestClient],
+) -> None:
+    restricted = MEMBERS["99999"]
+    r = client().get("/member/99999")
+    assert r.status_code == 403
+    assert "You are not authorized to view this record" in r.text
+    assert restricted.name not in r.text
+    assert restricted.ssn not in r.text
+
+
+def test_known_member_detail_is_unchanged(client: Callable[..., TestClient]) -> None:
+    r = client().get("/member/12345")
+    assert r.status_code == 200
+    assert "Member 12345" in r.text
+    assert "4,218.60" in r.text
