@@ -1,0 +1,29 @@
+<html><body>
+<table border="0" cellpadding="6">
+  <tr><td colspan="2"><b>Member Search</b></td></tr>
+  <tr>
+    <td>Member ID</td>
+    <td><input type="text" name="mid" title="Member ID"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><input type="submit" value="Search"></td>
+  </tr>
+</table>
+
+<!-- adversarial 1: an input with no accessible name at all -->
+<table><tr><td><input type="text" name="unnamed"></td></tr></table>
+
+<!-- adversarial 2: two identically named buttons in different rows -->
+<table border="1" cellpadding="4">
+  <tr><td>Savings</td><td>1234.56</td><td><input type="submit" value="Select"></td></tr>
+  <tr><td>Checking</td><td>78.90</td><td><input type="submit" value="Select"></td></tr>
+</table>
+
+<!-- adversarial 3: an icon-only control named only by its title -->
+<a href="#"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" title="Print statement"></a>
+
+<!-- a disabled control, for the require.enabled predicate -->
+<input type="submit" value="Post Transfer" disabled>
+
+<input type="password" name="pin" title="PIN">
+</body></html>
