@@ -136,3 +136,116 @@ the environment the design claims to address. Outcome and recovery states are th
 with the `text` locator strategy, which also exercises that code path rather than leaving it
 theoretical. Controls, which browsers do assign implicit roles to (`textbox`, `button`, `link`,
 `cell`, `row`), continue to use `role_name`.
+
+## D11 — Phase 0 spike findings
+
+Ran `spike/probe_frameset.py` (`.venv/bin/python spike/probe_frameset.py`) against
+`tests/fixtures/frameset/` served over `http://127.0.0.1:8799/`. Literal output, unedited:
+
+```
+127.0.0.1 - - [09/Sep/2026 22:10:56] "GET /index.html HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 22:10:56] "GET /nav.html HTTP/1.1" 200 -
+127.0.0.1 - - [09/Sep/2026 22:10:56] "GET /content.html HTTP/1.1" 200 -
+Q1 frames: ['', 'nav', 'content']
+Q1 frame(name=content) found: True
+
+Q2/Q3 aria snapshot of the content frame:
+
+- table:
+  - rowgroup:
+    - row "Member Search":
+      - cell "Member Search"
+    - row "Member ID":
+      - cell "Member ID"
+      - cell:
+        - textbox "Member ID"
+    - row "Search":
+      - cell "Search":
+        - button "Search"
+- table:
+  - rowgroup:
+    - row:
+      - cell:
+        - textbox
+- table:
+  - rowgroup:
+    - row "Savings 1234.56 Select":
+      - cell "Savings"
+      - cell "1234.56"
+      - cell "Select":
+        - button "Select"
+    - row "Checking 78.90 Select":
+      - cell "Checking"
+      - cell "78.90"
+      - cell "Select":
+        - button "Select"
+- link "Print statement":
+  - /url: "#"
+  - img "Print statement"
+- button "Post Transfer" [disabled]
+- textbox "PIN"
+
+Q3 disabled control resolvable and reported disabled:
+  count: 1 enabled: False
+
+Q2 duplicate-name controls (expect 2):
+  count: 2
+
+Q4 password field:
+  PIN node present: True
+  VALUE LEAKED: True
+Traceback (most recent call last):
+  File "spike/probe_frameset.py", line 65, in <module>
+    main()
+    ~~~~^^
+  File "spike/probe_frameset.py", line 54, in main
+    assert "hunter2" not in snap, (
+           ^^^^^^^^^^^^^^^^^^^^^
+AssertionError: the accessibility snapshot exposes password values; the surface layer must strip
+them explicitly rather than relying on the browser
+```
+
+**Q1 — frame reach and addressing by name: PASS.** `page.frames` lists `['', 'nav',
+'content']` (the empty-name entry is the top-level frameset document itself), and
+`page.frame(name="content")` resolves to a real frame object.
+
+**Q2 — `aria_snapshot()` returns the fixture's controls: PASS.** The snapshot surfaces the
+named textbox (`Member ID`), the unnamed adversarial textbox (bare `textbox`, no accessible
+name — present but anonymous, which the design must account for), both identically-named
+`Select` buttons (both appear, distinguishable only by ordinal/row context, exactly the
+adversarial case the fixture was built for), the icon-only `Print statement` control (named
+correctly via its `title` attribute, exposed as a `link` containing an `img` with that
+accessible name), and `Post Transfer`.
+
+**Q3 — node state exposure: PASS.** The disabled control is marked twice over: the snapshot
+itself renders `button "Post Transfer" [disabled]`, and `locator.is_enabled()` independently
+reports `False`. Either signal alone would satisfy the design's `require.enabled`
+predicate. A textbox's `value` was not separately exercised as a pre-filled attribute in
+this fixture (the PIN field starts empty), but see Q4 below for what the snapshot does and
+does not report about typed content.
+
+**Q4 — password distinguishability and value non-leak: FAIL.** The password input is
+distinguishable — it appears in the snapshot as `textbox "PIN"` (Chromium's aria snapshot
+does not report a distinct `role=textbox` variant for `type=password`; it is only
+identifiable by its accessible name, not by role or type). The critical half of the
+question is a hard fail: after `content.get_by_role("textbox", name="PIN").fill("hunter2")`,
+the *second* `aria_snapshot()` call **does** contain the literal typed value. The probe's
+own boolean check reports `VALUE LEAKED: True`, and the guarding `assert "hunter2" not in
+snap` raises `AssertionError`. Playwright's `aria_snapshot()` on a Chromium `input
+type="password"` includes the current value in the accessible-tree text — the browser does
+not redact it the way it redacts rendered glyphs on screen. (The failing assertion also
+means the literal YAML text of that second, value-bearing snapshot was not printed by the
+probe — only the two boolean lines and the assertion traceback above are the recorded
+evidence; the probe was not modified to print it, per instructions not to adjust the probe
+to chase more information once the gate had already failed.)
+
+**Gate verdict: FAIL.** Three of four questions pass outright, but Q4 fails on the exact
+point flagged as "the important half": the accessibility snapshot leaks a password value
+verbatim, so `locator.aria_snapshot()` cannot be trusted as-is to keep sensitive input out of
+recorded evidence. The design as it stands (spec §3.2/§3.3) cannot rely solely on the browser
+to omit password values from the perception layer; any component that redacts sensitive
+values (the evidence writer, the perception layer, or both) must do so explicitly by
+filtering known-sensitive fields before the snapshot text is stored or logged, rather than
+assuming Chromium's `aria_snapshot()` does this for us. Per the brief, the documented
+fallback (CDP `Accessibility.getFullAXTree`) is not evaluated here — that decision belongs to
+the controller design, not to this spike.
