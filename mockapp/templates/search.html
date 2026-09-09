@@ -1,0 +1,14 @@
+<html><body>
+<table border="0" cellpadding="6" cellspacing="0">
+  <tr><td colspan="2"><font size="4"><b>Member Search</b></font></td></tr>
+  {% if error %}<tr><td colspan="2"><font color="#a02c1f">{{ error }}</font></td></tr>{% endif %}
+  <form method="post" action="/search">
+  <tr>
+    <td><font size="2">Member ID</font></td>
+    <td><input type="text" name="mid" size="12" title="Member ID"></td>
+  </tr>
+  <tr><td colspan="2"><input type="submit" value="Search"></td></tr>
+  </form>
+</table>
+<table cellpadding="4"><tr><td><input type="text" name="note" size="20"></td></tr></table>
+</body></html>
