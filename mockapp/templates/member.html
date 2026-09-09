@@ -1,0 +1,18 @@
+<html><body>
+<font size="4"><b>Member {{ m.member_id }}</b></font><br>
+<font size="2">{{ m.name }} &nbsp; SSN {{ m.ssn }} &nbsp; Acct {{ m.account_number }}</font>
+<br><br>
+<table border="1" cellpadding="5" cellspacing="0">
+  <tr><td><b>Type</b></td><td><b>Number</b></td><td><b>Balance</b></td><td></td></tr>
+  {% for a in m.accounts %}
+  <tr>
+    <td>{{ a.kind }}</td><td>{{ a.number }}</td><td>{{ a.balance }}</td>
+    <td><form method="get" action="/account/{{ a.number }}"><input type="submit" value="Select"></form></td>
+  </tr>
+  {% endfor %}
+</table>
+<br>
+<a href="/statement/{{ m.member_id }}"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" title="Print statement" border="0"></a>
+<br><br>
+<a href="/subaccount/new?mid={{ m.member_id }}">Open sub-account</a>
+</body></html>
