@@ -1,0 +1,11 @@
+<html><body>
+<font size="4"><b>Account {{ a.number }}</b></font><br>
+<font size="2">Member {{ m.member_id }} &nbsp; {{ m.name }} &nbsp; {{ a.kind }} &nbsp; Balance {{ a.balance }}</font>
+<br><br>
+<table border="1" cellpadding="5" cellspacing="0">
+  <tr><td><b>Type</b></td><td><b>Number</b></td><td><b>Balance</b></td></tr>
+  <tr><td>{{ a.kind }}</td><td>{{ a.number }}</td><td>{{ a.balance }}</td></tr>
+</table>
+<br>
+<a href="/account/close?number={{ a.number }}">Close this account</a>
+</body></html>
