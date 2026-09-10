@@ -230,32 +230,40 @@ def create_app(variant: str = "base") -> FastAPI:
             return result
         return templates.TemplateResponse(request, "member.html", {"m": result})
 
-    @app.get("/branch", response_class=HTMLResponse)
-    def branch_select(request: Request, mid: str) -> HTMLResponse:
-        if (resp := apply_fault(request)) is not None:
-            return resp
-        if (resp := require_login(request)) is not None:
-            return resp
-        result = resolve_or_error(request, mid)
-        if isinstance(result, HTMLResponse):
-            return result
-        return templates.TemplateResponse(request, "branch.html", {"m": result})
+    # /branch exists only to be variant B's inserted step (see POST /search above), so it
+    # is registered only for variant B. Registering it unconditionally would leave a step
+    # meant to distinguish B from A silently reachable in A's URL space -- unlinked from
+    # A's UI, but visible to anything that enumerates registered routes rather than
+    # observed navigation. Not registering it at all makes an unmatched request 404 the
+    # ordinary way, rather than adding a variant check inside the handlers to fake one.
+    if variant == "b":
 
-    @app.post("/branch", response_model=None)
-    def branch_selected(
-        request: Request, mid: str = Form(...), branch: str = Form(...)
-    ) -> HTMLResponse | RedirectResponse:
-        if (resp := apply_fault(request)) is not None:
-            return resp
-        if (resp := require_login(request)) is not None:
-            return resp
-        result = resolve_or_error(request, mid)
-        if isinstance(result, HTMLResponse):
-            return result
-        # `branch` is accepted (and validated as present, via Form(...)) but not stored
-        # anywhere -- this step exists to be an inserted screen an automation must expect
-        # and click through, not to model real branch-routing logic.
-        return RedirectResponse(f"/member/{mid}", status_code=303)
+        @app.get("/branch", response_class=HTMLResponse)
+        def branch_select(request: Request, mid: str) -> HTMLResponse:
+            if (resp := apply_fault(request)) is not None:
+                return resp
+            if (resp := require_login(request)) is not None:
+                return resp
+            result = resolve_or_error(request, mid)
+            if isinstance(result, HTMLResponse):
+                return result
+            return templates.TemplateResponse(request, "branch.html", {"m": result})
+
+        @app.post("/branch", response_model=None)
+        def branch_selected(
+            request: Request, mid: str = Form(...), branch: str = Form(...)
+        ) -> HTMLResponse | RedirectResponse:
+            if (resp := apply_fault(request)) is not None:
+                return resp
+            if (resp := require_login(request)) is not None:
+                return resp
+            result = resolve_or_error(request, mid)
+            if isinstance(result, HTMLResponse):
+                return result
+            # `branch` is accepted (and validated as present, via Form(...)) but not
+            # stored anywhere -- this step exists to be an inserted screen an automation
+            # must expect and click through, not to model real branch-routing logic.
+            return RedirectResponse(f"/member/{mid}", status_code=303)
 
     @app.get("/subaccount/new", response_class=HTMLResponse)
     def subaccount_new(request: Request, mid: str) -> HTMLResponse:
