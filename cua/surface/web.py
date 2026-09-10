@@ -210,10 +210,16 @@ class WebSurface:
         return Observation(generation=self._generation, nodes=filtered, truncated=truncated)
 
     def capture(self) -> EvidenceFrame:
+        # Both halves of a capture raise on failure rather than degrading quietly. A
+        # screenshot that could not be taken is not the same thing as a screenshot that
+        # was never meant to exist, and this is evidence written to disk in a later phase
+        # -- a silently-missing image reads to whoever reviews /evidence/ as "nothing to
+        # see here" rather than "capture failed here", which is a worse failure than a
+        # loud one. Consistent with the raw-snapshot half just below, which always raised.
         try:
             image_png: bytes | None = self.page.screenshot()
-        except PlaywrightError:
-            image_png = None
+        except PlaywrightError as exc:
+            raise SurfaceError(f"capture() failed while screenshotting: {exc}") from exc
         try:
             raw = "\n".join(_snapshot_frame(frame) for frame in self.page.frames)
         except PlaywrightError as exc:
@@ -323,7 +329,10 @@ class WebSurface:
             dialog = self._pending_dialog
             if dialog is None:
                 return ActionResult(ok=False, action=action, read_value=None)
-            dialog.dismiss()
+            try:
+                dialog.dismiss()
+            except PlaywrightError as exc:
+                raise SurfaceError(f"dismiss_dialog failed: {exc}") from exc
             self._pending_dialog = None
             return ActionResult(ok=True, action=action, read_value=None)
 
