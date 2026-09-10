@@ -45,3 +45,39 @@ def test_protected_nodes_never_carry_a_value() -> None:
             index=0, role="textbox", name="PIN", value="1234",
             state=NodeState(protected=True), surface_path=[seg("window", "main")],
         )
+
+
+def test_assigning_a_value_onto_a_protected_node_raises() -> None:
+    node = Node(
+        index=0, role="textbox", name="PIN", value=None,
+        state=NodeState(protected=True), surface_path=[seg("window", "main")],
+    )
+    with pytest.raises(ValidationError):
+        node.value = "1234"
+
+
+def test_marking_a_valued_node_protected_after_the_fact_raises() -> None:
+    node = Node(
+        index=0, role="textbox", name="PIN", value="1234",
+        state=NodeState(protected=False), surface_path=[seg("window", "main")],
+    )
+    with pytest.raises(ValidationError):
+        node.state = NodeState(protected=True)
+
+
+def test_role_name_locator_requires_a_role() -> None:
+    with pytest.raises(ValidationError):
+        Locator(
+            strategy="role_name", name="Search",
+            surface_path=[seg("window", "main")],
+            rationale="x", confidence="high",
+        )
+
+
+def test_text_locator_does_not_require_a_role() -> None:
+    loc = Locator(
+        strategy="text",
+        surface_path=[seg("window", "main")],
+        rationale="Matches the outcome banner by its visible text.", confidence="high",
+    )
+    assert loc.role is None
