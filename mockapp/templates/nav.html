@@ -2,6 +2,8 @@
 <table cellpadding="5" cellspacing="0" border="0">
   <tr><td><font size="2"><b>{{ brand }}</b></font></td></tr>
   <tr><td><font size="2"><a href="/search" target="content">Member Search</a></font></td></tr>
+  {# /servicing is a deliberate dead nav item (plausible legacy behavior, not an
+     oversight): no such route is registered, so this link 404s. Leave it dead. #}
   <tr><td><font size="2"><a href="/servicing" target="content">Account Servicing</a></font></td></tr>
 </table>
 </body></html>
