@@ -25,6 +25,12 @@ SESSION_COOKIE = "session"
 SESSION_MAX_REQUESTS_ENV = "MOCKAPP_SESSION_MAX_REQUESTS"
 DEFAULT_SESSION_MAX_REQUESTS = 20
 
+# A ledger of irreversible mutations (sub-account postings, account closures), module-level
+# rather than on app.state on purpose: it must persist across separate create_app() calls so
+# a test -- or a later phase's runner -- can prove that replaying a mutating request twice
+# records it twice. See subaccount_post/account_close below for what gets appended.
+LEDGER: list[dict[str, str]] = []
+
 
 @dataclass
 class Session:
@@ -174,5 +180,106 @@ def create_app(variant: str = "base") -> FastAPI:
                 request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
             )
         return TEMPLATES.TemplateResponse(request, "member.html", {"m": result})
+
+    @app.get("/subaccount/new", response_class=HTMLResponse)
+    def subaccount_new(request: Request, mid: str) -> HTMLResponse:
+        if (resp := apply_fault(request)) is not None:
+            return resp
+        if (resp := require_login(request)) is not None:
+            return resp
+        result = resolve_member(mid)
+        if result == NOT_FOUND_MESSAGE:
+            return TEMPLATES.TemplateResponse(
+                request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
+            )
+        if result == RESTRICTED_MESSAGE:
+            return TEMPLATES.TemplateResponse(
+                request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
+            )
+        return TEMPLATES.TemplateResponse(request, "subaccount_new.html", {"m": result})
+
+    @app.post("/subaccount/review", response_class=HTMLResponse)
+    def subaccount_review(
+        request: Request, mid: str = Form(...), kind: str = Form(...)
+    ) -> HTMLResponse:
+        if (resp := apply_fault(request)) is not None:
+            return resp
+        if (resp := require_login(request)) is not None:
+            return resp
+        result = resolve_member(mid)
+        if result == NOT_FOUND_MESSAGE:
+            return TEMPLATES.TemplateResponse(
+                request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
+            )
+        if result == RESTRICTED_MESSAGE:
+            return TEMPLATES.TemplateResponse(
+                request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
+            )
+        return TEMPLATES.TemplateResponse(
+            request, "subaccount_confirm.html", {"mid": mid, "kind": kind}
+        )
+
+    @app.post("/subaccount/post", response_class=HTMLResponse)
+    def subaccount_post(
+        request: Request, mid: str = Form(...), kind: str = Form(...)
+    ) -> HTMLResponse:
+        if (resp := apply_fault(request)) is not None:
+            return resp
+        if (resp := require_login(request)) is not None:
+            return resp
+        result = resolve_member(mid)
+        if result == NOT_FOUND_MESSAGE:
+            return TEMPLATES.TemplateResponse(
+                request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
+            )
+        if result == RESTRICTED_MESSAGE:
+            return TEMPLATES.TemplateResponse(
+                request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
+            )
+        # The irreversible action itself. Deliberately NOT idempotent: every call appends a
+        # new entry, even a byte-for-byte replay of the same mid/kind. A real teller system
+        # would not dedupe a double-click on "Post" for free, and this mock must not either
+        # -- a later phase's runner is responsible for refusing to blindly replay an action
+        # classified this way, and that logic has nothing to prove itself against if this
+        # route quietly protects itself.
+        LEDGER.append({"action": "open_subaccount", "mid": mid, "kind": kind})
+        return TEMPLATES.TemplateResponse(
+            request, "subaccount_done.html", {"mid": mid, "kind": kind}
+        )
+
+    @app.get("/statement/{member_id}", response_class=HTMLResponse)
+    def statement(request: Request, member_id: str) -> HTMLResponse:
+        if (resp := apply_fault(request)) is not None:
+            return resp
+        if (resp := require_login(request)) is not None:
+            return resp
+        result = resolve_member(member_id)
+        if result == NOT_FOUND_MESSAGE:
+            return TEMPLATES.TemplateResponse(
+                request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
+            )
+        if result == RESTRICTED_MESSAGE:
+            return TEMPLATES.TemplateResponse(
+                request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
+            )
+        return TEMPLATES.TemplateResponse(request, "statement.html", {"m": result})
+
+    @app.get("/account/close", response_class=HTMLResponse)
+    def account_close(request: Request, number: str) -> HTMLResponse:
+        if (resp := apply_fault(request)) is not None:
+            return resp
+        if (resp := require_login(request)) is not None:
+            return resp
+        # Deliberate hazard, not an oversight: this route mutates state (closes an account)
+        # in response to a GET. Real legacy back offices have routes exactly like this,
+        # written before "a GET must be safe" was taken seriously, and a computer-use
+        # automation that assumes every GET is a safe read will walk straight through it.
+        # A later phase's policy deny-rules are proven specifically against this route --
+        # do not "fix" it by moving the mutation behind a POST.
+        LEDGER.append({"action": "close_account", "number": number})
+        return HTMLResponse(
+            '<html><body><font size="4"><b>Account closed</b></font>'
+            f'<p><font size="2">Account {number} has been closed.</font></p></body></html>'
+        )
 
     return app

@@ -1,0 +1,12 @@
+<html><body>
+<font size="4"><b>Confirm new sub-account</b></font><br>
+<font size="2">Member {{ mid }} &nbsp; a new {{ kind }} account will be opened. This cannot be undone.</font>
+<br><br>
+<form method="post" action="/subaccount/post">
+<input type="hidden" name="mid" value="{{ mid }}">
+<input type="hidden" name="kind" value="{{ kind }}">
+<table border="0" cellpadding="6" cellspacing="0">
+  <tr><td><input type="submit" value="Post"></td></tr>
+</table>
+</form>
+</body></html>
