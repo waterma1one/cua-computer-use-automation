@@ -19,6 +19,22 @@ LOGIN_YAML = """\
 
 SECRET = "teller-demo-pw"
 
+# Same protected subtree as LOGIN_YAML, but preceded by an unrelated sibling row/cell whose
+# name coincidentally contains the secret substring, in its own subtree, before the protected
+# node's subtree. This is the case that distinguishes ancestor-scoped scrubbing (only R12's
+# actual ancestors get touched) from a global sweep (everything containing the substring gets
+# touched, wrongly blanking unrelated page text).
+LOGIN_YAML_WITH_UNRELATED_SIBLING = """\
+- table:
+  - rowgroup:
+    - row "Shipping teller-demo-pw Lane":
+      - cell "Shipping teller-demo-pw Lane"
+    - row "Password teller-demo-pw":
+      - cell "Password"
+      - cell "teller-demo-pw":
+        - textbox "Password": teller-demo-pw
+"""
+
 
 def nodes() -> list:
     return parse_aria_snapshot(FIXTURE, PATH)
@@ -77,6 +93,20 @@ def test_ancestor_names_are_scrubbed_of_the_protected_value() -> None:
     assert SECRET not in serialized
 
 
+def test_ancestor_scrub_leaves_an_unrelated_preceding_sibling_intact() -> None:
+    parsed = parse_aria_snapshot(LOGIN_YAML_WITH_UNRELATED_SIBLING, PATH)
+
+    password_row = next(n for n in parsed if n.role == "row" and "Password" in (n.name or ""))
+    assert SECRET not in (password_row.name or "")
+    assert password_row.name == "Password"
+
+    unrelated_row = next(n for n in parsed if n.role == "row" and "Shipping" in (n.name or ""))
+    assert unrelated_row.name == "Shipping teller-demo-pw Lane"
+
+    unrelated_cell = next(n for n in parsed if n.role == "cell" and "Shipping" in (n.name or ""))
+    assert unrelated_cell.name == "Shipping teller-demo-pw Lane"
+
+
 def test_word_boundary_matching_does_not_flag_unrelated_names() -> None:
     yaml_text = (
         '- textbox "Shipping address"\n'
@@ -97,6 +127,33 @@ def test_nested_node_depth_exceeds_its_containers() -> None:
     assert tables
     assert textboxes
     assert textboxes[0].depth > tables[0].depth
+
+
+def test_top_level_entries_are_depth_zero() -> None:
+    # The fixture has two top-level `table` entries. A flat document-position counter would
+    # give these 0 and 11 (or whatever their sequence index is); only true nesting depth
+    # resets the second one back to 0. This is exactly what a mutation test caught: a
+    # monotonically-increasing counter satisfies every other test in this file.
+    parsed = nodes()
+    tables = [n for n in parsed if n.role == "table"]
+    assert len(tables) == 2
+    assert all(n.depth == 0 for n in tables)
+
+
+def test_a_known_nested_chain_has_exact_depths() -> None:
+    # Exact values, not inequalities: table=0, rowgroup=1, row=2, cell=3, textbox=4, matching
+    # the fixture's real accessibility-tree nesting rather than any monotonic proxy for it.
+    parsed = nodes()
+    table = next(n for n in parsed if n.role == "table")
+    assert table.depth == 0
+    rowgroup = next(n for n in parsed if n.role == "rowgroup")
+    assert rowgroup.depth == 1
+    row = next(n for n in parsed if n.role == "row" and n.name == "Member ID")
+    assert row.depth == 2
+    cell = next(n for n in parsed if n.role == "cell" and n.name == "Member ID")
+    assert cell.depth == 3
+    textbox = next(n for n in parsed if n.role == "textbox" and n.name == "Member ID")
+    assert textbox.depth == 4
 
 
 def test_a_url_property_line_does_not_become_a_node() -> None:

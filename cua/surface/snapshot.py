@@ -182,6 +182,15 @@ def parse_aria_snapshot(
     several frames' nodes into one Observation can keep indices continuous across frames.
     Every returned node carries `surface_path` unmodified and `depth` set to its nesting level
     in the snapshot (0 for a top-level entry).
+
+    `yaml.safe_load` is deliberately unguarded here: a `yaml.YAMLError` from malformed input
+    is allowed to propagate rather than being caught and turned into an empty node list.
+    Totality is about tolerating unrecognized *entries* within otherwise well-formed YAML (an
+    unfamiliar line becomes an `unknown`-role node rather than raising), not about tolerating
+    broken YAML syntax. `aria_snapshot()` always emits well-formed YAML, so malformed input
+    here means something upstream is plumbed wrong, and a loud failure is the correct
+    response: silently degrading to an empty `Observation` would read to the discovery loop as
+    "this page has no controls," which is a worse failure than a crash.
     """
     data = yaml.safe_load(yaml_text)
     entries: list[_Entry] = []
