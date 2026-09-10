@@ -1,0 +1,16 @@
+- table:
+  - rowgroup:
+    - row "Member Search":
+      - cell "Member Search"
+    - row "Member ID":
+      - cell "Member ID"
+      - cell:
+        - textbox "Member ID"
+    - row "Search":
+      - cell "Search":
+        - button "Search"
+- table:
+  - rowgroup:
+    - row:
+      - cell:
+        - textbox
