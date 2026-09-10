@@ -1,7 +1,9 @@
 import pytest
 
+from cua.surface.base import SurfaceError
 from cua.surface.locators import ancestors_of, synthesize
 from cua.surface.models import Action
+from cua.surface.snapshot import parse_aria_snapshot
 from cua.surface.web import ObservationBudget, StaleObservationError, WebSurface
 from mockapp.app import DEFAULT_LOGIN_PASSWORD, DEFAULT_LOGIN_USER
 
@@ -105,33 +107,67 @@ def test_a_scoped_locator_resolves_to_the_right_duplicate_named_button(
     select_buttons = [n for n in obs.nodes if n.role == "button" and n.name == "Select"]
     assert len(select_buttons) == 2, "member 12345 must have exactly two accounts"
 
-    savings_row = next(
-        n for n in obs.nodes if n.role == "row" and n.name and n.name.startswith("Savings")
-    )
-    frame_nodes = [n for n in obs.nodes if n.surface_path == savings_row.surface_path]
-    savings_select = next(
-        button
-        for button in select_buttons
-        if savings_row in ancestors_of(button, frame_nodes)
-    )
+    def row_and_button(prefix: str):
+        row = next(
+            n for n in obs.nodes if n.role == "row" and n.name and n.name.startswith(prefix)
+        )
+        frame_nodes = [n for n in obs.nodes if n.surface_path == row.surface_path]
+        button = next(b for b in select_buttons if row in ancestors_of(b, frame_nodes))
+        return row, button
 
-    loc = synthesize(savings_select, obs.nodes)
+    savings_row, savings_select = row_and_button("Savings")
+    checking_row, checking_select = row_and_button("Checking")
+
+    savings_loc = synthesize(savings_select, obs.nodes)
+    checking_loc = synthesize(checking_select, obs.nodes)
     # R16: the nearest named ancestor of a Select button is its own enclosing cell, which
     # is *also* named "Select" (it contains nothing else) and so cannot disambiguate;
-    # `synthesize` must climb past it to the row, which is named "Savings ...". Asserting
-    # the synthesized scope specifically names the Savings row is what proves this
-    # resolves the *right* button rather than merely *a* unique one -- `result.node.index`
-    # is not usable for that comparison here: it comes from `resolve()`'s own independent,
-    # unfiltered re-snapshot of the frame, which uses a different index-numbering scheme
-    # than `observe()`'s filtered-and-renumbered Observation (fix round 1, Important 4),
-    # so the two were never guaranteed to agree on a raw index value for the same control.
-    assert loc.scope is not None
-    assert loc.scope.name is not None and loc.scope.name.startswith("Savings")
+    # `synthesize` must climb past it to the row, which is named "Savings ..." /
+    # "Checking ...". This much only proves `synthesize` picked the right scope, not that
+    # `resolve()` honours it -- both `result.node.role`/`.name` below are "button"/"Select"
+    # for *either* row by construction, so they cannot tell the two resolutions apart, and
+    # `result.node.index` is not usable either: it comes from `resolve()`'s own
+    # independent, unfiltered re-snapshot of the frame, a different numbering scheme than
+    # `observe()`'s filtered-and-renumbered Observation (fix round 1, Important 4).
+    assert savings_loc.scope is not None
+    assert savings_loc.scope.name is not None and savings_loc.scope.name.startswith("Savings")
+    assert checking_loc.scope is not None
+    assert checking_loc.scope.name is not None and checking_loc.scope.name.startswith("Checking")
 
-    result = surface.resolve(loc)
-    assert result.kind == "unique"
-    assert result.node.role == "button"
-    assert result.node.name == "Select"
+    savings_result = surface.resolve(savings_loc)
+    checking_result = surface.resolve(checking_loc)
+    assert savings_result.kind == "unique"
+    assert checking_result.kind == "unique"
+
+    # Both resolve() calls above independently re-snapshot and re-parse the same,
+    # unchanged live page, so -- unlike observe()'s renumbered indices -- their raw index
+    # numbering is directly comparable: two parses of identical raw YAML assign identical
+    # indices to identical positions. Resolving the two scoped locators to genuinely
+    # different buttons must therefore land on genuinely different indices.
+    assert savings_result.node.index != checking_result.node.index
+
+    # And each resolved node's enclosing row -- checked with the pure layer's own
+    # containment helper (`ancestors_of`), against a snapshot parsed the same way
+    # resolve() parses its own, rather than re-deriving containment or reusing observe()'s
+    # differently-numbered Observation -- is the row it was scoped to, not the other one.
+    frame = browser_page.main_frame
+    raw = frame.locator(":root").aria_snapshot()
+    fresh_nodes = parse_aria_snapshot(raw, savings_loc.surface_path, start_index=0)
+
+    savings_ancestors = ancestors_of(savings_result.node, fresh_nodes)
+    checking_ancestors = ancestors_of(checking_result.node, fresh_nodes)
+    assert any(
+        a.role == "row" and a.name and a.name.startswith("Savings") for a in savings_ancestors
+    )
+    assert any(
+        a.role == "row" and a.name and a.name.startswith("Checking") for a in checking_ancestors
+    )
+    assert not any(
+        a.role == "row" and a.name and a.name.startswith("Checking") for a in savings_ancestors
+    )
+    assert not any(
+        a.role == "row" and a.name and a.name.startswith("Savings") for a in checking_ancestors
+    )
 
 
 # Fix round 1, Important 1: resolve(...).kind == "unique" alone cannot see a bug in the
@@ -200,6 +236,58 @@ def test_navigating_into_a_pending_dialog_reports_it_then_recovers(
 
     recovered = surface.act(Action(kind="navigate", locator=None, value=live_mockapp + "/search"))
     assert recovered.ok is True
+
+
+# Fix round 2, Item 1 (completes R21): `dialog.dismiss()` was the one Playwright call site
+# in `act()` left unwrapped. Forcing an already-handled dialog back into the surface's
+# private `_pending_dialog` -- the same route used to provoke this live -- must raise
+# `SurfaceError`, not the raw Playwright exception type: nothing outside `cua/surface/` is
+# allowed to import Playwright to catch that type.
+def test_dismiss_dialog_translates_a_playwright_failure_to_surfaceerror(
+    live_mockapp, browser_page
+) -> None:
+    _login(browser_page, live_mockapp)
+    surface = WebSurface(browser_page, ObservationBudget(max_nodes=200))
+
+    blocked = surface.act(
+        Action(kind="navigate", locator=None, value=live_mockapp + "/search?fault=dialog")
+    )
+    assert blocked.ok is False
+
+    dialog = surface._pending_dialog
+    assert dialog is not None
+    dialog.dismiss()  # handle it for real...
+    surface._pending_dialog = dialog  # ...then force the surface to think it is still pending
+
+    with pytest.raises(SurfaceError):
+        surface.act(Action(kind="dismiss_dialog", locator=None, value=None))
+
+
+# Fix round 2, Item 2: capture()'s screenshot path used to swallow a PlaywrightError into
+# a silent `image_png=None`, while the raw-snapshot path two lines below correctly raised.
+# Evidence that could not be captured is not the same as evidence that is absent -- phase
+# 4 writes these frames to /evidence/, where a silently-missing screenshot reads as
+# "nothing to see" rather than "capture failed". Both paths now raise SurfaceError.
+def test_capture_translates_a_screenshot_failure_to_surfaceerror(
+    live_mockapp, browser_page, monkeypatch
+) -> None:
+    from playwright.sync_api import Error as PlaywrightError
+
+    browser_page.goto(live_mockapp + "/login")
+    surface = WebSurface(browser_page, ObservationBudget(max_nodes=200))
+
+    def _boom(**kwargs: object) -> bytes:
+        raise PlaywrightError("synthetic screenshot failure")
+
+    # Only screenshot() fails; the raw-snapshot path (frame.locator(":root")
+    # .aria_snapshot()) is left fully functional, so this isolates the screenshot path
+    # specifically rather than failing both at once for an unrelated reason (e.g. a
+    # closed page, which would raise from the snapshot path too and pass this test even
+    # without the fix).
+    monkeypatch.setattr(browser_page, "screenshot", _boom)
+
+    with pytest.raises(SurfaceError):
+        surface.capture()
 
 
 # Fix round 1, Important 3: act_on_index's `action: str` parameter has nowhere to carry a
