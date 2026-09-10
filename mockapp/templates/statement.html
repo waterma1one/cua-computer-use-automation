@@ -1,0 +1,11 @@
+<html><body>
+<font size="4"><b>Account Statement</b></font><br>
+<font size="2">Member {{ m.member_id }} &nbsp; {{ m.name }} &nbsp; SSN {{ m.ssn }}</font>
+<br><br>
+<table border="1" cellpadding="5" cellspacing="0">
+  <tr><td><b>Type</b></td><td><b>Number</b></td><td><b>Balance</b></td></tr>
+  {% for a in m.accounts %}
+  <tr><td>{{ a.kind }}</td><td>{{ a.number }}</td><td>{{ a.balance }}</td></tr>
+  {% endfor %}
+</table>
+</body></html>

@@ -1,0 +1,21 @@
+<html><body>
+<font size="4"><b>Open sub-account</b></font><br>
+<font size="2">Member {{ m.member_id }} &nbsp; {{ m.name }}</font>
+<br><br>
+<form method="post" action="/subaccount/review">
+<input type="hidden" name="mid" value="{{ m.member_id }}">
+<table border="0" cellpadding="6" cellspacing="0">
+  <tr>
+    <td><font size="2">Account type</font></td>
+    <td>
+      <select name="kind" title="Account type">
+        <option value="Savings">Savings</option>
+        <option value="Checking">Checking</option>
+        <option value="Money Market">Money Market</option>
+      </select>
+    </td>
+  </tr>
+  <tr><td colspan="2"><input type="submit" value="Continue"></td></tr>
+</table>
+</form>
+</body></html>
