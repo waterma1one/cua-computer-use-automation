@@ -90,7 +90,10 @@ def test_valid_login_grants_access(client: Callable[..., TestClient]) -> None:
 def test_invalid_login_is_rejected(client: Callable[..., TestClient]) -> None:
     c = client()
     r = c.post("/login", data={"user": "teller", "password": "wrong"})
-    assert "Sign in" in r.text
+    # "Sign in" alone does not pin this: it is the login page's heading and is equally
+    # true of the unerrored form. The actual error message is what a later escalation
+    # handler matches to tell bad credentials from an expired session, so assert that.
+    assert "Invalid username or password" in r.text
     r = c.get("/search")
     assert "Sign in" in r.text, "a rejected login must not grant a session"
 
