@@ -1,5 +1,6 @@
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
+import pytest
 from fastapi.testclient import TestClient
 
 from mockapp import app as app_module
@@ -9,12 +10,24 @@ from mockapp import app as app_module
 # fixture rather than a bare client. LEDGER is a module-level list (not app state) so it
 # survives across the separate create_app() calls each fixture invocation makes -- that
 # is what lets this file prove the flow is genuinely not idempotent.
+#
+# LEDGER is shared, unmanaged module state -- unlike app.state.sessions, nothing resets it
+# between tests on its own. Isolation is therefore this file's responsibility, not
+# something each test can be trusted to remember individually, so it is handled once here
+# with an autouse fixture rather than a per-test `.clear()` call. Kept local to this
+# module (not conftest.py) because LEDGER is only touched by these tests.
+
+
+@pytest.fixture(autouse=True)
+def _clear_ledger() -> Iterator[None]:
+    app_module.LEDGER.clear()
+    yield
+    app_module.LEDGER.clear()
 
 
 def test_posting_a_subaccount_is_irreversible_and_recorded(
     signed_in: Callable[..., TestClient],
 ) -> None:
-    app_module.LEDGER.clear()
     c = signed_in()
     review = c.post("/subaccount/review", data={"mid": "12345", "kind": "Savings"})
     assert "Confirm new sub-account" in review.text
@@ -24,7 +37,6 @@ def test_posting_a_subaccount_is_irreversible_and_recorded(
 
 
 def test_posting_twice_creates_two_entries(signed_in: Callable[..., TestClient]) -> None:
-    app_module.LEDGER.clear()
     c = signed_in()
     for _ in range(2):
         c.post("/subaccount/post", data={"mid": "12345", "kind": "Savings"})
@@ -45,7 +57,6 @@ def test_subaccount_flow_is_denied_for_a_restricted_member(
 def test_a_fault_can_break_the_irreversible_flow_mid_post(
     signed_in: Callable[..., TestClient],
 ) -> None:
-    app_module.LEDGER.clear()
     c = signed_in()
     r = c.post("/subaccount/post?fault=error_500", data={"mid": "12345", "kind": "Savings"})
     assert r.status_code == 500
