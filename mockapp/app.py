@@ -209,7 +209,7 @@ def create_app(variant: str = "base") -> FastAPI:
         expected_password = os.environ.get(LOGIN_PASSWORD_ENV, DEFAULT_LOGIN_PASSWORD)
         if user != expected_user or password != expected_password:
             return RedirectResponse("/login?error=Invalid+username+or+password", status_code=303)
-        max_requests = int(os.environ.get(SESSION_MAX_REQUESTS_ENV, DEFAULT_SESSION_MAX_REQUESTS))
+        max_requests = int(os.environ.get(SESSION_MAX_REQUESTS_ENV) or DEFAULT_SESSION_MAX_REQUESTS)
         token = secrets.token_urlsafe(16)
         app.state.sessions[token] = Session(remaining=max_requests)
         response = RedirectResponse("/search", status_code=303)

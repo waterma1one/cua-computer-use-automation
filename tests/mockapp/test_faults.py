@@ -75,6 +75,30 @@ def test_fault_can_be_set_per_app_via_environment_variable(
     assert "Scheduled maintenance" in r.text
 
 
+def test_slow_fault_survives_an_empty_env_var_value(
+    client: Callable[..., TestClient], monkeypatch
+) -> None:
+    # .env.example ships MOCKAPP_SLOW_FAULT_MS empty; `set -a; source .env` therefore
+    # exports it as the empty string, not unset. int(os.environ.get(VAR, DEFAULT)) treats
+    # that as present and calls int(""), which raises -- and that crash degrades into
+    # looking exactly like error_500, so the fault delivered is not the one requested.
+    monkeypatch.setenv("MOCKAPP_SLOW_FAULT_MS", "")
+    from mockapp import faults
+
+    monkeypatch.setattr(faults, "SLOW_FAULT_MS", 10)
+    r = client().get("/member/12345?fault=slow")
+    assert r.status_code == 200, "an empty override must fall back to the default, not crash"
+
+
+def test_session_budget_survives_an_empty_env_var_value(
+    client: Callable[..., TestClient], monkeypatch
+) -> None:
+    monkeypatch.setenv("MOCKAPP_SESSION_MAX_REQUESTS", "")
+    c = client()
+    r = c.post("/login", data={"user": "teller", "password": "teller-demo-pw"})
+    assert "Member Search" in r.text, "an empty override must fall back to the default, not crash"
+
+
 def test_session_expires_after_the_configured_request_budget(
     client: Callable[..., TestClient], monkeypatch
 ) -> None:

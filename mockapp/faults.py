@@ -55,7 +55,7 @@ NAMES = frozenset(_BOOL_FIELDS) | {"slow"}
 
 def _build(name: str | None) -> FaultConfig:
     if name == "slow":
-        slow_ms = int(os.environ.get(SLOW_FAULT_MS_ENV, SLOW_FAULT_MS))
+        slow_ms = int(os.environ.get(SLOW_FAULT_MS_ENV) or SLOW_FAULT_MS)
         return FaultConfig(slow_ms=slow_ms)
     if name in _BOOL_FIELDS:
         return FaultConfig(**{name: True})
