@@ -67,6 +67,35 @@ def test_invalid_login_is_rejected(client: Callable[..., TestClient]) -> None:
     assert "Sign in" in r.text, "a rejected login must not grant a session"
 
 
+def test_unrecognized_fault_name_fails_loudly(client: Callable[..., TestClient]) -> None:
+    # A typo (?fault=deny instead of ?fault=denied) must not silently render a normal
+    # page -- for a fixture whose job is reproducible evidence, a typo that produces a
+    # green result is the worst possible failure mode.
+    r = client().get("/member/12345?fault=deny")
+    assert r.status_code == 400
+    assert "deny" in r.text
+
+
+def test_another_unrecognized_fault_name_also_fails_loudly(
+    client: Callable[..., TestClient],
+) -> None:
+    r = client().get("/member/12345?fault=notfound")
+    assert r.status_code == 400
+    assert "notfound" in r.text
+
+
+def test_absent_fault_param_still_means_no_fault(client: Callable[..., TestClient]) -> None:
+    r = client().get("/member/12345")
+    assert r.status_code == 200
+    assert "Sign in" in r.text, "unauthenticated, not faulted -- the ordinary login redirect"
+
+
+def test_empty_fault_param_still_means_no_fault(client: Callable[..., TestClient]) -> None:
+    r = client().get("/member/12345?fault=")
+    assert r.status_code == 200
+    assert "Sign in" in r.text
+
+
 def test_fault_can_be_set_per_app_via_environment_variable(
     client: Callable[..., TestClient], monkeypatch
 ) -> None:
