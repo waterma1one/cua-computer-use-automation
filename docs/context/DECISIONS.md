@@ -314,3 +314,20 @@ AI (`genai.Client(vertexai=True, project=..., location=...)`) using the OAuth-st
 already present, if that is in fact a Vertex-scoped token — that determination was out of scope
 here. Do not assume the call shape recorded above is end-to-end proven; re-run the equivalent of
 this probe with working credentials as the first step of phase 7, not as an afterthought.
+
+## D12 — Outcome classification keys on page text, never on status code
+The mock app carries the same declared business outcome at two different status codes,
+depending on which path produced it: an unknown member is `200` via `POST /search`
+(a POST-redirect-GET landing back on the search page with an error message) but `404`
+via `GET /member/{id}`; a restricted member is `200` via search but `403` via detail.
+The final whole-branch review flagged this as an inconsistency and asked for a ruling.
+**Ruling: keep the behavior, document the rule.** The search page's `200` is realistic
+legacy behavior -- a form re-render carrying an inline error is exactly what a
+server-rendered POST-redirect-GET flow looks like -- and changing it to match the detail
+routes would rewrite already-tested Task 2 outcomes for no gain.
+**The rule:** outcome classification keys on page text, never on status code, because the
+same declared business outcome legitimately arrives with different statuses depending on
+the path that produced it. This also matches how the automation actually perceives the
+page: through the accessibility snapshot (page content), not the response line.
+**Cost accepted:** if a later phase wants status-code-based classification, it must
+revisit this decision explicitly rather than assume one status per outcome.
