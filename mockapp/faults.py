@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 FAULT_QUERY_PARAM = "fault"
 FAULT_ENV_VAR = "MOCKAPP_FAULT"
@@ -48,18 +48,32 @@ class FaultConfig:
 
 
 # Maps a `?fault=<name>` token to the FaultConfig field it sets. "slow" sets slow_ms to
-# SLOW_FAULT_MS rather than a bool, since the field carries a duration.
-_BOOL_FIELDS = ("not_found", "denied", "validation", "expired", "dialog", "notice", "error_500")
+# SLOW_FAULT_MS rather than a bool, since the field carries a duration. Derived from the
+# dataclass's own fields (rather than hand-maintained) so a future bool field added to
+# FaultConfig is picked up automatically instead of silently staying unreachable by name.
+_BOOL_FIELDS = tuple(f.name for f in fields(FaultConfig) if f.type == "bool")
 NAMES = frozenset(_BOOL_FIELDS) | {"slow"}
 
 
 def _build(name: str | None) -> FaultConfig:
+    if not name:
+        return FaultConfig()
+    if name not in NAMES:
+        # An unrecognized non-empty fault name must fail loudly, not silently render a
+        # normal page: for a fixture whose entire job is reproducible evidence, a typo
+        # that quietly produces a green result is the worst possible failure mode. An
+        # HTTPException surfaces as a plain, unambiguous error response rather than a
+        # bare crash, and is deliberately distinct from the 500 `error_500` itself
+        # returns, so the two are never confused for one another.
+        known = ", ".join(sorted(NAMES))
+        raise HTTPException(
+            status_code=400,
+            detail=f"mockapp: unrecognized fault {name!r} (expected one of: {known})",
+        )
     if name == "slow":
         slow_ms = int(os.environ.get(SLOW_FAULT_MS_ENV) or SLOW_FAULT_MS)
         return FaultConfig(slow_ms=slow_ms)
-    if name in _BOOL_FIELDS:
-        return FaultConfig(**{name: True})
-    return FaultConfig()
+    return FaultConfig(**{name: True})
 
 
 def resolve_fault(request: Request) -> FaultConfig:

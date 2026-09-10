@@ -27,12 +27,12 @@ import sys
 
 import uvicorn
 
-from mockapp.app import create_app
+from mockapp.app import BRANDS, create_app
 
 HOST = "127.0.0.1"
 BASE_PORT = 8811
 VARIANT_B_PORT = 8812
-KNOWN_VARIANTS = ("base", "b")
+KNOWN_VARIANTS = tuple(BRANDS)
 
 
 def resolve_variant_and_port(argv: list[str]) -> tuple[str, int]:
