@@ -211,6 +211,12 @@ def create_app(variant: str = "base") -> FastAPI:
             return RedirectResponse(
                 "/search?error=You+are+not+authorized+to+view+this+record", status_code=303
             )
+        # Variant B inserts an extra "Select branch" step between a successful search and
+        # the member detail screen; the base variant goes straight to the member. This is
+        # the one place that decision is made -- the /branch routes below exist for both
+        # variants, but only variant B's search flow ever links to them.
+        if variant == "b":
+            return RedirectResponse(f"/branch?mid={mid}", status_code=303)
         return RedirectResponse(f"/member/{mid}", status_code=303)
 
     @app.get("/member/{member_id}", response_class=HTMLResponse)
@@ -223,6 +229,33 @@ def create_app(variant: str = "base") -> FastAPI:
         if isinstance(result, HTMLResponse):
             return result
         return templates.TemplateResponse(request, "member.html", {"m": result})
+
+    @app.get("/branch", response_class=HTMLResponse)
+    def branch_select(request: Request, mid: str) -> HTMLResponse:
+        if (resp := apply_fault(request)) is not None:
+            return resp
+        if (resp := require_login(request)) is not None:
+            return resp
+        result = resolve_or_error(request, mid)
+        if isinstance(result, HTMLResponse):
+            return result
+        return templates.TemplateResponse(request, "branch.html", {"m": result})
+
+    @app.post("/branch", response_model=None)
+    def branch_selected(
+        request: Request, mid: str = Form(...), branch: str = Form(...)
+    ) -> HTMLResponse | RedirectResponse:
+        if (resp := apply_fault(request)) is not None:
+            return resp
+        if (resp := require_login(request)) is not None:
+            return resp
+        result = resolve_or_error(request, mid)
+        if isinstance(result, HTMLResponse):
+            return result
+        # `branch` is accepted (and validated as present, via Form(...)) but not stored
+        # anywhere -- this step exists to be an inserted screen an automation must expect
+        # and click through, not to model real branch-routing logic.
+        return RedirectResponse(f"/member/{mid}", status_code=303)
 
     @app.get("/subaccount/new", response_class=HTMLResponse)
     def subaccount_new(request: Request, mid: str) -> HTMLResponse:
