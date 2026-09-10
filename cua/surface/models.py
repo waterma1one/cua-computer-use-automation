@@ -108,12 +108,16 @@ class Node(BaseModel):
         # What this guarantee actually covers: normal construction (`Node(...)`),
         # `Node.model_validate(...)`, and -- because `validate_assignment=True` is set
         # above -- ordinary attribute assignment (`node.value = ...`, or replacing
-        # `node.state` wholesale). It deliberately does NOT cover `Node.model_construct(...)`
-        # or `node.model_copy(update={...})`: both bypass validation entirely by Pydantic's
-        # design, so a Node built or copied through either can end up protected with a live
-        # value with no error raised. Anything reaching for `model_copy(update=...)` on a
-        # Node -- a redaction step or an evidence writer are the obvious candidates -- must
-        # not assume this validator will catch a mistake there.
+        # `node.state` wholesale). It deliberately does NOT cover three bypasses:
+        # `Node.model_construct(...)`, `node.model_copy(update={...})` -- both skip
+        # validation entirely by Pydantic's design -- and mutating a field on the nested
+        # `NodeState` in place (`node.state.protected = True`), which does not re-run this
+        # validator because `validate_assignment` fires on `Node`'s own field assignments,
+        # not on mutations of an object reached through one of them. A Node built, copied,
+        # or mutated through any of the three can end up protected with a live value with
+        # no error raised. Anything reaching for `model_copy(update=...)` on a Node -- a
+        # redaction step or an evidence writer are the obvious candidates -- must not
+        # assume this validator will catch a mistake there.
         if self.state.protected and self.value is not None:
             raise ValueError("a protected node must not carry a value")
         return self
