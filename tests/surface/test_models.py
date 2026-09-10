@@ -81,3 +81,20 @@ def test_text_locator_does_not_require_a_role() -> None:
         rationale="Matches the outcome banner by its visible text.", confidence="high",
     )
     assert loc.role is None
+
+
+def test_a_fallback_in_a_different_surface_path_is_rejected() -> None:
+    # R18: a fallback must carry the same surface_path as the locator it backs, or the
+    # recovery path reopens the exact cross-frame ambiguity R8 closes on the primary path.
+    fallback = Locator(
+        role="button", name="Select",
+        surface_path=[seg("window", "main"), seg("frame", "other")],
+        rationale="a fallback living in a different frame", confidence="high",
+    )
+    with pytest.raises(ValidationError):
+        Locator(
+            role="button", name="Select",
+            surface_path=[seg("window", "main"), seg("frame", "content")],
+            fallbacks=[fallback],
+            rationale="x", confidence="high",
+        )

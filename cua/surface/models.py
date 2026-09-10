@@ -67,6 +67,23 @@ class Locator(BaseModel):
             raise ValueError("a role_name locator requires a role")
         return self
 
+    @model_validator(mode="after")
+    def _fallbacks_share_this_locators_surface_path(self) -> Locator:
+        # R18: a fallback must resolve against the same surface as the locator it backs.
+        # R8's whole premise is that identity and uniqueness are scoped per surface_path;
+        # letting a fallback cross that boundary would silently reopen the exact
+        # same-name-different-frame ambiguity R8 exists to close, and it would do so on the
+        # recovery path, where a human is least likely to be watching. Enforced here, at
+        # construction, so a cross-frame fallback cannot exist at all -- not merely rejected
+        # later at resolution time.
+        for fallback in self.fallbacks:
+            if fallback.surface_path != self.surface_path:
+                raise ValueError(
+                    "a fallback locator must carry the same surface_path as the locator "
+                    "it backs"
+                )
+        return self
+
 
 class NodeState(BaseModel):
     """Boolean flags observed for a control at snapshot time."""

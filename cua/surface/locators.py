@@ -43,6 +43,13 @@ def ancestors_of(node: Node, nodes: list[Node]) -> list[Node]:
     `nodes` should already be filtered to one `surface_path` (as `synthesize` and
     `resolve_against` both do before calling this) -- containment across frames is
     meaningless, since two frames' node lists are simply concatenated, not nested.
+
+    Invariant this relies on and does not check: `nodes` must be in true document
+    (pre-order) order -- the order `parse_aria_snapshot` emits, where every node's
+    ancestors precede it and depth only rises and falls with actual nesting. A caller that
+    passes a reordered or arbitrarily filtered list (sorted by name, shuffled, every third
+    node dropped) gets silently wrong ancestors back, not an error: the depth/position walk
+    has no way to detect that its input no longer reflects the real tree.
     """
     position = _position_of(node, nodes)
     running_min_depth = node.depth
@@ -76,6 +83,15 @@ def _name_matches(candidate: str | None, name: str | None, name_match: NameMatch
     return candidate.startswith(name)  # "prefix"
 
 
+def _text_of(node: Node) -> str | None:
+    """The text a `text`-strategy locator matches against: the accessible name when there
+    is one, otherwise the node's literal value. `synthesize` only ever builds a `text`
+    locator from `node.value` when `node.name` is already falsy (see `synthesize`), so this
+    mirrors that same preference rather than introducing a second rule.
+    """
+    return node.name if node.name else node.value
+
+
 def _matches_locator(node: Node, loc: Locator) -> bool:
     """Whether `node` satisfies `loc`'s own match criteria (role/name), ignoring scope.
 
@@ -84,10 +100,16 @@ def _matches_locator(node: Node, loc: Locator) -> bool:
     target application carries no ARIA roles for the outcome/recovery text they match), so
     the role check is skipped rather than failing on a role that was never set. `ax_path`
     locators may or may not carry a role, so the same "skip if None" rule covers both.
+
+    `text`-strategy locators match against `_text_of` (name, falling back to value) rather
+    than `node.name` alone: a `text` locator synthesized from an unnamed node's `value`
+    (phase 1's pinned unnamed-input hostile case) must be able to match that same node
+    again, and `node.name` would never equal that value.
     """
     if loc.role is not None and node.role != loc.role:
         return False
-    return _name_matches(node.name, loc.name, loc.name_match)
+    candidate = _text_of(node) if loc.strategy == "text" else node.name
+    return _name_matches(candidate, loc.name, loc.name_match)
 
 
 def _contained_in(node: Node, scope: Locator, nodes: list[Node]) -> bool:
@@ -215,9 +237,20 @@ def resolve_against(loc: Locator, nodes: list[Node]) -> Resolution:
     `ancestors_of` containment rule `synthesize` uses) and `ordinal`. Exactly one match is
     checked against `require`; a failing precondition returns `precondition_failed`, never
     `unique` -- a found-but-disabled control resolving as success is a silent-failure class
-    this function exists to close off. Zero matches try `fallbacks` in order, then report
-    `not_found` with an actionable reason. More than one match is always `ambiguous`: this
-    function never guesses between candidates.
+    this function exists to close off.
+
+    Neither zero matches nor more than one is final until `fallbacks` have been tried, in
+    order (spec §3.4 rule 3: "ambiguous tries scope, then ordinal, then fallbacks, then
+    fails hard" -- scope and ordinal are already baked into `loc` at synthesis time, so what
+    remains at resolution time is the fallback list). A fallback that itself resolves to
+    anything other than `not_found` -- `unique`, but also `precondition_failed` or
+    `ambiguous` in turn -- is returned as-is rather than collapsed into a generic `not_found`:
+    a found-but-disabled control reached through a fallback is exactly the silent-failure
+    class `require` exists to catch, and folding it into "not found" would hide it from
+    whoever is debugging the replay. Only once every fallback has come back `not_found` (or
+    there are none) does this function give up: `ambiguous` if the primary locator itself had
+    more than one match, `not_found` otherwise, with a reason naming every fallback that was
+    tried and how it failed.
     """
     candidates = [n for n in nodes if n.surface_path == loc.surface_path]
     matches = [n for n in candidates if _matches_locator(n, loc)]
@@ -235,16 +268,23 @@ def resolve_against(loc: Locator, nodes: list[Node]) -> Resolution:
             return PreconditionFailed(which=which)
         return Unique(node=node)
 
-    if not matches:
-        for fallback in loc.fallbacks:
-            result = resolve_against(fallback, nodes)
-            if result.kind == "unique":
-                return result
-        return NotFound(
-            reason=(
-                f"no node matched strategy={loc.strategy!r} role={loc.role!r} "
-                f"name={loc.name!r} on surface_path={loc.surface_path!r}"
-            )
-        )
+    fallback_failures: list[str] = []
+    for fallback in loc.fallbacks:
+        result = resolve_against(fallback, nodes)
+        if result.kind != "not_found":
+            return result
+        fallback_failures.append(result.reason)
 
-    return Ambiguous(count=len(matches))
+    if matches:
+        return Ambiguous(count=len(matches))
+
+    reason = (
+        f"no node matched strategy={loc.strategy!r} role={loc.role!r} "
+        f"name={loc.name!r} on surface_path={loc.surface_path!r}"
+    )
+    if fallback_failures:
+        reason += (
+            f"; {len(fallback_failures)} fallback(s) also tried and failed to match: "
+            + "; ".join(fallback_failures)
+        )
+    return NotFound(reason=reason)
