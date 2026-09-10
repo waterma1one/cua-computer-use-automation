@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from mockapp import faults
-from mockapp.data import NOT_FOUND_MESSAGE, RESTRICTED_MESSAGE, resolve_member
+from mockapp.data import NOT_FOUND_MESSAGE, RESTRICTED_MESSAGE, Member, resolve_member
 
 TEMPLATES_ROOT = Path(__file__).parent
 BASE_TEMPLATE_DIR = TEMPLATES_ROOT / "templates"
@@ -111,6 +111,30 @@ def apply_fault(request: Request) -> HTMLResponse | None:
     return None
 
 
+def resolve_or_error(request: Request, member_id: str) -> Member | HTMLResponse:
+    """Resolve `member_id` to a `Member`, or the rendered not-found/restricted response.
+
+    Every route that takes a member_id calls this (after `apply_fault`/`require_login`)
+    instead of calling `resolve_member` and re-deriving the same "unknown record" /
+    "restricted record" rendering itself. It wraps `resolve_member` -- the single place
+    that decides visibility -- rather than replacing it; this only collapses what every
+    caller did with the result. A caller checks the return with `isinstance(result,
+    HTMLResponse)` and returns it immediately when true, otherwise treats `result` as the
+    `Member`.
+    """
+    templates: Jinja2Templates = request.app.state.templates
+    result = resolve_member(member_id)
+    if result == NOT_FOUND_MESSAGE:
+        return templates.TemplateResponse(
+            request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
+        )
+    if result == RESTRICTED_MESSAGE:
+        return templates.TemplateResponse(
+            request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
+        )
+    return result
+
+
 def create_app(variant: str = "base") -> FastAPI:
     app = FastAPI(title=f"mockapp:{variant}")
     app.state.variant = variant
@@ -195,15 +219,9 @@ def create_app(variant: str = "base") -> FastAPI:
             return resp
         if (resp := require_login(request)) is not None:
             return resp
-        result = resolve_member(member_id)
-        if result == NOT_FOUND_MESSAGE:
-            return templates.TemplateResponse(
-                request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
-            )
-        if result == RESTRICTED_MESSAGE:
-            return templates.TemplateResponse(
-                request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
-            )
+        result = resolve_or_error(request, member_id)
+        if isinstance(result, HTMLResponse):
+            return result
         return templates.TemplateResponse(request, "member.html", {"m": result})
 
     @app.get("/subaccount/new", response_class=HTMLResponse)
@@ -212,15 +230,9 @@ def create_app(variant: str = "base") -> FastAPI:
             return resp
         if (resp := require_login(request)) is not None:
             return resp
-        result = resolve_member(mid)
-        if result == NOT_FOUND_MESSAGE:
-            return templates.TemplateResponse(
-                request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
-            )
-        if result == RESTRICTED_MESSAGE:
-            return templates.TemplateResponse(
-                request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
-            )
+        result = resolve_or_error(request, mid)
+        if isinstance(result, HTMLResponse):
+            return result
         return templates.TemplateResponse(request, "subaccount_new.html", {"m": result})
 
     @app.post("/subaccount/review", response_class=HTMLResponse)
@@ -231,15 +243,9 @@ def create_app(variant: str = "base") -> FastAPI:
             return resp
         if (resp := require_login(request)) is not None:
             return resp
-        result = resolve_member(mid)
-        if result == NOT_FOUND_MESSAGE:
-            return templates.TemplateResponse(
-                request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
-            )
-        if result == RESTRICTED_MESSAGE:
-            return templates.TemplateResponse(
-                request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
-            )
+        result = resolve_or_error(request, mid)
+        if isinstance(result, HTMLResponse):
+            return result
         return templates.TemplateResponse(
             request, "subaccount_confirm.html", {"mid": mid, "kind": kind}
         )
@@ -252,15 +258,9 @@ def create_app(variant: str = "base") -> FastAPI:
             return resp
         if (resp := require_login(request)) is not None:
             return resp
-        result = resolve_member(mid)
-        if result == NOT_FOUND_MESSAGE:
-            return templates.TemplateResponse(
-                request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
-            )
-        if result == RESTRICTED_MESSAGE:
-            return templates.TemplateResponse(
-                request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
-            )
+        result = resolve_or_error(request, mid)
+        if isinstance(result, HTMLResponse):
+            return result
         # The irreversible action itself. Deliberately NOT idempotent: every call appends a
         # new entry, even a byte-for-byte replay of the same mid/kind. A real teller system
         # would not dedupe a double-click on "Post" for free, and this mock must not either
@@ -278,15 +278,9 @@ def create_app(variant: str = "base") -> FastAPI:
             return resp
         if (resp := require_login(request)) is not None:
             return resp
-        result = resolve_member(member_id)
-        if result == NOT_FOUND_MESSAGE:
-            return templates.TemplateResponse(
-                request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
-            )
-        if result == RESTRICTED_MESSAGE:
-            return templates.TemplateResponse(
-                request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
-            )
+        result = resolve_or_error(request, member_id)
+        if isinstance(result, HTMLResponse):
+            return result
         return templates.TemplateResponse(request, "statement.html", {"m": result})
 
     @app.get("/account/close", response_class=HTMLResponse)
