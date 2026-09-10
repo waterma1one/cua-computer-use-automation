@@ -12,7 +12,29 @@ from fastapi.templating import Jinja2Templates
 from mockapp import faults
 from mockapp.data import NOT_FOUND_MESSAGE, RESTRICTED_MESSAGE, resolve_member
 
-TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+TEMPLATES_ROOT = Path(__file__).parent
+BASE_TEMPLATE_DIR = TEMPLATES_ROOT / "templates"
+
+
+def _variant_template_dirs(variant: str) -> list[Path]:
+    """Search path for a variant's templates.
+
+    A variant's own override directory (`templates_<variant>/`) is searched first,
+    falling back to the base templates for anything it does not override -- Jinja2's
+    `FileSystemLoader` tries each directory in the list in order and returns the first
+    match it finds. The base variant has no override directory, so this resolves to
+    exactly `[BASE_TEMPLATE_DIR]`, identical to the single fixed directory Task 1 bound
+    `Jinja2Templates` to; that is what keeps variant A's rendered output byte-identical
+    after this refactor.
+    """
+    if variant == "base":
+        return [BASE_TEMPLATE_DIR]
+    return [TEMPLATES_ROOT / f"templates_{variant}", BASE_TEMPLATE_DIR]
+
+
+def _build_templates(variant: str) -> Jinja2Templates:
+    return Jinja2Templates(directory=_variant_template_dirs(variant))
+
 
 BRANDS = {"base": "Meridian Credit Union", "b": "Lakeshore Federal"}
 
@@ -57,12 +79,13 @@ def apply_fault(request: Request) -> HTMLResponse | None:
         if (resp := apply_fault(request)) is not None:
             return resp
     """
+    templates: Jinja2Templates = request.app.state.templates
     fault = faults.resolve_fault(request)
     faults.maybe_delay(fault)
     if fault.error_500:
         raise HTTPException(status_code=500, detail="Injected server error")
     if fault.expired:
-        return TEMPLATES.TemplateResponse(request, "expired.html", {})
+        return templates.TemplateResponse(request, "expired.html", {})
     if fault.notice:
         return HTMLResponse(
             '<html><body><font size="4"><b>Scheduled maintenance</b></font>'
@@ -70,15 +93,15 @@ def apply_fault(request: Request) -> HTMLResponse | None:
             "maintenance. Please try again shortly.</font></p></body></html>"
         )
     if fault.not_found:
-        return TEMPLATES.TemplateResponse(
+        return templates.TemplateResponse(
             request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
         )
     if fault.denied:
-        return TEMPLATES.TemplateResponse(
+        return templates.TemplateResponse(
             request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
         )
     if fault.validation:
-        return TEMPLATES.TemplateResponse(
+        return templates.TemplateResponse(
             request, "search.html", {"error": "Validation error"}, status_code=422
         )
     if fault.dialog:
@@ -93,6 +116,8 @@ def create_app(variant: str = "base") -> FastAPI:
     app.state.variant = variant
     app.state.sessions = {}
     brand = BRANDS[variant]
+    templates = _build_templates(variant)
+    app.state.templates = templates
 
     def session_status(request: Request) -> str:
         """Returns anonymous / expired / authenticated. Spends one request of budget."""
@@ -109,22 +134,22 @@ def create_app(variant: str = "base") -> FastAPI:
     def require_login(request: Request) -> HTMLResponse | RedirectResponse | None:
         status = session_status(request)
         if status == "expired":
-            return TEMPLATES.TemplateResponse(request, "expired.html", {})
+            return templates.TemplateResponse(request, "expired.html", {})
         if status == "anonymous":
             return RedirectResponse("/login", status_code=303)
         return None
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
-        return TEMPLATES.TemplateResponse(request, "frameset.html", {"brand": brand})
+        return templates.TemplateResponse(request, "frameset.html", {"brand": brand})
 
     @app.get("/nav", response_class=HTMLResponse)
     def nav(request: Request) -> HTMLResponse:
-        return TEMPLATES.TemplateResponse(request, "nav.html", {"brand": brand})
+        return templates.TemplateResponse(request, "nav.html", {"brand": brand})
 
     @app.get("/login", response_class=HTMLResponse)
     def login_form(request: Request, error: str | None = None) -> HTMLResponse:
-        return TEMPLATES.TemplateResponse(request, "login.html", {"error": error})
+        return templates.TemplateResponse(request, "login.html", {"error": error})
 
     @app.post("/login")
     def login(user: str = Form(...), password: str = Form(...)) -> RedirectResponse:
@@ -145,7 +170,7 @@ def create_app(variant: str = "base") -> FastAPI:
             return resp
         if (resp := require_login(request)) is not None:
             return resp
-        return TEMPLATES.TemplateResponse(request, "search.html", {"error": error})
+        return templates.TemplateResponse(request, "search.html", {"error": error})
 
     @app.post("/search", response_model=None)
     def search(request: Request, mid: str = Form(...)) -> HTMLResponse | RedirectResponse:
@@ -172,14 +197,14 @@ def create_app(variant: str = "base") -> FastAPI:
             return resp
         result = resolve_member(member_id)
         if result == NOT_FOUND_MESSAGE:
-            return TEMPLATES.TemplateResponse(
+            return templates.TemplateResponse(
                 request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
             )
         if result == RESTRICTED_MESSAGE:
-            return TEMPLATES.TemplateResponse(
+            return templates.TemplateResponse(
                 request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
             )
-        return TEMPLATES.TemplateResponse(request, "member.html", {"m": result})
+        return templates.TemplateResponse(request, "member.html", {"m": result})
 
     @app.get("/subaccount/new", response_class=HTMLResponse)
     def subaccount_new(request: Request, mid: str) -> HTMLResponse:
@@ -189,14 +214,14 @@ def create_app(variant: str = "base") -> FastAPI:
             return resp
         result = resolve_member(mid)
         if result == NOT_FOUND_MESSAGE:
-            return TEMPLATES.TemplateResponse(
+            return templates.TemplateResponse(
                 request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
             )
         if result == RESTRICTED_MESSAGE:
-            return TEMPLATES.TemplateResponse(
+            return templates.TemplateResponse(
                 request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
             )
-        return TEMPLATES.TemplateResponse(request, "subaccount_new.html", {"m": result})
+        return templates.TemplateResponse(request, "subaccount_new.html", {"m": result})
 
     @app.post("/subaccount/review", response_class=HTMLResponse)
     def subaccount_review(
@@ -208,14 +233,14 @@ def create_app(variant: str = "base") -> FastAPI:
             return resp
         result = resolve_member(mid)
         if result == NOT_FOUND_MESSAGE:
-            return TEMPLATES.TemplateResponse(
+            return templates.TemplateResponse(
                 request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
             )
         if result == RESTRICTED_MESSAGE:
-            return TEMPLATES.TemplateResponse(
+            return templates.TemplateResponse(
                 request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
             )
-        return TEMPLATES.TemplateResponse(
+        return templates.TemplateResponse(
             request, "subaccount_confirm.html", {"mid": mid, "kind": kind}
         )
 
@@ -229,11 +254,11 @@ def create_app(variant: str = "base") -> FastAPI:
             return resp
         result = resolve_member(mid)
         if result == NOT_FOUND_MESSAGE:
-            return TEMPLATES.TemplateResponse(
+            return templates.TemplateResponse(
                 request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
             )
         if result == RESTRICTED_MESSAGE:
-            return TEMPLATES.TemplateResponse(
+            return templates.TemplateResponse(
                 request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
             )
         # The irreversible action itself. Deliberately NOT idempotent: every call appends a
@@ -243,7 +268,7 @@ def create_app(variant: str = "base") -> FastAPI:
         # classified this way, and that logic has nothing to prove itself against if this
         # route quietly protects itself.
         LEDGER.append({"action": "open_subaccount", "mid": mid, "kind": kind})
-        return TEMPLATES.TemplateResponse(
+        return templates.TemplateResponse(
             request, "subaccount_done.html", {"mid": mid, "kind": kind}
         )
 
@@ -255,14 +280,14 @@ def create_app(variant: str = "base") -> FastAPI:
             return resp
         result = resolve_member(member_id)
         if result == NOT_FOUND_MESSAGE:
-            return TEMPLATES.TemplateResponse(
+            return templates.TemplateResponse(
                 request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
             )
         if result == RESTRICTED_MESSAGE:
-            return TEMPLATES.TemplateResponse(
+            return templates.TemplateResponse(
                 request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
             )
-        return TEMPLATES.TemplateResponse(request, "statement.html", {"m": result})
+        return templates.TemplateResponse(request, "statement.html", {"m": result})
 
     @app.get("/account/close", response_class=HTMLResponse)
     def account_close(request: Request, number: str) -> HTMLResponse:
