@@ -13,6 +13,11 @@ instead of letting uvicorn's own bind failure surface as a buried log line or, i
 something upstream were ever changed, a raw traceback. This is a best-effort check
 (there is an unavoidable, brief race between the probe and the real bind further down
 in uvicorn) -- good enough for a local dev runner, not a guarantee under contention.
+
+An argv value other than "base" or "b" is rejected the same way, before `create_app`
+is ever called: one line to stderr naming what was passed and what is valid, exit
+status 1. Without this check, a typo (`python -m mockapp bas`) would reach
+`create_app`'s `BRANDS[variant]` lookup and crash with an unhandled `KeyError`.
 """
 
 from __future__ import annotations
@@ -27,13 +32,18 @@ from mockapp.app import create_app
 HOST = "127.0.0.1"
 BASE_PORT = 8811
 VARIANT_B_PORT = 8812
+KNOWN_VARIANTS = ("base", "b")
 
 
 def resolve_variant_and_port(argv: list[str]) -> tuple[str, int]:
     """Pick the variant and its fixed port from argv (argv[0] is the program name).
 
-    Any argument other than "base" selects the non-base port; today that means "b",
-    the only other variant `create_app` knows about.
+    Any argument other than "base" is routed to the non-base port; today that means
+    "b", the only other variant `create_app` knows about. This function does not
+    validate the variant itself -- an argv value outside `KNOWN_VARIANTS` still
+    resolves here (to the "b" port) but is rejected by `main` before `create_app` is
+    ever called, so the unhandled `KeyError` `create_app`'s own `BRANDS[variant]`
+    lookup would otherwise raise never happens.
     """
     variant = argv[1] if len(argv) > 1 else "base"
     port = BASE_PORT if variant == "base" else VARIANT_B_PORT
@@ -53,6 +63,14 @@ def _port_is_free(host: str, port: int) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     variant, port = resolve_variant_and_port(sys.argv if argv is None else argv)
+
+    if variant not in KNOWN_VARIANTS:
+        print(
+            f"mockapp: unknown variant {variant!r} "
+            f"(expected one of: {', '.join(KNOWN_VARIANTS)}).",
+            file=sys.stderr,
+        )
+        return 1
 
     if not _port_is_free(HOST, port):
         print(

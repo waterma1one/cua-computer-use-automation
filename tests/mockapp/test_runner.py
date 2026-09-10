@@ -31,6 +31,17 @@ def test_variant_ports_are_distinct() -> None:
     assert runner.BASE_PORT != runner.VARIANT_B_PORT
 
 
+def test_main_reports_an_unknown_variant_without_crashing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = runner.main(["mockapp", "bas"])
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "unknown variant 'bas'" in err, "the message must name what was passed"
+    assert "base, b" in err, "the message must name the valid variants"
+
+
 def test_main_refuses_to_start_and_names_the_port_when_it_is_already_taken(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

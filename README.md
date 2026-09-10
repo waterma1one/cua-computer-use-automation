@@ -46,5 +46,7 @@ branch-selection step in the search flow.
 
 Stop either with Ctrl-C. If a port is already taken, the runner prints one line naming
 the port and variant and exits instead of starting a server that silently serves nothing.
+The same applies to anything other than `base` or `b`: `python -m mockapp <typo>` prints
+one line naming what you typed and the valid variants, and exits, instead of crashing.
 
 No API key or network access is required to run either variant.
