@@ -70,3 +70,24 @@ def resolve_member(member_id: str) -> Member | str:
     if member.restricted:
         return RESTRICTED_MESSAGE
     return member
+
+
+def resolve_account(number: str) -> tuple[Member, Account] | str:
+    """Resolve an account number to its owning member and account record.
+
+    Scans every member's accounts for a matching number, then hands the owning member's
+    id to `resolve_member` rather than returning the member found in this loop directly --
+    that keeps visibility a single decision owned by `resolve_member`, not something this
+    lookup re-derives. Returns the `(Member, Account)` pair when it may be shown, or
+    NOT_FOUND_MESSAGE / RESTRICTED_MESSAGE when it may not (identically to `resolve_member`,
+    an account belonging to no visible member is indistinguishable from one that does not
+    exist at all).
+    """
+    for member in MEMBERS.values():
+        for account in member.accounts:
+            if account.number == number:
+                resolved = resolve_member(member.member_id)
+                if isinstance(resolved, str):
+                    return resolved
+                return resolved, account
+    return NOT_FOUND_MESSAGE

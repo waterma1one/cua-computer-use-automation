@@ -10,7 +10,14 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from mockapp import faults
-from mockapp.data import NOT_FOUND_MESSAGE, RESTRICTED_MESSAGE, Member, resolve_member
+from mockapp.data import (
+    NOT_FOUND_MESSAGE,
+    RESTRICTED_MESSAGE,
+    Account,
+    Member,
+    resolve_account,
+    resolve_member,
+)
 
 TEMPLATES_ROOT = Path(__file__).parent
 BASE_TEMPLATE_DIR = TEMPLATES_ROOT / "templates"
@@ -124,6 +131,27 @@ def resolve_or_error(request: Request, member_id: str) -> Member | HTMLResponse:
     """
     templates: Jinja2Templates = request.app.state.templates
     result = resolve_member(member_id)
+    if result == NOT_FOUND_MESSAGE:
+        return templates.TemplateResponse(
+            request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
+        )
+    if result == RESTRICTED_MESSAGE:
+        return templates.TemplateResponse(
+            request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
+        )
+    return result
+
+
+def resolve_account_or_error(
+    request: Request, number: str
+) -> tuple[Member, Account] | HTMLResponse:
+    """Resolve `number` to its owning `(Member, Account)`, or the rendered not-found/
+    restricted response. Mirrors `resolve_or_error` above -- same shape, same reason: it
+    wraps `resolve_account` (which itself defers to `resolve_member`, the single place
+    deciding visibility) rather than re-deriving the not-found/restricted rendering here.
+    """
+    templates: Jinja2Templates = request.app.state.templates
+    result = resolve_account(number)
     if result == NOT_FOUND_MESSAGE:
         return templates.TemplateResponse(
             request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
@@ -341,5 +369,20 @@ def create_app(variant: str = "base") -> FastAPI:
             '<html><body><font size="4"><b>Account closed</b></font>'
             f'<p><font size="2">Account {number} has been closed.</font></p></body></html>'
         )
+
+    # Registered after /account/close on purpose: Starlette matches path routes in
+    # registration order, and "close" would otherwise be captured as this route's
+    # {number} path parameter, shadowing the close hazard entirely.
+    @app.get("/account/{number}", response_model=None)
+    def account_detail(request: Request, number: str) -> HTMLResponse | RedirectResponse:
+        if (resp := apply_fault(request)) is not None:
+            return resp
+        if (resp := require_login(request)) is not None:
+            return resp
+        result = resolve_account_or_error(request, number)
+        if isinstance(result, HTMLResponse):
+            return result
+        member, account = result
+        return templates.TemplateResponse(request, "account.html", {"m": member, "a": account})
 
     return app
