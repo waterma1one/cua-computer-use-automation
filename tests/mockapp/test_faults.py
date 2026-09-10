@@ -35,6 +35,34 @@ def test_interstitial_notice_can_be_forced(client: Callable[..., TestClient]) ->
     assert "Scheduled maintenance" in r.text
 
 
+def test_not_found_fault_can_be_forced(signed_in: Callable[..., TestClient]) -> None:
+    # An authenticated request against a real, ordinarily-visible member (12345) --
+    # otherwise an unauthenticated probe would prove nothing beyond the login redirect.
+    r = signed_in().get("/member/12345?fault=not_found")
+    assert r.status_code == 404
+    assert "No member found" in r.text
+
+
+def test_denied_fault_can_be_forced(signed_in: Callable[..., TestClient]) -> None:
+    r = signed_in().get("/member/12345?fault=denied")
+    assert r.status_code == 403
+    assert "You are not authorized to view this record" in r.text
+
+
+def test_dialog_fault_interrupts_a_real_screen_rather_than_replacing_it(
+    signed_in: Callable[..., TestClient],
+) -> None:
+    # The confirm() must fire over an actual page, not a blank one -- an automation
+    # meets a dialog over a member record, which is the condition a recovery rule has
+    # to handle. The real browser interrupt itself is verified in a later phase; this
+    # only pins that the injected script markup is present alongside the page's normal
+    # content.
+    r = signed_in().get("/member/12345?fault=dialog")
+    assert r.status_code == 200
+    assert "Member 12345" in r.text, "the dialog must interrupt a real screen, not replace it"
+    assert "window.confirm" in r.text
+
+
 def test_validation_can_be_forced(client: Callable[..., TestClient]) -> None:
     r = client().get("/member/12345?fault=validation")
     assert r.status_code == 422

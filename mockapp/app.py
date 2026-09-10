@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from mockapp import faults
@@ -76,6 +76,9 @@ class Session:
     remaining: int
 
 
+DIALOG_FAULT_SCRIPT = "<script>window.confirm('Unexpected dialog');</script>"
+
+
 def apply_fault(request: Request) -> HTMLResponse | None:
     """The shared fault hook. Call this first in any content route.
 
@@ -85,6 +88,13 @@ def apply_fault(request: Request) -> HTMLResponse | None:
 
         if (resp := apply_fault(request)) is not None:
             return resp
+
+    The `dialog` fault is the one exception to "returns a Response to return
+    immediately": a confirm() that replaced the whole page would never interrupt a real
+    screen, which is not the condition a recovery rule has to handle. Instead it marks
+    `request.state` and returns `None` so the route renders its normal page, and the
+    `_inject_dialog_fault` middleware registered in `create_app` splices the script into
+    that page's body on the way out.
     """
     templates: Jinja2Templates = request.app.state.templates
     fault = faults.resolve_fault(request)
@@ -112,9 +122,8 @@ def apply_fault(request: Request) -> HTMLResponse | None:
             request, "search.html", {"error": "Validation error"}, status_code=422
         )
     if fault.dialog:
-        return HTMLResponse(
-            "<html><body><script>window.confirm('Unexpected dialog');</script></body></html>"
-        )
+        request.state.inject_dialog_fault = True
+        return None
     return None
 
 
@@ -170,6 +179,28 @@ def create_app(variant: str = "base") -> FastAPI:
     brand = BRANDS[variant]
     templates = _build_templates(variant)
     app.state.templates = templates
+
+    @app.middleware("http")
+    async def inject_dialog_fault(request: Request, call_next):  # type: ignore[no-untyped-def]
+        response = await call_next(request)
+        if not getattr(request.state, "inject_dialog_fault", False):
+            return response
+        content_type = response.headers.get("content-type", "")
+        if not content_type.startswith("text/html"):
+            return response
+        body = b"".join([chunk async for chunk in response.body_iterator])
+        if b"</body>" in body:
+            body = body.replace(b"</body>", DIALOG_FAULT_SCRIPT.encode() + b"</body>", 1)
+        else:
+            body += DIALOG_FAULT_SCRIPT.encode()
+        headers = dict(response.headers)
+        headers.pop("content-length", None)
+        return Response(
+            content=body,
+            status_code=response.status_code,
+            headers=headers,
+            media_type=response.media_type,
+        )
 
     def session_status(request: Request) -> str:
         """Returns anonymous / expired / authenticated. Spends one request of budget."""
