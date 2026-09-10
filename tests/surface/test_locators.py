@@ -1,5 +1,5 @@
 from cua.surface.locators import resolve_against, synthesize
-from cua.surface.models import Node, NodeState, SurfaceSegment
+from cua.surface.models import Locator, Node, NodeState, SurfaceSegment
 
 PATH = [SurfaceSegment(kind="window", name="main"), SurfaceSegment(kind="frame", name="content")]
 OTHER_PATH = [
@@ -96,6 +96,73 @@ def test_scope_walk_skips_an_ancestor_that_does_not_disambiguate() -> None:
     assert loc.scope.role == "row"
     assert "Savings" in (loc.scope.name or "")
     assert loc.confidence == "medium"
+
+
+def test_text_strategy_round_trips_for_an_unnamed_control_with_a_value() -> None:
+    # CRITICAL 1: an unnamed node with a distinct value (phase 1's pinned unnamed-input
+    # hostile case) must synthesize a working text-strategy locator, not crash.
+    nodes = [
+        Node(index=0, role="textbox", name=None, value="alpha", depth=0,
+             state=NodeState(), surface_path=PATH),
+        Node(index=1, role="textbox", name=None, value="beta", depth=0,
+             state=NodeState(), surface_path=PATH),
+    ]
+    loc = synthesize(nodes[0], nodes)
+    assert loc.strategy == "text"
+    result = resolve_against(loc, nodes)
+    assert result.kind == "unique"
+    assert result.node.index == 0
+
+
+def test_ordinal_locator_round_trips_to_the_correct_node() -> None:
+    nodes = [node(0, "button", "Select"), node(1, "button", "Select")]
+    loc = synthesize(nodes[1], nodes)
+    assert loc.scope is None
+    assert loc.ordinal == 1
+    result = resolve_against(loc, nodes)
+    assert result.kind == "unique"
+    assert result.node.index == 1
+
+
+def test_ambiguous_primary_tries_fallbacks_before_reporting_ambiguous() -> None:
+    # CRITICAL 2: spec §3.4 rule 3 -- ambiguous tries scope, then ordinal, then fallbacks,
+    # then fails hard. Scope/ordinal are already baked in at synthesis time; a fallback
+    # that resolves uniquely must be tried before giving up with `ambiguous`.
+    nodes = [
+        node(0, "button", "Select"),
+        node(1, "button", "Select"),
+        node(2, "button", "Unique Target"),
+    ]
+    primary = Locator(
+        strategy="role_name", role="button", name="Select", surface_path=PATH,
+        rationale="ambiguous on purpose", confidence="low",
+    )
+    fallback = Locator(
+        strategy="role_name", role="button", name="Unique Target", surface_path=PATH,
+        rationale="the fallback that should be tried", confidence="high",
+    )
+    loc = primary.model_copy(update={"fallbacks": [fallback]})
+    result = resolve_against(loc, nodes)
+    assert result.kind == "unique"
+    assert result.node.index == 2
+
+
+def test_a_disabled_control_found_via_fallback_is_not_reported_as_not_found() -> None:
+    # CRITICAL 3: a fallback resolving to a real-but-disabled control must surface as
+    # precondition_failed, not be collapsed into a generic not_found.
+    nodes = [node(0, "button", "Post Transfer", disabled=True)]
+    primary = Locator(
+        strategy="role_name", role="button", name="Nonexistent", surface_path=PATH,
+        rationale="matches nothing on purpose", confidence="low",
+    )
+    fallback = Locator(
+        strategy="role_name", role="button", name="Post Transfer", surface_path=PATH,
+        rationale="the fallback that finds the real, disabled control", confidence="high",
+    )
+    loc = primary.model_copy(update={"fallbacks": [fallback]})
+    result = resolve_against(loc, nodes)
+    assert result.kind == "precondition_failed"
+    assert result.which == "enabled"
 
 
 def test_resolve_against_a_scoped_locator_with_real_depths() -> None:
