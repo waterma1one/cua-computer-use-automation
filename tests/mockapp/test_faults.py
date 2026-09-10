@@ -1,3 +1,4 @@
+import time
 from collections.abc import Callable
 
 from fastapi.testclient import TestClient
@@ -16,14 +17,28 @@ def test_server_error_can_be_forced(client: Callable[..., TestClient]) -> None:
     assert r.status_code == 500
 
 
-def test_slow_load_can_be_forced(client: Callable[..., TestClient]) -> None:
+def test_slow_load_can_be_forced(client: Callable[..., TestClient], monkeypatch) -> None:
+    # The live default (1500ms, MOCKAPP_SLOW_FAULT_MS unset) is what makes this fault
+    # observable to a human watching a browser; forcing a small value here keeps the
+    # suite fast while still proving the delay actually happens. Lower bound only, per
+    # the fix-round ruling, so this cannot flake on a loaded machine.
+    monkeypatch.setenv("MOCKAPP_SLOW_FAULT_MS", "50")
+    start = time.monotonic()
     r = client().get("/member/12345?fault=slow")
+    elapsed = time.monotonic() - start
     assert r.status_code == 200
+    assert elapsed >= 0.05, "the slow fault must actually delay the response"
 
 
 def test_interstitial_notice_can_be_forced(client: Callable[..., TestClient]) -> None:
     r = client().get("/member/12345?fault=notice")
     assert "Scheduled maintenance" in r.text
+
+
+def test_validation_can_be_forced(client: Callable[..., TestClient]) -> None:
+    r = client().get("/member/12345?fault=validation")
+    assert r.status_code == 422
+    assert "Validation error" in r.text
 
 
 def test_login_is_required_before_search(client: Callable[..., TestClient]) -> None:

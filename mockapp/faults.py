@@ -19,8 +19,13 @@ from fastapi import Request
 FAULT_QUERY_PARAM = "fault"
 FAULT_ENV_VAR = "MOCKAPP_FAULT"
 
-# How long a "slow" fault holds the response before returning it.
+# How long a "slow" fault holds the response before returning it. 1500ms is the default
+# so the delay is actually observable to a human watching a live browser run; a test
+# that needs the fault to fire without paying that cost overrides it with
+# MOCKAPP_SLOW_FAULT_MS, read the same lazy, per-call way as FAULT_ENV_VAR above so a
+# monkeypatched env var takes effect on the very next request.
 SLOW_FAULT_MS = 1500
+SLOW_FAULT_MS_ENV = "MOCKAPP_SLOW_FAULT_MS"
 
 
 @dataclass(frozen=True)
@@ -50,7 +55,8 @@ NAMES = frozenset(_BOOL_FIELDS) | {"slow"}
 
 def _build(name: str | None) -> FaultConfig:
     if name == "slow":
-        return FaultConfig(slow_ms=SLOW_FAULT_MS)
+        slow_ms = int(os.environ.get(SLOW_FAULT_MS_ENV, SLOW_FAULT_MS))
+        return FaultConfig(slow_ms=slow_ms)
     if name in _BOOL_FIELDS:
         return FaultConfig(**{name: True})
     return FaultConfig()
