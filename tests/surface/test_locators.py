@@ -165,6 +165,61 @@ def test_a_disabled_control_found_via_fallback_is_not_reported_as_not_found() ->
     assert result.which == "enabled"
 
 
+def test_a_later_fallback_can_still_resolve_uniquely_after_an_earlier_one_is_ambiguous() -> None:
+    # Fix round 2: the fallback chain must be exhausted looking for a unique result before
+    # settling for the first non-not_found result. A primary that is not_found, followed by
+    # an ambiguous fallback and then a fallback that resolves uniquely, must still return
+    # the unique result -- the ambiguous fallback must not short-circuit the search.
+    nodes = [
+        node(0, "button", "Select"),
+        node(1, "button", "Select"),
+        node(2, "button", "Unique Target"),
+    ]
+    primary = Locator(
+        strategy="role_name", role="button", name="Nonexistent", surface_path=PATH,
+        rationale="matches nothing on purpose", confidence="low",
+    )
+    ambiguous_fb = Locator(
+        strategy="role_name", role="button", name="Select", surface_path=PATH,
+        rationale="ambiguous, tried first", confidence="low",
+    )
+    unique_fb = Locator(
+        strategy="role_name", role="button", name="Unique Target", surface_path=PATH,
+        rationale="should still be tried after the ambiguous fallback", confidence="high",
+    )
+    loc = primary.model_copy(update={"fallbacks": [ambiguous_fb, unique_fb]})
+    result = resolve_against(loc, nodes)
+    assert result.kind == "unique"
+    assert result.node.index == 2
+
+
+def test_the_first_non_unique_result_in_attempt_order_is_reported_when_nothing_resolves() -> None:
+    # When no attempt (primary or any fallback) resolves uniquely, the reported result is
+    # the first non-not_found result in attempt order -- primary, then fallbacks in their
+    # given order -- not a severity ranking between ambiguous and precondition_failed.
+    nodes = [
+        node(0, "button", "Select"),
+        node(1, "button", "Select"),
+        node(2, "button", "Post Transfer", disabled=True),
+    ]
+    primary = Locator(
+        strategy="role_name", role="button", name="Nonexistent", surface_path=PATH,
+        rationale="matches nothing on purpose", confidence="low",
+    )
+    ambiguous_fb = Locator(
+        strategy="role_name", role="button", name="Select", surface_path=PATH,
+        rationale="ambiguous, tried first", confidence="low",
+    )
+    disabled_fb = Locator(
+        strategy="role_name", role="button", name="Post Transfer", surface_path=PATH,
+        rationale="found but disabled, tried second", confidence="high",
+    )
+    loc = primary.model_copy(update={"fallbacks": [ambiguous_fb, disabled_fb]})
+    result = resolve_against(loc, nodes)
+    assert result.kind == "ambiguous"
+    assert result.count == 2
+
+
 def test_resolve_against_a_scoped_locator_with_real_depths() -> None:
     nodes = [
         node(0, "row", "Savings 000100045512-01 4,218.60 Select", depth=2),
