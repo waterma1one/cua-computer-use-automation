@@ -180,3 +180,51 @@ Resolution = Annotated[
     Unique | NotFound | Ambiguous | PreconditionFailed,
     Field(discriminator="kind"),
 ]
+
+# The closed replay action vocabulary (spec §3.5). Closed, not open, because the policy
+# engine in a later phase classifies risk per action kind -- an open set means an
+# unclassifiable action, which means a hole in the allowlist.
+ActionKind = Literal[
+    "navigate",
+    "click",
+    "fill",
+    "select",
+    "press_key",
+    "wait_for",
+    "read",
+    "dismiss_dialog",
+]
+
+
+class Action(BaseModel):
+    """One step of a replayable action, thin by design (R5).
+
+    `WebSurface` (`cua/surface/web.py`) is the only place this is executed against a real
+    browser; phase 4's replay engine only needs to import this to build and inspect a
+    trace, and it may not import Playwright to do so -- hence this lives here, not in
+    `base.py`. Kept thin: phase 4 owns the replay engine and is expected to extend it.
+    """
+
+    kind: ActionKind
+    locator: Locator | None = None
+    value: str | None = None
+
+
+class ActionResult(BaseModel):
+    """The outcome of executing one `Action` against a surface."""
+
+    ok: bool
+    action: Action
+    read_value: str | None = None
+
+
+class EvidenceFrame(BaseModel):
+    """A single point-in-time capture of a surface, for the evidence trail.
+
+    `snapshot_yaml` is already scrubbed (spec §3.7.2's `scrub_protected_values`) by the
+    time it reaches this model -- nothing downstream should have to scrub it again.
+    """
+
+    generation: int
+    image_png: bytes | None = None
+    snapshot_yaml: str
