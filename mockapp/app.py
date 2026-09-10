@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import secrets
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -89,11 +90,17 @@ def apply_fault(request: Request) -> HTMLResponse | None:
         if (resp := apply_fault(request)) is not None:
             return resp
 
+    Every route also declares `resp: HTMLResponse | RedirectResponse | None` immediately
+    before that line -- this function and `require_login` return different (if
+    overlapping) unions, and without an explicit declaration mypy infers `resp`'s type
+    from the first walrus assignment alone, then rejects the second (`require_login`'s)
+    assignment as incompatible.
+
     The `dialog` fault is the one exception to "returns a Response to return
     immediately": a confirm() that replaced the whole page would never interrupt a real
     screen, which is not the condition a recovery rule has to handle. Instead it marks
     `request.state` and returns `None` so the route renders its normal page, and the
-    `_inject_dialog_fault` middleware registered in `create_app` splices the script into
+    `inject_dialog_fault` middleware registered in `create_app` splices the script into
     that page's body on the way out.
     """
     templates: Jinja2Templates = request.app.state.templates
@@ -140,13 +147,13 @@ def resolve_or_error(request: Request, member_id: str) -> Member | HTMLResponse:
     """
     templates: Jinja2Templates = request.app.state.templates
     result = resolve_member(member_id)
-    if result == NOT_FOUND_MESSAGE:
+    if isinstance(result, str):
+        # isinstance, not `== NOT_FOUND_MESSAGE`, so mypy can narrow the union: an
+        # equality check alone does not tell the type checker `result` is no longer a
+        # possible Member on the fallthrough path below.
+        status_code = 404 if result == NOT_FOUND_MESSAGE else 403
         return templates.TemplateResponse(
-            request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
-        )
-    if result == RESTRICTED_MESSAGE:
-        return templates.TemplateResponse(
-            request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
+            request, "search.html", {"error": result}, status_code=status_code
         )
     return result
 
@@ -161,13 +168,10 @@ def resolve_account_or_error(
     """
     templates: Jinja2Templates = request.app.state.templates
     result = resolve_account(number)
-    if result == NOT_FOUND_MESSAGE:
+    if isinstance(result, str):
+        status_code = 404 if result == NOT_FOUND_MESSAGE else 403
         return templates.TemplateResponse(
-            request, "search.html", {"error": NOT_FOUND_MESSAGE}, status_code=404
-        )
-    if result == RESTRICTED_MESSAGE:
-        return templates.TemplateResponse(
-            request, "search.html", {"error": RESTRICTED_MESSAGE}, status_code=403
+            request, "search.html", {"error": result}, status_code=status_code
         )
     return result
 
@@ -181,14 +185,20 @@ def create_app(variant: str = "base") -> FastAPI:
     app.state.templates = templates
 
     @app.middleware("http")
-    async def inject_dialog_fault(request: Request, call_next):  # type: ignore[no-untyped-def]
+    async def inject_dialog_fault(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
         response = await call_next(request)
         if not getattr(request.state, "inject_dialog_fault", False):
             return response
         content_type = response.headers.get("content-type", "")
         if not content_type.startswith("text/html"):
             return response
-        body = b"".join([chunk async for chunk in response.body_iterator])
+        # call_next's actual return value is Starlette's private _StreamingResponse,
+        # which exposes body_iterator but is not part of Response's public, typed
+        # interface -- hence the ignore rather than a cast onto an unexported type.
+        body_iterator: AsyncIterator[bytes] = response.body_iterator  # type: ignore[attr-defined]
+        body = b"".join([chunk async for chunk in body_iterator])
         if b"</body>" in body:
             body = body.replace(b"</body>", DIALOG_FAULT_SCRIPT.encode() + b"</body>", 1)
         else:
@@ -247,8 +257,9 @@ def create_app(variant: str = "base") -> FastAPI:
         response.set_cookie(SESSION_COOKIE, token, httponly=True)
         return response
 
-    @app.get("/search", response_class=HTMLResponse)
-    def search_form(request: Request, error: str | None = None) -> HTMLResponse:
+    @app.get("/search", response_model=None)
+    def search_form(request: Request, error: str | None = None) -> HTMLResponse | RedirectResponse:
+        resp: HTMLResponse | RedirectResponse | None  # see apply_fault's docstring
         if (resp := apply_fault(request)) is not None:
             return resp
         if (resp := require_login(request)) is not None:
@@ -257,6 +268,7 @@ def create_app(variant: str = "base") -> FastAPI:
 
     @app.post("/search", response_model=None)
     def search(request: Request, mid: str = Form(...)) -> HTMLResponse | RedirectResponse:
+        resp: HTMLResponse | RedirectResponse | None  # see apply_fault's docstring
         if (resp := apply_fault(request)) is not None:
             return resp
         if (resp := require_login(request)) is not None:
@@ -278,8 +290,9 @@ def create_app(variant: str = "base") -> FastAPI:
             return RedirectResponse(f"/branch?mid={mid}", status_code=303)
         return RedirectResponse(f"/member/{mid}", status_code=303)
 
-    @app.get("/member/{member_id}", response_class=HTMLResponse)
-    def member_detail(request: Request, member_id: str) -> HTMLResponse:
+    @app.get("/member/{member_id}", response_model=None)
+    def member_detail(request: Request, member_id: str) -> HTMLResponse | RedirectResponse:
+        resp: HTMLResponse | RedirectResponse | None  # see apply_fault's docstring
         if (resp := apply_fault(request)) is not None:
             return resp
         if (resp := require_login(request)) is not None:
@@ -297,8 +310,9 @@ def create_app(variant: str = "base") -> FastAPI:
     # ordinary way, rather than adding a variant check inside the handlers to fake one.
     if variant == "b":
 
-        @app.get("/branch", response_class=HTMLResponse)
-        def branch_select(request: Request, mid: str) -> HTMLResponse:
+        @app.get("/branch", response_model=None)
+        def branch_select(request: Request, mid: str) -> HTMLResponse | RedirectResponse:
+            resp: HTMLResponse | RedirectResponse | None
             if (resp := apply_fault(request)) is not None:
                 return resp
             if (resp := require_login(request)) is not None:
@@ -312,6 +326,7 @@ def create_app(variant: str = "base") -> FastAPI:
         def branch_selected(
             request: Request, mid: str = Form(...), branch: str = Form(...)
         ) -> HTMLResponse | RedirectResponse:
+            resp: HTMLResponse | RedirectResponse | None
             if (resp := apply_fault(request)) is not None:
                 return resp
             if (resp := require_login(request)) is not None:
@@ -324,8 +339,9 @@ def create_app(variant: str = "base") -> FastAPI:
             # must expect and click through, not to model real branch-routing logic.
             return RedirectResponse(f"/member/{mid}", status_code=303)
 
-    @app.get("/subaccount/new", response_class=HTMLResponse)
-    def subaccount_new(request: Request, mid: str) -> HTMLResponse:
+    @app.get("/subaccount/new", response_model=None)
+    def subaccount_new(request: Request, mid: str) -> HTMLResponse | RedirectResponse:
+        resp: HTMLResponse | RedirectResponse | None  # see apply_fault's docstring
         if (resp := apply_fault(request)) is not None:
             return resp
         if (resp := require_login(request)) is not None:
@@ -335,10 +351,11 @@ def create_app(variant: str = "base") -> FastAPI:
             return result
         return templates.TemplateResponse(request, "subaccount_new.html", {"m": result})
 
-    @app.post("/subaccount/review", response_class=HTMLResponse)
+    @app.post("/subaccount/review", response_model=None)
     def subaccount_review(
         request: Request, mid: str = Form(...), kind: str = Form(...)
-    ) -> HTMLResponse:
+    ) -> HTMLResponse | RedirectResponse:
+        resp: HTMLResponse | RedirectResponse | None  # see apply_fault's docstring
         if (resp := apply_fault(request)) is not None:
             return resp
         if (resp := require_login(request)) is not None:
@@ -350,10 +367,11 @@ def create_app(variant: str = "base") -> FastAPI:
             request, "subaccount_confirm.html", {"mid": mid, "kind": kind}
         )
 
-    @app.post("/subaccount/post", response_class=HTMLResponse)
+    @app.post("/subaccount/post", response_model=None)
     def subaccount_post(
         request: Request, mid: str = Form(...), kind: str = Form(...)
-    ) -> HTMLResponse:
+    ) -> HTMLResponse | RedirectResponse:
+        resp: HTMLResponse | RedirectResponse | None  # see apply_fault's docstring
         if (resp := apply_fault(request)) is not None:
             return resp
         if (resp := require_login(request)) is not None:
@@ -372,8 +390,9 @@ def create_app(variant: str = "base") -> FastAPI:
             request, "subaccount_done.html", {"mid": mid, "kind": kind}
         )
 
-    @app.get("/statement/{member_id}", response_class=HTMLResponse)
-    def statement(request: Request, member_id: str) -> HTMLResponse:
+    @app.get("/statement/{member_id}", response_model=None)
+    def statement(request: Request, member_id: str) -> HTMLResponse | RedirectResponse:
+        resp: HTMLResponse | RedirectResponse | None  # see apply_fault's docstring
         if (resp := apply_fault(request)) is not None:
             return resp
         if (resp := require_login(request)) is not None:
@@ -383,8 +402,9 @@ def create_app(variant: str = "base") -> FastAPI:
             return result
         return templates.TemplateResponse(request, "statement.html", {"m": result})
 
-    @app.get("/account/close", response_class=HTMLResponse)
-    def account_close(request: Request, number: str) -> HTMLResponse:
+    @app.get("/account/close", response_model=None)
+    def account_close(request: Request, number: str) -> HTMLResponse | RedirectResponse:
+        resp: HTMLResponse | RedirectResponse | None  # see apply_fault's docstring
         if (resp := apply_fault(request)) is not None:
             return resp
         if (resp := require_login(request)) is not None:
@@ -406,6 +426,7 @@ def create_app(variant: str = "base") -> FastAPI:
     # {number} path parameter, shadowing the close hazard entirely.
     @app.get("/account/{number}", response_model=None)
     def account_detail(request: Request, number: str) -> HTMLResponse | RedirectResponse:
+        resp: HTMLResponse | RedirectResponse | None  # see apply_fault's docstring
         if (resp := apply_fault(request)) is not None:
             return resp
         if (resp := require_login(request)) is not None:

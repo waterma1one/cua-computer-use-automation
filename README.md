@@ -18,7 +18,7 @@ Run the checks:
 ```bash
 .venv/bin/pytest -v
 .venv/bin/ruff check .
-.venv/bin/mypy cua
+.venv/bin/mypy cua mockapp
 ```
 
 ## Running the target mock application
