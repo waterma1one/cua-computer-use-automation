@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
@@ -81,7 +81,9 @@ DIALOG_FAULT_SCRIPT = "<script>window.confirm('Unexpected dialog');</script>"
 
 
 def apply_fault(request: Request) -> HTMLResponse | None:
-    """The shared fault hook. Call this first in any content route.
+    """The shared fault hook. Call this first in any gated content route.
+
+    `/`, `/nav`, and both `/login` routes are not gated and do not call this.
 
     Returns a `Response` the caller must return immediately, or `None` when the route
     should proceed with its normal logic. A new route (including one that does not
@@ -107,7 +109,16 @@ def apply_fault(request: Request) -> HTMLResponse | None:
     fault = faults.resolve_fault(request)
     faults.maybe_delay(fault)
     if fault.error_500:
-        raise HTTPException(status_code=500, detail="Injected server error")
+        # A direct HTML return, like every other fault below -- not `raise
+        # HTTPException(...)`, whose default handler serializes to JSON. A legacy back
+        # office does not emit JSON error pages, and error_500 must not be the one
+        # fault on the whole surface that looks like it came from a different system.
+        return HTMLResponse(
+            '<html><body><font size="4"><b>Internal Server Error</b></font>'
+            '<p><font size="2">The system encountered an unexpected error. Please try '
+            "again or contact support if the problem persists.</font></p></body></html>",
+            status_code=500,
+        )
     if fault.expired:
         return templates.TemplateResponse(request, "expired.html", {})
     if fault.notice:

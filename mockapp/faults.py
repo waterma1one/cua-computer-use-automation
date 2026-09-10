@@ -1,12 +1,13 @@
 """Deterministic fault injection.
 
-Evidence runs must be able to demand a specific failure on any content route, on
+Evidence runs must be able to demand a specific failure on any gated content route, on
 demand, rather than waiting for the real-world condition to occur. A route opts in
 with one line, calling `mockapp.app.apply_fault(request)` as its first statement; that
 helper resolves the active `FaultConfig` (via `resolve_fault` below) and returns a
 `Response` when a fault fired (the route must return it immediately) or `None` when the
 route should proceed normally. This shape is the shared hook later routes -- including
 ones that do not exist yet -- reuse rather than each writing its own fault handling.
+`/`, `/nav`, and both `/login` routes are not gated and do not call it.
 """
 from __future__ import annotations
 

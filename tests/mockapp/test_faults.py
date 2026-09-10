@@ -15,6 +15,11 @@ def test_session_expiry_can_be_forced(client: Callable[..., TestClient]) -> None
 def test_server_error_can_be_forced(client: Callable[..., TestClient]) -> None:
     r = client().get("/member/12345?fault=error_500")
     assert r.status_code == 500
+    # A legacy back office does not emit JSON error pages; every other fault returns
+    # HTML, and error_500 must match rather than standing out as the one JSON response
+    # on the whole surface.
+    assert r.headers["content-type"].startswith("text/html")
+    assert "<html" in r.text.lower()
 
 
 def test_slow_load_can_be_forced(client: Callable[..., TestClient], monkeypatch) -> None:
