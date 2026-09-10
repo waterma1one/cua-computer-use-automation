@@ -230,27 +230,12 @@ def _failed_precondition(node: Node, require: Require) -> Literal["visible", "en
     return None
 
 
-def resolve_against(loc: Locator, nodes: list[Node]) -> Resolution:
-    """Resolves `loc` against `nodes`, strictly (spec §3.4 rule 3).
-
-    Filters to `loc.surface_path`, matches by strategy, applies `scope` (via the same
-    `ancestors_of` containment rule `synthesize` uses) and `ordinal`. Exactly one match is
-    checked against `require`; a failing precondition returns `precondition_failed`, never
-    `unique` -- a found-but-disabled control resolving as success is a silent-failure class
-    this function exists to close off.
-
-    Neither zero matches nor more than one is final until `fallbacks` have been tried, in
-    order (spec §3.4 rule 3: "ambiguous tries scope, then ordinal, then fallbacks, then
-    fails hard" -- scope and ordinal are already baked into `loc` at synthesis time, so what
-    remains at resolution time is the fallback list). A fallback that itself resolves to
-    anything other than `not_found` -- `unique`, but also `precondition_failed` or
-    `ambiguous` in turn -- is returned as-is rather than collapsed into a generic `not_found`:
-    a found-but-disabled control reached through a fallback is exactly the silent-failure
-    class `require` exists to catch, and folding it into "not found" would hide it from
-    whoever is debugging the replay. Only once every fallback has come back `not_found` (or
-    there are none) does this function give up: `ambiguous` if the primary locator itself had
-    more than one match, `not_found` otherwise, with a reason naming every fallback that was
-    tried and how it failed.
+def _resolve_direct(loc: Locator, nodes: list[Node]) -> Resolution:
+    """Resolves `loc` against `nodes` using only its own match criteria, `scope`, `ordinal`
+    and `require` -- never touching `loc.fallbacks`. This is one "attempt" in the ordered
+    sequence `resolve_against` works through; the fallback chain is that function's concern,
+    not this one's, so that trying a fallback can never accidentally re-trigger its own
+    fallback list twice.
     """
     candidates = [n for n in nodes if n.surface_path == loc.surface_path]
     matches = [n for n in candidates if _matches_locator(n, loc)]
@@ -268,23 +253,64 @@ def resolve_against(loc: Locator, nodes: list[Node]) -> Resolution:
             return PreconditionFailed(which=which)
         return Unique(node=node)
 
-    fallback_failures: list[str] = []
-    for fallback in loc.fallbacks:
-        result = resolve_against(fallback, nodes)
-        if result.kind != "not_found":
-            return result
-        fallback_failures.append(result.reason)
-
     if matches:
         return Ambiguous(count=len(matches))
 
-    reason = (
-        f"no node matched strategy={loc.strategy!r} role={loc.role!r} "
-        f"name={loc.name!r} on surface_path={loc.surface_path!r}"
+    return NotFound(
+        reason=(
+            f"no node matched strategy={loc.strategy!r} role={loc.role!r} "
+            f"name={loc.name!r} on surface_path={loc.surface_path!r}"
+        )
     )
-    if fallback_failures:
+
+
+def resolve_against(loc: Locator, nodes: list[Node]) -> Resolution:
+    """Resolves `loc` against `nodes`, strictly (spec §3.4 rule 3).
+
+    Builds one ordered list of attempts -- `loc` itself, then each of `loc.fallbacks` in
+    turn (each fallback resolved through this same function, so a fallback's own fallbacks
+    are exhausted too) -- and answers in two separate passes over that list, deliberately
+    not conflated into one loop:
+
+    1. **Look for a `unique`.** The fallback list is the author's stated order of
+       preference, and spec §3.4 rule 3's "then fallbacks" means working through all of
+       them, not stopping at the first one that produces any definite-ish answer. The first
+       attempt (primary first, then fallbacks in order) that resolved `unique` -- with
+       `require` already checked by `_resolve_direct` -- wins and returns immediately.
+    2. **Only if nothing resolved uniquely, decide what to report.** Returns the first
+       non-`not_found` result in that same attempt order. A found-but-disabled control
+       (`precondition_failed`) or a genuinely ambiguous match reached through any attempt is
+       returned as-is, never collapsed into a generic `not_found` -- that silent-failure
+       class is exactly what `require` and `ambiguous` exist to surface. Ranking by
+       attempt order rather than by some severity ordering between `ambiguous` and
+       `precondition_failed` keeps this predictable: whichever attempt the author listed
+       first is the one whose story gets told.
+
+    If every attempt comes back `not_found`, the result is `not_found` too, with a reason
+    naming the primary and every fallback that was tried and how each failed to match. This
+    function never guesses between multiple candidates at any point in that process.
+    """
+    attempts: list[Resolution] = [_resolve_direct(loc, nodes)]
+    for fallback in loc.fallbacks:
+        attempts.append(resolve_against(fallback, nodes))
+
+    for result in attempts:
+        if result.kind == "unique":
+            return result
+
+    for result in attempts:
+        if result.kind != "not_found":
+            return result
+
+    not_found_reasons: list[str] = []
+    for result in attempts:
+        if result.kind == "not_found":
+            not_found_reasons.append(result.reason)
+
+    reason = not_found_reasons[0]
+    if len(not_found_reasons) > 1:
         reason += (
-            f"; {len(fallback_failures)} fallback(s) also tried and failed to match: "
-            + "; ".join(fallback_failures)
+            f"; {len(not_found_reasons) - 1} fallback(s) also tried and failed to match: "
+            + "; ".join(not_found_reasons[1:])
         )
     return NotFound(reason=reason)
