@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Confidence = Literal["high", "medium", "low"]
 NameMatch = Literal["exact", "contains", "prefix"]
@@ -42,7 +42,13 @@ class Locator(BaseModel):
     """
 
     strategy: Strategy = "role_name"
-    role: str
+    # role is None-able because a text-strategy locator exists precisely to match a node
+    # that has no accessible name worth relying on, in a target application that carries
+    # no ARIA roles at all -- forcing a role there would make the synthesizer fabricate
+    # one, and that fabricated value ends up in an artifact a human is meant to review.
+    # Only role_name locators are meaningless without a role, so only that case is
+    # enforced below.
+    role: str | None = None
     name: str | None = None
     name_match: NameMatch = "exact"
     surface_path: list[SurfaceSegment]
@@ -54,6 +60,12 @@ class Locator(BaseModel):
     # reason for how it identifies its control cannot be reviewed.
     rationale: str
     confidence: Confidence
+
+    @model_validator(mode="after")
+    def _role_name_strategy_requires_a_role(self) -> Locator:
+        if self.strategy == "role_name" and self.role is None:
+            raise ValueError("a role_name locator requires a role")
+        return self
 
 
 class NodeState(BaseModel):
@@ -67,6 +79,12 @@ class NodeState(BaseModel):
 
 class Node(BaseModel):
     """One control as it appeared in a single accessibility-tree snapshot."""
+
+    # Revalidates on every attribute assignment (including replacing `state` wholesale),
+    # not just at construction, so that e.g. `node.value = "..."` on a protected node is
+    # caught the same way construction is. See the comment on the validator below for what
+    # this does and does not cover.
+    model_config = ConfigDict(validate_assignment=True)
 
     index: int
     role: str
@@ -84,9 +102,18 @@ class Node(BaseModel):
     def _protected_nodes_carry_no_value(self) -> Node:
         # Spec §3.7: accessibility snapshots emit a password field's live value verbatim
         # -- the browser does not redact it the way it redacts the rendered glyphs on
-        # screen. This lives on the model, not in the parser, because a model-level
-        # validator runs on every construction path, present and future; a parser-side
-        # check is one new call site away from being silently skipped.
+        # screen. This lives on the model, not in the parser, because a parser-side check
+        # is one new call site away from being silently skipped.
+        #
+        # What this guarantee actually covers: normal construction (`Node(...)`),
+        # `Node.model_validate(...)`, and -- because `validate_assignment=True` is set
+        # above -- ordinary attribute assignment (`node.value = ...`, or replacing
+        # `node.state` wholesale). It deliberately does NOT cover `Node.model_construct(...)`
+        # or `node.model_copy(update={...})`: both bypass validation entirely by Pydantic's
+        # design, so a Node built or copied through either can end up protected with a live
+        # value with no error raised. Anything reaching for `model_copy(update=...)` on a
+        # Node -- a redaction step or an evidence writer are the obvious candidates -- must
+        # not assume this validator will catch a mistake there.
         if self.state.protected and self.value is not None:
             raise ValueError("a protected node must not carry a value")
         return self
