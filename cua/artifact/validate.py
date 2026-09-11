@@ -106,40 +106,70 @@ def _as_input_key(name: str) -> str:
     return _NON_IDENTIFIER_RE.sub("_", name.lower()).strip("_")
 
 
-def _locator_chain(locator: Locator) -> list[Locator]:
-    """Every locator reachable from `locator`: itself, its `scope` ancestors, its fallbacks.
+def _locator_chain(locator: Locator) -> tuple[list[Locator], bool]:
+    """Every locator reachable from `locator` (itself, its `scope` ancestors, its
+    fallbacks), and whether that graph closes a loop.
 
     Both checks that walk a locator want the whole chain rather than just the outermost
     node. An `ordinal` buried in a `scope` is exactly as reviewable a fact as one on the
     locator itself, and a fallback is the path taken when a human is least likely to be
     watching (R18's reasoning), so a protected name hiding in one must not be invisible.
 
-    Cycle-guarded by object identity. `a.scope = b; b.scope = a` is constructible through
-    plain Pydantic attribute assignment -- no `model_construct` bypass needed -- and an
-    unguarded walk would raise `RecursionError` out of a `validate` that documents that it
-    never raises. A cyclic chain cannot arrive from a YAML load, but Task 3 mutates locators
-    in memory while resolving an overlay, which is where this would first be hit.
+    Cycle-guarded by object identity, and the guard now does two jobs (E9): it still stops
+    the walk from ever recursing forever, and it also reports *which kind* of revisit it
+    saw. Two identity sets, not one, because a revisit through a diamond and a revisit that
+    closes a loop are different facts, and only the current DFS `path` -- the identities of
+    `current`'s own ancestors on the branch being walked right now -- can tell them apart:
+
+    - `path` carries the current branch's ancestors. Seeing `current` again while it is
+      still its own ancestor (`id(current) in path`) is a back edge -- a genuine cycle --
+      recorded in the returned flag, and the walk does not recurse into it again.
+    - `seen` carries every locator visited on any branch so far. Seeing `current` again
+      when it is *not* on the current path (`id(current) in seen` but not in `path`) is the
+      same locator reached twice through two different branches -- a diamond, not a loop --
+      and is silently deduplicated exactly as before, with no cycle reported. This is the
+      distinction `test_a_locator_diamond_is_not_reported_as_a_cycle` and
+      `test_a_scope_and_fallback_diamond_meeting_at_one_locator_is_not_a_cycle` pin: a check
+      keyed on "have I seen this before" alone cannot make it, and would fire on every
+      diamond, which is exactly the over-firing hazard `ORDINAL_USED` already hit once.
+
+    `a.scope = b; b.scope = a` and `a.fallbacks = [b]; b.fallbacks = [a]` are both
+    constructible through plain Pydantic attribute assignment -- no `model_construct`
+    bypass needed -- and an unguarded walk would raise `RecursionError` out of a `validate`
+    that documents that it never raises. A cyclic chain cannot arrive from a YAML load, but
+    Task 3 mutates locators in memory while resolving an overlay, which is where this would
+    first be hit.
 
     Phase 2 left the same cycle open in fallback *resolution* as a deferred minor, on the
     understanding that constructing one required a Pydantic bypass. That was wrong --
     `fallbacks` is an ordinary assignable field and `a.fallbacks = [b]; b.fallbacks = [a]`
-    is enough -- so `cua.surface.locators.resolve_against` now carries the same guard (E8).
+    is enough -- so `cua.surface.locators.resolve_against` now carries the same guard (E8),
+    pruning a back edge silently there. E9 is this module's diagnostic for the same defect:
+    a cycle pruned silently at resolution time, with nothing anywhere saying it was ever
+    there, is the failure shape this project has rejected everywhere else -- so `validate`
+    now reports it as `LOCATOR_FALLBACK_CYCLE` before an artifact ever reaches replay.
     """
     seen: set[int] = set()
     chain: list[Locator] = []
+    cyclic = False
 
-    def walk(current: Locator) -> None:
+    def walk(current: Locator, path: frozenset[int]) -> None:
+        nonlocal cyclic
+        if id(current) in path:
+            cyclic = True
+            return
         if id(current) in seen:
             return
         seen.add(id(current))
         chain.append(current)
+        branch = path | {id(current)}
         if current.scope is not None:
-            walk(current.scope)
+            walk(current.scope, branch)
         for fallback in current.fallbacks:
-            walk(fallback)
+            walk(fallback, branch)
 
-    walk(locator)
-    return chain
+    walk(locator, frozenset())
+    return chain, cyclic
 
 
 def _where(index: int, step: Step) -> str:
@@ -176,7 +206,22 @@ def _step_findings(artifact: Artifact) -> list[Finding]:
 
         if step.locator is not None:
             findings.extend(_literal_findings(artifact, step, where))
-            if any(link.ordinal is not None for link in _locator_chain(step.locator)):
+            chain, cyclic = _locator_chain(step.locator)
+            if cyclic:
+                # E9: not one of §4.4's literal seven, kept for the same reason
+                # DUPLICATE_STEP_ID is -- the machinery downstream (replay's fallback
+                # resolution, E8's guard) cannot function correctly on a locator whose
+                # scope/fallback graph closes a loop, and today it validates as clean and
+                # is then pruned silently at resolution time with no diagnostic trail.
+                findings.append(Finding(
+                    level="error", code="LOCATOR_FALLBACK_CYCLE", where=where,
+                    message=(
+                        f"step {step.id}'s locator forms a cycle through its scope "
+                        f"and/or fallback chain; it can never resolve and must be fixed "
+                        f"before this artifact is replayed"
+                    ),
+                ))
+            if any(link.ordinal is not None for link in chain):
                 # §3.4 rule 2: ordinal is the sanctioned last resort when nothing else
                 # disambiguates, so this is a warning a reviewer reads, not a defect.
                 findings.append(Finding(
@@ -230,7 +275,8 @@ def _literal_findings(artifact: Artifact, step: Step, where: str) -> list[Findin
     if not isinstance(step.value, LiteralValue) or step.locator is None:
         return []
 
-    for link in _locator_chain(step.locator):
+    chain, _ = _locator_chain(step.locator)
+    for link in chain:
         if is_protected_name(link.name):
             return [Finding(
                 level="error", code="LITERAL_FROM_PROTECTED_FIELD", where=where,
