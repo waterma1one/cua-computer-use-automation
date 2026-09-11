@@ -220,6 +220,62 @@ def test_the_first_non_unique_result_in_attempt_order_is_reported_when_nothing_r
     assert result.count == 2
 
 
+# I9: name_match semantics were entirely untested -- making "exact" behave as "contains"
+# left the whole suite green. These three pin each mode against a case the other two modes
+# would answer differently.
+def test_name_match_exact_requires_the_full_name() -> None:
+    nodes = [node(0, "button", "Search Members")]
+    loc = Locator(
+        strategy="role_name", role="button", name="Search", name_match="exact",
+        surface_path=PATH, rationale="x", confidence="high",
+    )
+    result = resolve_against(loc, nodes)
+    assert result.kind == "not_found"
+
+
+def test_name_match_contains_matches_a_substring_anywhere() -> None:
+    nodes = [node(0, "button", "Search Members")]
+    loc = Locator(
+        strategy="role_name", role="button", name="Members", name_match="contains",
+        surface_path=PATH, rationale="x", confidence="high",
+    )
+    result = resolve_against(loc, nodes)
+    assert result.kind == "unique"
+    assert result.node.index == 0
+
+
+def test_name_match_prefix_matches_only_at_the_start() -> None:
+    nodes = [node(0, "button", "Search Members"), node(1, "button", "Member Search")]
+    loc = Locator(
+        strategy="role_name", role="button", name="Search", name_match="prefix",
+        surface_path=PATH, rationale="x", confidence="high",
+    )
+    result = resolve_against(loc, nodes)
+    assert result.kind == "unique"
+    assert result.node.index == 0
+
+
+# I2: an unnamed intermediate container (a bare rowgroup wrapper, name="") sitting between
+# the target and its correct named scope must not stop the ancestor walk or push synthesis
+# down to `ordinal` -- it must be skipped, and the walk must keep climbing to the named row
+# above it. This is the pure-layer half of I2; the web-surface half is that `act_on_index`
+# must run this same reasoning against the raw, unfiltered node population rather than the
+# filtered-and-truncated one the model was shown (see tests/surface/test_web_surface.py).
+def test_scope_synthesis_climbs_past_an_unnamed_intermediate_ancestor() -> None:
+    nodes = [
+        node(0, "rowgroup", "", depth=0),
+        node(1, "row", "Savings 000100045512-01 4,218.60 Select", depth=1),
+        node(2, "button", "Select", depth=2),
+        node(3, "rowgroup", "", depth=0),
+        node(4, "row", "Checking 000100045512-02 312.04 Select", depth=1),
+        node(5, "button", "Select", depth=2),
+    ]
+    loc = synthesize(nodes[2], nodes)
+    assert loc.scope is not None, "an unnamed intermediate ancestor must not defeat scoping"
+    assert "Savings" in (loc.scope.name or "")
+    assert loc.ordinal is None
+
+
 def test_resolve_against_a_scoped_locator_with_real_depths() -> None:
     nodes = [
         node(0, "row", "Savings 000100045512-01 4,218.60 Select", depth=2),

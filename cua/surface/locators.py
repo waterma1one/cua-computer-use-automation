@@ -25,6 +25,7 @@ from cua.surface.models import (
     Resolution,
     Strategy,
     Unique,
+    ancestor_positions,
 )
 
 
@@ -33,12 +34,10 @@ def ancestors_of(node: Node, nodes: list[Node]) -> list[Node]:
 
     The one containment rule `synthesize` and `resolve_against` both use: `nodes[i]`
     encloses `node` when `i` precedes `node`'s position in the list and `nodes[i]` is a
-    proper ancestor by depth. Walking backward from `node`'s position, a running minimum
-    depth starts at `node.depth`; every preceding node whose depth is strictly below that
-    running minimum is an ancestor, and the minimum drops to its depth. A preceding node at
-    the same or greater depth is a sibling (or a sibling's descendant) and is skipped
-    without breaking the walk, which is what lets the walk reach a grandparent past an
-    intervening sibling cell.
+    proper ancestor by depth. The actual depth-walk (R22) is `cua.surface.models.
+    ancestor_positions`, shared with `cua.surface.snapshot._scrub_ancestor_names` -- this
+    function only maps `node` to its position and the returned positions back to `Node`
+    objects.
 
     `nodes` should already be filtered to one `surface_path` (as `synthesize` and
     `resolve_against` both do before calling this) -- containment across frames is
@@ -49,16 +48,14 @@ def ancestors_of(node: Node, nodes: list[Node]) -> list[Node]:
     ancestors precede it and depth only rises and falls with actual nesting. A caller that
     passes a reordered or arbitrarily filtered list (sorted by name, shuffled, every third
     node dropped) gets silently wrong ancestors back, not an error: the depth/position walk
-    has no way to detect that its input no longer reflects the real tree.
+    has no way to detect that its input no longer reflects the real tree. This is why
+    `WebSurface.act_on_index` (I2) synthesizes against the raw, unfiltered node population
+    rather than the filtered-and-renumbered one the model was shown -- the model-facing list
+    is exactly the kind of arbitrarily-filtered input this paragraph warns about.
     """
     position = _position_of(node, nodes)
-    running_min_depth = node.depth
-    ancestors: list[Node] = []
-    for candidate in reversed(nodes[:position]):
-        if candidate.depth < running_min_depth:
-            ancestors.append(candidate)
-            running_min_depth = candidate.depth
-    return ancestors
+    depths = [n.depth for n in nodes]
+    return [nodes[i] for i in ancestor_positions(position, depths)]
 
 
 def _position_of(node: Node, nodes: list[Node]) -> int:
@@ -224,9 +221,14 @@ def synthesize(node: Node, among: list[Node]) -> Locator:
 def _failed_precondition(node: Node, require: Require) -> Literal["visible", "enabled"] | None:
     if require.enabled and node.state.disabled:
         return "enabled"
-    # Node carries no visibility flag: the accessibility snapshot a Node is built from
-    # already excludes hidden elements, so a node's presence in an Observation at all is
-    # itself the visibility signal. There is nothing further to check here.
+    # R24: visibility is a live-only property, and this is the pure-layer half of that
+    # rule. `Node` carries no visibility flag, and this function genuinely cannot check one
+    # -- a node's mere presence in an Observation is the only signal available offline, so
+    # `PreconditionFailed(which="visible")` can never originate here. That is not a gap:
+    # the live half of the same rule -- re-checking visibility against the actual page,
+    # because a snapshot can go stale between observation and action -- lives in
+    # `cua.surface.web._failed_live_precondition`, which is where `require.visible` is
+    # actually enforced.
     return None
 
 
