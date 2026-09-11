@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3", "ruff>=0.7", "mypy>=1.13", "types-PyYAML>=6.0"]
+dev = ["pytest>=8.3", "ruff>=0.7", "mypy>=1.13", "types-PyYAML>=6.0", "jsonschema>=4.23"]
 
 [project.scripts]
 cua = "cua.cli:app"
