@@ -28,7 +28,19 @@ def errors(artifact: Artifact) -> list[Finding]:
 def test_a_minimal_artifact_validates_clean() -> None:
     # The control that keeps every other test in this module honest: without it, a
     # validator that flagged everything would pass them all.
-    assert errors(base()) == []
+    #
+    # It asserts the *whole* finding list, not just the absence of errors. Every other test
+    # here checks that some code fires, so a check that fires on everything passes all of
+    # them -- `ORDINAL_USED` mutated to `if any(True ...)` left fifty tests green, because
+    # nothing anywhere said what a clean artifact must NOT produce. This is the one place
+    # that says it, so a new code cannot be added without a deliberate edit here.
+    assert [(f.level, f.code) for f in validate(base())] == [("note", "ALLOWLIST_NOT_CHECKED")]
+
+
+def test_a_locator_with_no_ordinal_produces_no_ordinal_warning() -> None:
+    # The over-firing direction of the ordinal check, stated on its own so the reason it
+    # exists survives an edit to the control test above.
+    assert "ORDINAL_USED" not in codes(base())
 
 
 def test_a_from_input_naming_no_declared_input_is_an_error() -> None:

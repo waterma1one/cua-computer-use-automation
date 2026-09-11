@@ -291,10 +291,43 @@ def resolve_against(loc: Locator, nodes: list[Node]) -> Resolution:
     If every attempt comes back `not_found`, the result is `not_found` too, with a reason
     naming the primary and every fallback that was tried and how each failed to match. This
     function never guesses between multiple candidates at any point in that process.
+
+    E8: cycle-guarded. `a.fallbacks = [b]; b.fallbacks = [a]` is constructible with plain
+    Pydantic attribute assignment -- `Locator.fallbacks` is an ordinary assignable field, so
+    no `model_construct` or `model_copy` bypass is needed -- and the recursion below reached
+    `RecursionError` on it. Phase 2 triaged this as a deferred minor partly on the belief
+    that building one required a bypass, which was wrong. Phase 3's compiler is the first
+    real producer of `fallbacks` and phase 4 replays fallback chains, so it is fixed here.
     """
+    return _resolve_with_fallbacks(loc, nodes, frozenset())
+
+
+def _resolve_with_fallbacks(
+    loc: Locator, nodes: list[Node], chain: frozenset[int]
+) -> Resolution:
+    """`resolve_against`'s body, carrying the set of locator identities on the current path.
+
+    The guard is keyed on object identity and scoped to the **current path**, not to the
+    whole walk. Two points, both deliberate:
+
+    - Identity, not equality: two distinct `Locator` objects can compare equal under
+      Pydantic and both deserve their own attempt; only revisiting the same object is a loop.
+    - Per-path, not global: a locator legitimately reachable through two different fallback
+      branches (a diamond) is still tried on each, exactly as before. Only a true back edge
+      -- a locator that is its own ancestor in the chain -- is pruned, so this changes the
+      answer for no input that previously terminated.
+
+    A pruned edge is silent here. It is an authoring defect rather than a resolution
+    outcome, and inventing a `Resolution` kind for it would widen a closed vocabulary that
+    spec §3.4 keeps deliberately small; the artifact validator is the right place to catch
+    one before replay ever sees it.
+    """
+    chain = chain | {id(loc)}
     attempts: list[Resolution] = [_resolve_direct(loc, nodes)]
     for fallback in loc.fallbacks:
-        attempts.append(resolve_against(fallback, nodes))
+        if id(fallback) in chain:
+            continue
+        attempts.append(_resolve_with_fallbacks(fallback, nodes, chain))
 
     for result in attempts:
         if result.kind == "unique":
