@@ -272,13 +272,65 @@ def test_a_locator_scope_cycle_does_not_make_validate_raise() -> None:
     # constructible through ordinary Pydantic attribute assignment -- no `model_construct`
     # bypass needed. Not reachable from a YAML load, but Task 3 mutates locators in memory
     # while resolving an overlay, which is exactly where this would first be hit.
+    #
+    # E9 changed what it reports, not whether it terminates: the cycle is now an error
+    # rather than a silent prune. Both edge kinds close a loop, so `scope` is checked too
+    # even though the code is named for the fallback case.
     outer = loc("Savings")
     inner = loc("Accounts")
     outer.scope = inner
     inner.scope = outer
     a = base(steps=[Step(id="s1", action="read", locator=outer, extract="text",
                          into="balance", risk="safe")])
-    assert [f for f in validate(a) if f.level == "error"] == []
+    assert [f.code for f in validate(a) if f.level == "error"] == ["LOCATOR_FALLBACK_CYCLE"]
+
+
+def test_a_locator_fallback_cycle_is_an_error() -> None:
+    # E9. Before this, an artifact carrying a cyclic fallback chain validated as fully
+    # clean and the cycle was then pruned silently at resolution time (E8's guard). Silent
+    # acceptance followed by silent pruning leaves no diagnostic trail anywhere, and phase
+    # 3's compiler is the first real producer of `fallbacks` -- a compiler bug emitting one
+    # would have had nothing to catch it.
+    primary = loc("Select")
+    alternate = loc("Choose")
+    primary.fallbacks = [alternate]
+    alternate.fallbacks = [primary]
+    a = base(steps=[Step(id="s1", action="click", locator=primary, risk="safe"),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    assert any(f.code == "LOCATOR_FALLBACK_CYCLE" and f.level == "error"
+               for f in validate(a))
+
+
+def test_a_locator_diamond_is_not_reported_as_a_cycle() -> None:
+    # The other direction, and the one this class of check gets wrong: a locator reachable
+    # through two different branches is revisited, but it is not a loop. Distinguishing them
+    # needs the current DFS path, not merely a visited set -- a check keyed on "have I seen
+    # this before" would fire here and would then fire on everything.
+    shared = loc("Shared")
+    left = loc("Left")
+    right = loc("Right")
+    left.fallbacks = [shared]
+    right.fallbacks = [shared]
+    root = loc("Root")
+    root.fallbacks = [left, right]
+    a = base(steps=[Step(id="s1", action="click", locator=root, risk="safe"),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    assert "LOCATOR_FALLBACK_CYCLE" not in codes(a)
+
+
+def test_a_scope_and_fallback_diamond_meeting_at_one_locator_is_not_a_cycle() -> None:
+    # The mixed-edge diamond: `scope` and `fallbacks` reach the same locator. Still not a
+    # loop, and the traversal crosses both edge kinds, so it is worth its own case.
+    shared = loc("Shared")
+    root = loc("Root")
+    root.scope = shared
+    root.fallbacks = [shared]
+    a = base(steps=[Step(id="s1", action="click", locator=root, risk="safe"),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    assert "LOCATOR_FALLBACK_CYCLE" not in codes(a)
 
 
 def test_a_locator_fallback_cycle_does_not_make_validate_raise() -> None:
