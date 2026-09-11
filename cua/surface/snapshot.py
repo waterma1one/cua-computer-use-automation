@@ -15,7 +15,13 @@ from typing import Any
 
 import yaml
 
-from cua.surface.models import Node, NodeState, SurfaceSegment, ancestor_positions
+from cua.surface.models import (
+    PROTECTED_NAME_TOKENS,
+    Node,
+    NodeState,
+    SurfaceSegment,
+    ancestor_positions,
+)
 
 # S3: the marker `scrub_protected_values` substitutes for a secret in the raw evidence YAML.
 # A visible marker, rather than the empty string the original implementation used, means a
@@ -24,29 +30,16 @@ from cua.surface.models import Node, NodeState, SurfaceSegment, ancestor_positio
 # that happens to share the secret's substring (see `scrub_protected_values`'s docstring).
 _REDACTION_MARKER = "[REDACTED]"
 
-# Credential-token vocabulary used to infer a node's `protected` state from its accessible
-# name alone. Nothing in the aria-snapshot YAML marks a field as a password field -- the
-# accessible name is the only signal available to a parser whose signature is
-# (yaml_text, surface_path, start_index). Matched case-insensitively on word boundaries, not
-# as a substring: a naive substring match would make "shipping" and "spinner" protected.
-# Deliberately extensible -- add tokens here as new leaky labels turn up in real applications.
-# R3's known blind spot, widened: protection is inferred from the accessible name alone, so
-# there is no signal in the snapshot to catch either of two cases -- a password field given
-# an unusual label that names none of these tokens (e.g. a custom "Secret Word" field spelled
-# in a way that misses every token here), or a password field with NO accessible name at all
-# (name is None, so this regex never even runs against it). Both are pinned deliberately by
-# tests in tests/surface/test_snapshot.py so the next reader meets the gap on purpose.
-PROTECTED_NAME_TOKENS = (
-    "password",
-    "passwd",
-    "passcode",
-    "pin",
-    "secret",
-    "token",
-    "otp",
-    "cvv",
-)
-
+# The credential-token vocabulary now lives in `cua.surface.models` beside the data it
+# describes (imported above), because `cua.artifact.validate` needs the same tuple for spec
+# §4.4's sixth condition and has no business importing this YAML parser to reach it. Only
+# the tuple moved; the matcher below stays here, where what it matches -- a live node's
+# accessible name during parsing -- is defined.
+#
+# Nothing in the aria-snapshot YAML marks a field as a password field, so the accessible
+# name is the only signal available to a parser whose signature is
+# (yaml_text, surface_path, start_index). See `PROTECTED_NAME_TOKENS` for the blind spot
+# that follows from that, and tests/surface/test_snapshot.py for the tests that pin it.
 _PROTECTED_NAME_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(token) for token in PROTECTED_NAME_TOKENS) + r")\b",
     re.IGNORECASE,

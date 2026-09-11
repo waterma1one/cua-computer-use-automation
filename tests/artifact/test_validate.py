@@ -1,0 +1,246 @@
+"""Spec §4.4: the load-time cross-field checks that run before any replay.
+
+One test per condition §4.4 names, plus the ordinal warning, the unclassified-risk error
+carried out of Task 1's review, and E4's skipped-narrowing note.
+"""
+
+from __future__ import annotations
+
+from cua.artifact.models import (
+    Artifact,
+    CapabilityPolicy,
+    InputSpec,
+    OutputSpec,
+    Step,
+)
+from cua.artifact.validate import DeploymentAllowlist, Finding, validate
+from tests.artifact.factories import base, loc
+
+
+def codes(artifact: Artifact) -> set[str]:
+    return {f.code for f in validate(artifact)}
+
+
+def errors(artifact: Artifact) -> list[Finding]:
+    return [f for f in validate(artifact) if f.level == "error"]
+
+
+def test_a_minimal_artifact_validates_clean() -> None:
+    # The control that keeps every other test in this module honest: without it, a
+    # validator that flagged everything would pass them all.
+    assert errors(base()) == []
+
+
+def test_a_from_input_naming_no_declared_input_is_an_error() -> None:
+    a = base(steps=[Step(id="s1", action="fill", locator=loc("x"),
+                         value={"from_input": "nonexistent"}, risk="safe")])
+    assert "UNKNOWN_INPUT" in codes(a)
+
+
+def test_an_into_naming_neither_an_output_nor_a_local_is_an_error() -> None:
+    a = base(steps=[Step(id="s1", action="read", locator=loc("x"), extract="text",
+                         into="not_declared", risk="safe")])
+    assert "UNKNOWN_OUTPUT" in codes(a)
+
+
+def test_an_into_naming_an_underscore_local_is_accepted() -> None:
+    # §4.2 decision 9: locals carry values between steps and are never returned to the caller.
+    a = base(steps=[Step(id="s1", action="read", locator=loc("x"), extract="text",
+                         into="_scratch", risk="safe"),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    assert "UNKNOWN_OUTPUT" not in codes(a)
+
+
+def test_a_declared_output_with_no_producing_step_is_an_error() -> None:
+    a = base(outputs={"balance": OutputSpec(type="string"),
+                      "orphan": OutputSpec(type="string")})
+    assert "OUTPUT_NEVER_PRODUCED" in codes(a)
+
+
+def test_a_from_step_cycle_is_an_error() -> None:
+    a = base(steps=[Step(id="s1", action="fill", locator=loc("x"),
+                         value={"from_step": "s2"}, risk="safe"),
+                    Step(id="s2", action="fill", locator=loc("y"),
+                         value={"from_step": "s1"}, risk="safe")])
+    assert "FROM_STEP_CYCLE" in codes(a)
+
+
+def test_a_from_step_naming_a_later_step_is_an_error() -> None:
+    a = base(steps=[Step(id="s1", action="fill", locator=loc("x"),
+                         value={"from_step": "s2"}, risk="safe"),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    assert "FROM_STEP_FORWARD_REFERENCE" in codes(a)
+
+
+def test_a_forward_reference_is_not_reported_as_a_cycle() -> None:
+    # The two defects have different fixes -- reorder the steps, versus break the loop --
+    # so they are separate codes and a forward reference must not be dressed up as a cycle.
+    a = base(steps=[Step(id="s1", action="fill", locator=loc("x"),
+                         value={"from_step": "s2"}, risk="safe"),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    assert "FROM_STEP_CYCLE" not in codes(a)
+
+
+def test_a_from_step_naming_no_step_at_all_is_an_error() -> None:
+    a = base(steps=[Step(id="s1", action="fill", locator=loc("x"),
+                         value={"from_step": "s9"}, risk="safe"),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    assert "FROM_STEP_UNKNOWN_STEP" in codes(a)
+
+
+def test_duplicate_step_ids_are_an_error() -> None:
+    # `from_step` and Task 3's overlays both address a step by id. Two steps sharing one id
+    # makes both addressings ambiguous, and a dict keyed by id would silently keep one.
+    a = base(steps=[Step(id="s1", action="click", locator=loc("x"), risk="safe"),
+                    Step(id="s1", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    assert "DUPLICATE_STEP_ID" in codes(a)
+
+
+def test_a_literal_filling_a_sensitive_field_is_an_error() -> None:
+    # §4.2 decision 8 and §8.3 step 4: the compiler refuses to persist a literal read from a
+    # protected or sensitive field, and the validator refuses to load one that got through.
+    a = base(steps=[Step(id="s1", action="fill", locator=loc("Password"),
+                         value={"literal": "hunter2"}, risk="safe")])
+    assert "LITERAL_FROM_PROTECTED_FIELD" in codes(a)
+
+
+def test_a_protected_token_is_matched_on_word_boundaries_not_as_a_substring() -> None:
+    # The same rule phase 2's parser uses, and for the same reason: a naive substring match
+    # makes "Shipping" (pin) and "Spinner" (pin) protected fields.
+    a = base(steps=[Step(id="s1", action="fill", locator=loc("Shipping"),
+                         value={"literal": "12345"}, risk="safe"),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    assert "LITERAL_FROM_PROTECTED_FIELD" not in codes(a)
+
+
+def test_a_literal_filling_a_field_named_by_a_sensitive_input_is_an_error() -> None:
+    # The second signal available at load time: the control being filled corresponds, by
+    # name, to an input the artifact itself declares `sensitive: true`.
+    a = base(
+        inputs={"member_id": InputSpec(type="string"),
+                "security_answer": InputSpec(type="string", sensitive=True)},
+        steps=[Step(id="s1", action="fill", locator=loc("Security Answer"),
+                    value={"literal": "fido"}, risk="safe"),
+               Step(id="s2", action="read", locator=loc("y"), extract="text",
+                    into="balance", risk="safe")],
+    )
+    assert "LITERAL_FROM_PROTECTED_FIELD" in codes(a)
+
+
+def test_a_literal_filling_an_ordinary_field_is_fine() -> None:
+    a = base(steps=[Step(id="s1", action="fill", locator=loc("Member ID"),
+                         value={"literal": "12345"}, risk="safe"),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    assert "LITERAL_FROM_PROTECTED_FIELD" not in codes(a)
+
+
+def test_ordinal_usage_warns_but_does_not_error() -> None:
+    # §3.4 rule 2 and §4.4: ordinal is the sanctioned last resort, and it is reviewable.
+    a = base(steps=[Step(id="s1", action="fill", locator=loc("Member ID", ordinal=2),
+                         value={"from_input": "member_id"}, risk="safe"),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    findings = validate(a)
+    assert any(f.code == "ORDINAL_USED" and f.level == "warning" for f in findings)
+    assert [f for f in findings if f.level == "error"] == []
+
+
+def test_an_ordinal_hidden_in_a_scope_or_a_fallback_still_warns() -> None:
+    scoped = loc("Savings")
+    scoped.scope = loc("Accounts", ordinal=1)
+    a = base(steps=[Step(id="s1", action="read", locator=scoped, extract="text",
+                         into="balance", risk="safe")])
+    assert any(f.code == "ORDINAL_USED" for f in validate(a))
+
+
+def test_a_step_with_no_risk_classification_is_an_error() -> None:
+    # §6.3's asymmetry, carried into load time: over-classification costs a human a moment
+    # at approval, while an unclassified step later *treated* as safe is the error that
+    # cannot be undone. A step nobody has classified must not be replayable or approvable.
+    a = base(steps=[Step(id="s1", action="read", locator=loc("y"), extract="text",
+                         into="balance")])
+    assert any(f.code == "RISK_UNCLASSIFIED" and f.level == "error" for f in validate(a))
+
+
+def test_without_a_deployment_the_narrowing_check_reports_that_it_was_skipped() -> None:
+    # E4: a caller must never mistake "not checked" for "checked and clean".
+    assert any(f.code == "ALLOWLIST_NOT_CHECKED" and f.level == "note" for f in validate(base()))
+
+
+def test_the_skipped_note_distinguishes_no_policy_from_a_declared_one() -> None:
+    # Task 1 made `policy` nullable precisely so this distinction survives parsing; the note
+    # must carry it rather than erase it again.
+    undeclared = [f for f in validate(base()) if f.code == "ALLOWLIST_NOT_CHECKED"]
+    declared = [f for f in validate(base(policy=CapabilityPolicy(allowed_paths=["/teller/"])))
+                if f.code == "ALLOWLIST_NOT_CHECKED"]
+    assert len(undeclared) == len(declared) == 1
+    assert undeclared[0].message != declared[0].message
+
+
+DEPLOYMENT = DeploymentAllowlist(
+    allowed_origins=["https://acme.corebank.example"],
+    allowed_paths=["/teller/"],
+    denied_paths=["/teller/admin/"],
+    allowed_actions=["navigate", "click", "fill", "read"],
+)
+
+
+def test_with_a_deployment_supplied_the_skipped_note_is_not_emitted() -> None:
+    assert "ALLOWLIST_NOT_CHECKED" not in {f.code for f in validate(base(), DEPLOYMENT)}
+
+
+def test_a_policy_that_narrows_the_deployment_allowlist_is_clean() -> None:
+    a = base(policy=CapabilityPolicy(
+        allowed_origins=["https://acme.corebank.example"],
+        allowed_paths=["/teller/search"],
+        allowed_actions=["fill", "read"],
+    ))
+    assert [f for f in validate(a, DEPLOYMENT) if f.level == "error"] == []
+
+
+def test_an_undeclared_policy_never_widens_anything() -> None:
+    # `None` means "not narrowed", not "narrowed to nothing" -- inheriting the deployment's
+    # own set is not a widening.
+    assert [f for f in validate(base(), DEPLOYMENT) if f.level == "error"] == []
+
+
+def test_a_policy_origin_outside_the_deployment_widens_and_is_an_error() -> None:
+    a = base(policy=CapabilityPolicy(allowed_origins=["https://other.example"]))
+    assert any(f.code == "POLICY_WIDENS_ALLOWLIST" and f.level == "error"
+               for f in validate(a, DEPLOYMENT))
+
+
+def test_a_policy_path_outside_the_deployment_widens_and_is_an_error() -> None:
+    a = base(policy=CapabilityPolicy(allowed_paths=["/admin/console"]))
+    assert "POLICY_WIDENS_ALLOWLIST" in {f.code for f in validate(a, DEPLOYMENT)}
+
+
+def test_a_policy_path_inside_a_denied_prefix_widens_and_is_an_error() -> None:
+    # §6.1: deny rules are evaluated first and win. A capability policy re-permitting a
+    # denied path is the widening this check exists to catch.
+    a = base(policy=CapabilityPolicy(allowed_paths=["/teller/admin/close"]))
+    assert "POLICY_WIDENS_ALLOWLIST" in {f.code for f in validate(a, DEPLOYMENT)}
+
+
+def test_a_policy_action_outside_the_deployment_widens_and_is_an_error() -> None:
+    a = base(policy=CapabilityPolicy(allowed_actions=["fill", "select"]))
+    assert "POLICY_WIDENS_ALLOWLIST" in {f.code for f in validate(a, DEPLOYMENT)}
+
+
+def test_validation_reports_every_defect_rather_than_stopping_at_the_first() -> None:
+    # A human reviewing an artifact wants the whole list, not the first thing that went
+    # wrong, so `validate` never raises and never short-circuits.
+    a = base(
+        outputs={"balance": OutputSpec(type="string"), "orphan": OutputSpec(type="string")},
+        steps=[Step(id="s1", action="fill", locator=loc("Password"),
+                    value={"literal": "hunter2"})],
+    )
+    expected = {"LITERAL_FROM_PROTECTED_FIELD", "RISK_UNCLASSIFIED", "OUTPUT_NEVER_PRODUCED"}
+    assert expected <= codes(a)
