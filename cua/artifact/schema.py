@@ -32,6 +32,28 @@ the capability takes and returns -- never how it is achieved. This module reads 
 steps could try to reason about them, and the artifact is deliberately the only thing
 that knows the mechanics.
 
+**E13 (controller ruling): `sensitive` and `redact` are exported, not withheld.** An
+earlier version of this module treated them as log-time concerns and left them out. That
+was wrong, and E13 corrects it: S4.2 decision 6 says "the capability author declares
+sensitivity; the log writer honours it" -- naming one consumer that must honour the flag,
+not the only one permitted to see it. The calling agent is the party that actually
+sources and constructs a sensitive argument, and it decides what to do with it *before*
+this system's own log writer ever gets a look -- its own transcript, its own upstream
+logging, its own display to a user are all outside this system's control. An agent never
+told an argument is sensitive has no reason to treat it carefully, and that is a leak
+this system cannot close after the fact from inside its own log writer.
+
+This does not reopen the no-mechanics rule above: `sensitive` (on an input) and `redact`
+(on an output) describe *what kind of thing the value is* -- a constraint on the
+argument, exactly the same kind of fact `pattern` states -- never *how the capability
+achieves its result*. `locator` and `steps` are mechanics; `sensitive` is contract, like
+`type` and `pattern`. JSON Schema has no standard keyword for either flag, which is fine
+here: an unrecognised key is inert to any validator, so unlike `pattern` it carries no
+obligation to be independently enforceable by `jsonschema.validate` -- it only has to be
+visible to a reader. Each flag uses the same field name as the source model
+(`InputSpec.sensitive`, `OutputSpec.redact`) for zero translation cost, and is emitted
+only when `True`, so a property with nothing to declare stays exactly as clean as before.
+
 Like the rest of `cua/artifact/`, this module is pure data shaping: no I/O, no Playwright
 import, no DOM reference, no CSS selector or XPath.
 """
@@ -47,6 +69,8 @@ def _input_property(spec: InputSpec) -> dict[str, Any]:
     prop: dict[str, Any] = {"type": spec.type}
     if spec.pattern is not None:
         prop["pattern"] = spec.pattern
+    if spec.sensitive:
+        prop["sensitive"] = True
     return prop
 
 
@@ -54,6 +78,8 @@ def _output_property(spec: OutputSpec) -> dict[str, Any]:
     prop: dict[str, Any] = {"type": spec.type}
     if spec.format is not None:
         prop["format"] = spec.format
+    if spec.redact:
+        prop["redact"] = True
     return prop
 
 
@@ -61,9 +87,10 @@ def export_tool_schema(artifact: Artifact) -> dict[str, Any]:
     """Format `artifact` as a JSON Schema tool definition.
 
     Built entirely from the declared `name`, `description`, `inputs`, and `outputs` --
-    see the module docstring for why nothing else on the artifact is read. Does not
-    validate or gate; see the module docstring for the three checks a caller must run
-    before treating the result as callable.
+    see the module docstring for why nothing else on the artifact is read, and for E13's
+    reasoning on why `sensitive`/`redact` are exported alongside `type`/`pattern`/
+    `format` rather than withheld. Does not validate or gate; see the module docstring
+    for the three checks a caller must run before treating the result as callable.
     """
     input_properties = {name: _input_property(spec) for name, spec in artifact.inputs.items()}
     required = [name for name, spec in artifact.inputs.items() if spec.required]
