@@ -3,8 +3,12 @@
 Mirrors spec S4.1's on-disk artifact shape field for field. This module is pure data --
 no cross-field validation beyond what the nine decisions in spec S4.2 and the ambiguity
 resolutions in the phase-3 task brief actually require, and (like `cua/surface/models.py`)
-nothing here may import a browser driver, reference a DOM, or carry a CSS selector or an
-XPath: `tests/test_architecture.py` enforces this over the whole `cua/artifact/` package.
+nothing here imports a browser driver, references a DOM, or carries a CSS selector or an
+XPath. Only the first of those is mechanically enforced: `tests/test_architecture.py` greps
+the whole `cua/artifact/` package for an `import`/`from` of `playwright` or `selenium`, and
+nothing else. The rest is convention held up by review. The distinction is stated rather
+than glossed, because a docstring claiming more than its test delivers is how a reader
+comes to trust a check that does not cover what the words say.
 The single deliberate exception to "no regular expressions in an artifact" is
 `InputSpec.pattern`, a JSON Schema validation pattern for a caller's argument, never a
 locator.

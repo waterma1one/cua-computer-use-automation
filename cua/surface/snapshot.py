@@ -16,11 +16,11 @@ from typing import Any
 import yaml
 
 from cua.surface.models import (
-    PROTECTED_NAME_TOKENS,
     Node,
     NodeState,
     SurfaceSegment,
     ancestor_positions,
+    is_protected_name,
 )
 
 # S3: the marker `scrub_protected_values` substitutes for a secret in the raw evidence YAML.
@@ -30,20 +30,17 @@ from cua.surface.models import (
 # that happens to share the secret's substring (see `scrub_protected_values`'s docstring).
 _REDACTION_MARKER = "[REDACTED]"
 
-# The credential-token vocabulary now lives in `cua.surface.models` beside the data it
-# describes (imported above), because `cua.artifact.validate` needs the same tuple for spec
-# §4.4's sixth condition and has no business importing this YAML parser to reach it. Only
-# the tuple moved; the matcher below stays here, where what it matches -- a live node's
-# accessible name during parsing -- is defined.
+# E6: the credential-name rule -- vocabulary *and* matcher -- now lives in
+# `cua.surface.models.is_protected_name` (imported above), because `cua.artifact.validate`
+# needs the same rule for spec §4.4's sixth condition and two byte-identical copies of a
+# security-relevant rule drift. A drift here is a credential leaking past one of the two
+# checks that exist to stop it.
 #
 # Nothing in the aria-snapshot YAML marks a field as a password field, so the accessible
-# name is the only signal available to a parser whose signature is
-# (yaml_text, surface_path, start_index). See `PROTECTED_NAME_TOKENS` for the blind spot
-# that follows from that, and tests/surface/test_snapshot.py for the tests that pin it.
-_PROTECTED_NAME_RE = re.compile(
-    r"\b(?:" + "|".join(re.escape(token) for token in PROTECTED_NAME_TOKENS) + r")\b",
-    re.IGNORECASE,
-)
+# name remains the only signal available to a parser whose signature is
+# (yaml_text, surface_path, start_index). See that predicate's docstring for the three blind
+# spots that follow from inferring protection from a name, and tests/surface/test_snapshot.py
+# for the ones pinned from this side.
 
 # One aria-snapshot entry key, e.g.:
 #   textbox "Member ID"
@@ -67,12 +64,6 @@ class _Entry:
     disabled: bool
     checked: bool
     expanded: bool
-
-
-def _is_protected(name: str | None) -> bool:
-    if not name:
-        return False
-    return _PROTECTED_NAME_RE.search(name) is not None
 
 
 def _parse_key(key: str) -> tuple[str, str | None, bool, bool, bool]:
@@ -210,7 +201,7 @@ def _scrub_ancestor_names(entries: list[_Entry]) -> None:
     """
     depths = [e.depth for e in entries]
     for i, entry in enumerate(entries):
-        if not (_is_protected(entry.name) and entry.value):
+        if not (is_protected_name(entry.name) and entry.value):
             continue
         secret = entry.value
         # S2: the protected entry's own name is scrubbed too -- a hostile but real label
@@ -252,7 +243,7 @@ def parse_aria_snapshot(
 
     nodes: list[Node] = []
     for offset, entry in enumerate(entries):
-        protected = _is_protected(entry.name)
+        protected = is_protected_name(entry.name)
         value = None if protected else entry.value
         state = NodeState(
             disabled=entry.disabled,
@@ -297,7 +288,7 @@ def scrub_protected_values(yaml_text: str) -> str:
     entries: list[_Entry] = []
     _walk(data, 0, entries)
 
-    secrets = {entry.value for entry in entries if entry.value and _is_protected(entry.name)}
+    secrets = {entry.value for entry in entries if entry.value and is_protected_name(entry.name)}
 
     scrubbed = yaml_text
     for secret in secrets:

@@ -49,7 +49,10 @@ def base(**over: Any) -> Artifact:
         # parses at all.
         settle=Settle(timeout_ms=8000, poll_ms=200),
         max_duration_ms=120000,
-        success=Success(checkpoint=Matcher(role="heading", name="Member ")),
+        # §4.1's own checkpoint, `name_match` included: omitting it defaults to `exact`,
+        # which is a different predicate from the one the spec writes.
+        success=Success(checkpoint=Matcher(role="heading", name_match="contains",
+                                           name="Member ")),
         provenance=Provenance(
             discovered_at="2026-09-09T00:00:00",
             model="gemini-2.5-flash-lite",

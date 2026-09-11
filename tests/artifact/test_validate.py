@@ -244,3 +244,60 @@ def test_validation_reports_every_defect_rather_than_stopping_at_the_first() -> 
     )
     expected = {"LITERAL_FROM_PROTECTED_FIELD", "RISK_UNCLASSIFIED", "OUTPUT_NEVER_PRODUCED"}
     assert expected <= codes(a)
+
+
+def test_the_base_fixture_matches_the_spec_s_own_success_checkpoint() -> None:
+    # M8: S4.1's example success checkpoint is
+    # `{ role: heading, name_match: contains, name: "Member " }`. Omitting `name_match`
+    # silently defaults it to `exact`, which is a different predicate. Inert for validation,
+    # but Tasks 3-5 inherit this fixture and a fixture that quietly disagrees with the spec
+    # is how a wrong assumption propagates.
+    assert base().success.checkpoint.name_match == "contains"
+
+
+def test_a_locator_scope_cycle_does_not_make_validate_raise() -> None:
+    # M3: `validate` documents that it never raises, and a cyclic scope chain is
+    # constructible through ordinary Pydantic attribute assignment -- no `model_construct`
+    # bypass needed. Not reachable from a YAML load, but Task 3 mutates locators in memory
+    # while resolving an overlay, which is exactly where this would first be hit.
+    outer = loc("Savings")
+    inner = loc("Accounts")
+    outer.scope = inner
+    inner.scope = outer
+    a = base(steps=[Step(id="s1", action="read", locator=outer, extract="text",
+                         into="balance", risk="safe")])
+    assert [f for f in validate(a) if f.level == "error"] == []
+
+
+def test_a_locator_fallback_cycle_does_not_make_validate_raise() -> None:
+    first = loc("Savings")
+    second = loc("Password")
+    first.fallbacks = [second]
+    second.fallbacks = [first]
+    a = base(steps=[Step(id="s1", action="fill", locator=first,
+                         value={"literal": "hunter2"}, risk="safe"),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    # It must terminate *and* still see the protected name hiding in the cycle.
+    assert "LITERAL_FROM_PROTECTED_FIELD" in codes(a)
+
+
+def test_a_step_drawing_its_value_from_itself_is_a_cycle_not_a_forward_reference() -> None:
+    # M5: a self-reference is a cycle -- the step can never produce a value for itself --
+    # and it is not a forward reference, because there is no reordering that fixes it.
+    a = base(steps=[Step(id="s1", action="fill", locator=loc("x"),
+                         value={"from_step": "s1"}, risk="safe"),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    found = codes(a)
+    assert "FROM_STEP_CYCLE" in found
+    assert "FROM_STEP_FORWARD_REFERENCE" not in found
+
+
+def test_a_policy_path_enclosing_a_denied_subtree_is_not_reported() -> None:
+    # M6: deny precedence is checked in one direction only. `/teller/admin/close` sits
+    # inside the denied `/teller/admin/` and is caught; `/teller/`, which *encloses* that
+    # denied subtree, is not. Pinned so the asymmetry is a decision and not an accident --
+    # see `_narrowing_findings` for why it is the right one.
+    a = base(policy=CapabilityPolicy(allowed_paths=["/teller/"]))
+    assert [f for f in validate(a, DEPLOYMENT) if f.level == "error"] == []

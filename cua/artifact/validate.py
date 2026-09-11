@@ -17,9 +17,13 @@ gate; warnings and notes are for the reviewer.
 fixed by breaking the loop, so collapsing both into "invalid reference" would throw away
 the only part of the finding a caller could act on.
 
-Like `cua/artifact/models.py`, nothing here may import a browser driver, reference a DOM,
-or carry a CSS selector or an XPath; `tests/test_architecture.py` enforces that over the
-whole `cua/artifact/` package.
+Like `cua/artifact/models.py`, nothing here imports a browser driver, references a DOM, or
+carries a CSS selector or an XPath. Only the first of those is mechanically enforced:
+`tests/test_architecture.py` greps `cua/artifact/` for an `import`/`from` of `playwright`
+or `selenium` and nothing else. The rest is convention held up by review, and saying so is
+the point -- an overstated guarantee in a docstring is the same defect phase 2 hit on its
+protected-value validator, where a reader trusted a check that did not cover what the words
+claimed.
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from cua.artifact.models import Artifact, CapabilityPolicy, FromInput, FromStep, LiteralValue, Step
-from cua.surface.models import PROTECTED_NAME_TOKENS, ActionKind, Locator
+from cua.surface.models import ActionKind, Locator, is_protected_name
 
 FindingLevel = Literal["error", "warning", "note"]
 
@@ -80,22 +84,21 @@ class DeploymentAllowlist(BaseModel):
     allowed_actions: list[ActionKind] = Field(default_factory=list)
 
 
-# The artifact layer's own matcher over the shared credential vocabulary. Word boundaries
-# and case-insensitivity are the rule phase 2's parser uses and the reason is the same
-# there: a substring match would make "Shipping" and "Spinner" protected because both
-# contain "pin". Only the vocabulary is shared (see `PROTECTED_NAME_TOKENS`); the matched
-# subject differs -- a persisted locator's `name` here, a live node's accessible name
-# there.
-_PROTECTED_NAME_RE = re.compile(
-    r"\b(?:" + "|".join(re.escape(token) for token in PROTECTED_NAME_TOKENS) + r")\b",
-    re.IGNORECASE,
-)
+# The credential-name rule itself lives in `cua.surface.models.is_protected_name` (E6): one
+# security-relevant rule, one implementation, because a drift between two copies is a
+# credential leaking past one of the two checks that exist to stop it.
 
 # Turns a control's accessible name into the identifier shape `inputs` keys use, so
-# "Security Answer" can be recognised as the field a declared `security_answer` input
-# feeds. An approximation, and knowingly so: it is one of only two signals §4.4's sixth
-# condition has at load time, and over-matching costs an author a rename while
-# under-matching costs a credential persisted into a reviewable file.
+# "Security Answer" can be recognised as the field a declared `security_answer` input feeds.
+#
+# E7: this normalises and then requires **exact equality**, so it errs toward silence, not
+# toward noise. "Security Answer" fires; "Enter your Security Answer", "Security Answer
+# (required)", "SecurityAnswer" and "Answer" all do not. That is deliberate and must stay.
+# This is the *secondary* signal for §4.4's sixth condition -- the token rule below it and
+# §8.3 step 4's compiler-side refusal are the primary controls -- and a fuzzy name-to-input
+# matcher would fire on ordinary fields. A backstop that cries wolf trains a reviewer to
+# skim past the finding that matters, which degrades the very control it was added to
+# support.
 _NON_IDENTIFIER_RE = re.compile(r"[^a-z0-9]+")
 
 
@@ -110,12 +113,29 @@ def _locator_chain(locator: Locator) -> list[Locator]:
     node. An `ordinal` buried in a `scope` is exactly as reviewable a fact as one on the
     locator itself, and a fallback is the path taken when a human is least likely to be
     watching (R18's reasoning), so a protected name hiding in one must not be invisible.
+
+    Cycle-guarded by object identity. `a.scope = b; b.scope = a` is constructible through
+    plain Pydantic attribute assignment -- no `model_construct` bypass needed -- and an
+    unguarded walk would raise `RecursionError` out of a `validate` that documents that it
+    never raises. A cyclic chain cannot arrive from a YAML load, but Task 3 mutates locators
+    in memory while resolving an overlay, which is where this would first be hit. Phase 2
+    left the same cycle open in fallback *resolution* as a deferred minor; there it needs a
+    Pydantic bypass to construct, here it does not.
     """
-    chain = [locator]
-    if locator.scope is not None:
-        chain.extend(_locator_chain(locator.scope))
-    for fallback in locator.fallbacks:
-        chain.extend(_locator_chain(fallback))
+    seen: set[int] = set()
+    chain: list[Locator] = []
+
+    def walk(current: Locator) -> None:
+        if id(current) in seen:
+            return
+        seen.add(id(current))
+        chain.append(current)
+        if current.scope is not None:
+            walk(current.scope)
+        for fallback in current.fallbacks:
+            walk(fallback)
+
+    walk(locator)
     return chain
 
 
@@ -192,20 +212,23 @@ def _literal_findings(artifact: Artifact, step: Step, where: str) -> list[Findin
     Two signals are available once the artifact is on disk, and both are errors under the
     one code because both describe the same defect:
 
-    1. The step's locator names a protected control (`PROTECTED_NAME_TOKENS`, matched the
-       way phase 2 matches it).
-    2. The control corresponds by name to an input the artifact itself declares
-       `sensitive: true`.
+    1. The step's locator names a protected control -- `is_protected_name`, the single
+       shared implementation of the rule phase 2's parser also uses (E6). This is the
+       primary of the two.
+    2. The control's name, normalised, is **exactly** a declared input's key and that input
+       is `sensitive: true`. Secondary, and deliberately narrow: see `_as_input_key` (E7)
+       for why it errs toward silence.
 
     What is *not* available: the live node's `protected` state, which existed only in the
-    observation the compiler saw. That is precisely why the compiler holds the primary
-    control and this is the backstop.
+    observation the compiler saw. That, plus both signals' documented blind spots (see
+    `is_protected_name`), is precisely why the compiler holds the primary control and this
+    is only the backstop.
     """
     if not isinstance(step.value, LiteralValue) or step.locator is None:
         return []
 
     for link in _locator_chain(step.locator):
-        if link.name and _PROTECTED_NAME_RE.search(link.name):
+        if is_protected_name(link.name):
             return [Finding(
                 level="error", code="LITERAL_FROM_PROTECTED_FIELD", where=where,
                 message=(
@@ -255,6 +278,11 @@ def _from_step_findings(artifact: Artifact) -> list[Finding]:
     A step carries at most one `from_step`, so the reference graph is functional: following
     the single outgoing edge from each step either terminates or revisits a step already on
     the walk, and no general cycle-finding machinery is warranted.
+
+    A step referencing *itself* is a cycle and is deliberately **not** also a forward
+    reference -- hence `>` and not `>=` on the position test below. No reordering fixes a
+    self-reference, so calling it a forward reference would hand the reviewer the one fix
+    that cannot work.
     """
     findings: list[Finding] = []
 
@@ -342,6 +370,18 @@ def _narrowing_findings(
     wins, because a capability policy re-permitting a denied path is exactly the widening
     that matters (`/teller/admin/close` sits inside an allowed origin and an allowed
     prefix). Phase 5 owns richer pattern matching and inherits this type.
+
+    **The deny check is deliberately one-directional, and the asymmetry is not an
+    oversight.** A policy path *inside* a denied prefix (`/teller/admin/close` against
+    denied `/teller/admin/`) is reported, because the policy is trying to permit a
+    specifically denied thing. A policy path that *encloses* a denied subtree (`/teller/`
+    against denied `/teller/admin/`) is not, because it is not a widening: deny wins at
+    enforcement regardless, so `/teller/` grants the capability `/teller/` minus
+    `/teller/admin/`, exactly as it would have without the policy. Reporting it would mean
+    erroring on the common, correct case of a policy naming a broad prefix that happens to
+    contain a carve-out. Pinned in both directions by
+    `test_a_policy_path_inside_a_denied_prefix_widens_and_is_an_error` and
+    `test_a_policy_path_enclosing_a_denied_subtree_is_not_reported`.
     """
     if policy is None:
         return []
