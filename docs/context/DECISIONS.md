@@ -331,3 +331,134 @@ the path that produced it. This also matches how the automation actually perceiv
 page: through the accessibility snapshot (page content), not the response line.
 **Cost accepted:** if a later phase wants status-code-based classification, it must
 revisit this decision explicitly rather than assume one status per outcome.
+
+## D13 — The locator vocabulary enforces its rules in the model, not by convention
+`Locator` and `Node` are Pydantic models that make the spec's §3.4 and §3.7 rules
+unexpressible rather than merely discouraged. `name_match` is a `Literal` with no `regex`
+member, so a regular expression cannot enter an artifact. `rationale` and `confidence` are
+required fields, so a locator that cannot be reviewed by a human cannot be constructed. A
+validator rejects a `Node` whose state is `protected` while it carries a value.
+**`Resolution` is a discriminated union on a literal `kind` field** — `unique`, `not_found`,
+`ambiguous`, `precondition_failed` — because two later modules read those strings.
+**`Locator.strategy`** is `Literal["role_name", "text", "ax_path"]`, defaulting to `role_name`.
+**Cost accepted:** the model layer carries logic, so a future consumer that wants a
+relaxed locator must relax the model explicitly and in public, which is the intent.
+
+## D14 — `Locator.role` is optional, and required only for the `role_name` strategy
+A `text`-strategy locator exists precisely to match a control with no accessible name worth
+relying on, in an application that carries no ARIA roles at all. Requiring a role there forces
+the synthesizer to fabricate one, and the fabricated value lands in an artifact a human is
+meant to review. `role` is therefore `str | None`, with a validator requiring it to be
+non-None when `strategy == "role_name"` — the invariant that actually matters, since a
+`role_name` locator without a role is meaningless.
+**Cost accepted:** a later phase that assumed a non-None role must check; the validator
+confines that to the non-`role_name` strategies, which such a phase must special-case anyway.
+
+## D15 — Protection is inferred from the accessible name, and the value is scrubbed from ancestors too
+Nothing in an accessibility snapshot marks a field as a password field. `parse_aria_snapshot`
+receives only YAML text, so the node's accessible name is the only signal available, and it is
+matched **on word boundaries** against a documented, extensible tuple of credential tokens —
+word boundaries because naive substring matching makes "shipping" and "spinner" protected.
+
+More importantly: **stripping the protected node's own value does not stop the leak.** A live
+probe of the target application showed a typed password appearing three times in one snapshot —
+as the textbox's value, and inside the accessible **names** of the enclosing cell and row,
+because an accessible name is computed from descendant content and therefore propagates a
+secret upward. Spec §3.7.1 as literally written ("strip the value of any node whose state
+includes protected") does not achieve what §3.7.3 asserts. The rule is widened: the parser
+strips the value and scrubs that string out of the node's own name and its ancestors' names,
+ancestors being identified through the `depth` chain. Ancestor-scoped rather than a global
+sweep, so a short password cannot blank unrelated text elsewhere on the page.
+**Known blind spot, recorded deliberately:** a password field with an unusual label, or with
+**no** label at all, is not detected. The target application carries an unnamed input as a
+required hazard, so this is a real shape, not a hypothetical one.
+**Cost accepted:** a credential reaching the model is the worst failure available to this
+system, so the test that proves the property asserts the sentinel is absent from the entire
+serialized observation, not merely from the protected node.
+
+## D16 — `Node.depth` carries tree structure through a flat list
+Observations are a flat list, but `scope` means "inside the Savings row" and secret scrubbing
+means "this node's ancestors". Both need containment. Rather than parent pointers, each `Node`
+carries `depth`, the accessibility-tree nesting level, and containment is derived by walking
+backward keeping a running minimum. **One shared helper serves every call site** — synthesis,
+resolution, and the secret scrub — because if any two disagreed about what "inside the Savings
+row" means, the system would silently click the wrong control or leak a value it believed it
+had scrubbed. Ordering is a load-bearing precondition: a caller passing a reordered or filtered
+list gets wrong ancestors back, not an error, and the helper says so at the point of risk.
+**Cost accepted:** a deeply nested duplicate could pick a too-distant scope; the ordinal
+fallback bounds the damage and the locator's `confidence` reports it.
+
+## D17 — Resolution exhausts the fallback chain before reporting any failure
+Spec §3.4 rule 3 requires that an ambiguous match try fallbacks rather than fail immediately,
+and that resolution never take a first match. Resolution therefore runs in two passes: try the
+primary and then every fallback in order, returning the first that resolves uniquely; only if
+none does, report the first non-`not_found` outcome in attempt order, or a composite
+`NotFound` naming every attempt. Attempt order rather than a severity ranking, because the
+fallback list is already the author's stated order of preference and a second ordering rule is
+one more thing a human reviewing an artifact must hold in their head.
+**A fallback must carry the same `surface_path` as the locator it backs**, enforced in the
+model. Identity and uniqueness are scoped per surface path, so a fallback resolving in a
+different frame reopens exactly the ambiguity that scoping exists to close — and it does so on
+the recovery path, where a human is least likely to be watching.
+**Cost accepted:** a genuine case for a cross-frame fallback must relax the validator
+explicitly, and the relaxation is then reviewable rather than accidental.
+
+## D18 — `ax_path` is a nested scope chain, not a new field
+Spec §3.4 describes `ax_path` as "an ordered path of `role[name]` segments from a stable
+ancestor". `Locator.scope` is itself a `Locator` and nests, so the chain is already
+expressible. Adding a `segments` field would create a second way to say the same thing, and
+one more shape for the compiler and for a human reviewer to understand.
+**Cost accepted:** a deep path serializes as a nested object rather than a flat list.
+
+## D19 — Playwright fetches and acts; it never decides which node a locator means
+`WebSurface.resolve()` takes a fresh snapshot of the target frame, parses it, and calls the
+pure `resolve_against`. On a unique result it maps the node to a live handle and checks
+`require` against that handle. The alternative — resolving with `get_by_role(...)` directly —
+would reimplement scope, ordinal, `name_match` and containment in a second place, across a
+language boundary where a disagreement with the pure layer is hardest to see. One matching
+engine, in the layer that is pure and tested.
+**Corollary, learned the hard way:** mapping a node to a handle is itself a place identity can
+be lost. The population a position is computed in must be the population the handle indexes
+into, and a strategy this surface cannot address must report `NotFound` saying so — never a
+precondition failure inferred from an empty locator, which reports "hidden" when the truth is
+"unaddressable".
+**Cost accepted:** resolution costs one extra snapshot per call.
+
+## D20 — No raw driver exception crosses the surface boundary
+Phases 3 through 6 may not import Playwright, so a Playwright exception escaping `web.py` is
+literally uncatchable where it needs catching. Surface-owned exception types live in the
+import-clean `base.py`, and every failure inside the concrete surface — driver errors and the
+surface's own, such as a named frame that no longer exists — is translated before it crosses.
+A pending dialog is a reported outcome with a short explicit timeout, not a thirty-second hang
+followed by a driver timeout.
+**Cost accepted:** an exception hierarchy in `base.py` that a future desktop surface must also
+raise, which is what a protocol module is for.
+
+## D21 — Visibility is a live-only precondition
+The pure layer cannot know whether a node is visible: a node's presence in a snapshot is the
+only signal available offline. The live surface can and must check it, because a snapshot can
+go stale between observation and action. Both halves are correct and neither is redundant, so
+each module documents its own half and points at the other.
+**Cost accepted:** offline replay through the pure layer checks `enabled` but not `visible`,
+which a later phase relying on offline resolution must know.
+
+## D22 — The surface protocol carries the stale-generation promise, and the path vocabulary admits panes
+`act_on_index` is a member of the `Surface` protocol, not an implementation detail of the web
+surface: rejecting an action that references an index from an earlier observation is a promise
+the abstraction makes (spec §3.1), and leaving it off the protocol would force the discovery
+loop to type against the concrete Playwright-importing class. `SurfaceSegment.kind` admits
+`pane` alongside `window` and `frame`, because spec §3.3 states the desktop path is window
+then pane, and a closed literal without it is the one place the seam's own portability claim
+fails.
+**Cost accepted:** a future desktop surface must implement an index-based entry point, and one
+literal value is unused until a desktop surface exists.
+
+## D23 — The discovery-only action vocabulary belongs to the discovery loop, not the surface
+Spec §3.5 names `expand`, `finish` and `give_up` as discovery-only actions, and §3.6 says the
+model uses `expand` when the observation budget has elided something. These are promises the
+discovery loop makes, not the surface, and they are deferred to the phase that builds it. The
+surface still reports `truncated` honestly and degrades every frame fairly rather than dropping
+whichever frame the driver happens to enumerate last.
+**Cost accepted:** the discovery phase may add a second action enumeration rather than
+extending the recorded one — which is correct anyway, since the recorded set is closed so that
+the policy engine can classify risk per action type.
