@@ -8,6 +8,7 @@ browser library installed at all.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -18,10 +19,49 @@ Strategy = Literal["role_name", "text", "ax_path"]
 
 
 class SurfaceSegment(BaseModel):
-    """One hop in a control's path from the top-level window into nested frames."""
+    """One hop in a control's path from the top-level window into nested frames.
 
-    kind: Literal["window", "frame"]
+    R26: `kind` includes `"pane"` alongside the web surface's own `"window"`/`"frame"` so
+    that a desktop surface (spec §3.3: "the same shape generalizes to a desktop surface,
+    where the path is window then pane") can be expressed without editing this module. Only
+    `cua/surface/web.py` ever constructs `"window"`/`"frame"` segments today; `"pane"` is
+    reserved for a future desktop `Surface` implementation.
+    """
+
+    kind: Literal["window", "frame", "pane"]
     name: str
+
+
+def ancestor_positions(position: int, depths: Sequence[int]) -> list[int]:
+    """Returns the indices into `depths` that enclose `depths[position]`, nearest first.
+
+    R22: the one containment walk shared by `cua.surface.snapshot._scrub_ancestor_names`
+    (walking parsed-entry depths to scrub a protected value out of its ancestors' names,
+    R12) and `cua.surface.locators.ancestors_of` (walking `Node` depths to compute
+    containment for locator synthesis and resolution, R16). Both used to carry their own
+    copy of this backward, running-minimum-depth walk; a drift between the two copies is a
+    credential leak on one side and a wrong scope on the other, so there is now exactly one
+    implementation. It lives here, beside `Node`, rather than in a new module, because
+    `models.py` is already a dependency both `snapshot.py` and `locators.py` take, and R6
+    keeps `locators.py` free of importing `snapshot.py`.
+
+    Walking backward from `position` with a running minimum depth (starting at
+    `depths[position]`), every earlier index whose depth is strictly below the running
+    minimum is an ancestor, and the minimum drops to its depth; an earlier index at the same
+    or greater depth is a sibling (or a descendant of one) and is skipped without breaking
+    the walk, which is what lets it reach a grandparent past an intervening sibling.
+
+    Callers must pass `depths` in true document (pre-order) order, where every node's
+    ancestors precede it and depth only rises and falls with real nesting -- see
+    `ancestors_of`'s docstring for what a caller gets back if that invariant does not hold.
+    """
+    running_min = depths[position]
+    ancestors: list[int] = []
+    for i in range(position - 1, -1, -1):
+        if depths[i] < running_min:
+            ancestors.append(i)
+            running_min = depths[i]
+    return ancestors
 
 
 class Require(BaseModel):
@@ -65,6 +105,17 @@ class Locator(BaseModel):
     def _role_name_strategy_requires_a_role(self) -> Locator:
         if self.strategy == "role_name" and self.role is None:
             raise ValueError("a role_name locator requires a role")
+        return self
+
+    @model_validator(mode="after")
+    def _ordinal_is_not_negative(self) -> Locator:
+        # Also fix: a negative ordinal is exactly the DOM-ish positional index spec §3.4
+        # rule 1 outlaws, and the two negative values did not even agree with each other --
+        # -2 resolved (Python's negative-slice semantics picked the second-to-last match),
+        # while -1 always came back not_found (`matches[-1:0]` is empty). Constrained here,
+        # at construction, rather than left as an implicit resolution-time accident.
+        if self.ordinal is not None and self.ordinal < 0:
+            raise ValueError("ordinal must be >= 0")
         return self
 
     @model_validator(mode="after")

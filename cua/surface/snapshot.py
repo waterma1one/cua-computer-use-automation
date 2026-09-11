@@ -15,7 +15,14 @@ from typing import Any
 
 import yaml
 
-from cua.surface.models import Node, NodeState, SurfaceSegment
+from cua.surface.models import Node, NodeState, SurfaceSegment, ancestor_positions
+
+# S3: the marker `scrub_protected_values` substitutes for a secret in the raw evidence YAML.
+# A visible marker, rather than the empty string the original implementation used, means a
+# human reading /evidence/ can tell scrubbing happened -- an empty-string replace is
+# indistinguishable from a field that was simply blank, and silently corrupts unrelated text
+# that happens to share the secret's substring (see `scrub_protected_values`'s docstring).
+_REDACTION_MARKER = "[REDACTED]"
 
 # Credential-token vocabulary used to infer a node's `protected` state from its accessible
 # name alone. Nothing in the aria-snapshot YAML marks a field as a password field -- the
@@ -23,9 +30,12 @@ from cua.surface.models import Node, NodeState, SurfaceSegment
 # (yaml_text, surface_path, start_index). Matched case-insensitively on word boundaries, not
 # as a substring: a naive substring match would make "shipping" and "spinner" protected.
 # Deliberately extensible -- add tokens here as new leaky labels turn up in real applications.
-# The known failure mode this cannot catch is a password field given an unusual label that
-# names none of these tokens (e.g. a custom "Secret Word" field spelled in a way that misses
-# every token here); there is no signal in the snapshot that could catch that case instead.
+# R3's known blind spot, widened: protection is inferred from the accessible name alone, so
+# there is no signal in the snapshot to catch either of two cases -- a password field given
+# an unusual label that names none of these tokens (e.g. a custom "Secret Word" field spelled
+# in a way that misses every token here), or a password field with NO accessible name at all
+# (name is None, so this regex never even runs against it). Both are pinned deliberately by
+# tests in tests/surface/test_snapshot.py so the next reader meets the gap on purpose.
 PROTECTED_NAME_TOKENS = (
     "password",
     "passwd",
@@ -97,6 +107,56 @@ def _parse_key(key: str) -> tuple[str, str | None, bool, bool, bool]:
     return role, name, disabled, checked, expanded
 
 
+class _StringPreservingLoader(yaml.SafeLoader):
+    """A `SafeLoader` that hands back every scalar as the literal text it appeared as in the
+    source, never re-typed to `int`/`float`/`bool`/`None`.
+
+    S1: `yaml.safe_load` on a bare `0755` returns the Python int 493 (YAML 1.1's octal
+    resolver), and `str(493)` is `"493"` -- not `"0755"`. The same silent bypass happens for
+    `no`/`on`/`yes`/`off` (parsed as `bool`) and `null`/`~` (parsed as `None`), and partially
+    for `1.50` (`str(1.5)` drops the trailing zero). If any of these is a protected value's
+    literal text, scrubbing that re-stringifies the *parsed* scalar instead of using the
+    *source* text misses it, or matches the wrong substring -- and the secret survives
+    verbatim in an ancestor's name or in the evidence YAML. Every scalar constructor that
+    would otherwise re-type a plain scalar is overridden below to return `node.value`, the
+    raw source text, unchanged.
+    """
+
+
+def _construct_as_written(_loader: yaml.SafeLoader, node: yaml.ScalarNode) -> str:
+    return str(node.value)
+
+
+def _construct_null_as_written(_loader: yaml.SafeLoader, node: yaml.ScalarNode) -> str | None:
+    # An explicit null-ish word (`null`, `~`, ...) has non-empty source text and must be
+    # preserved as that literal string so it can be scrubbed like any other scalar. A truly
+    # elided value (`key:` with nothing after the colon) has empty source text; that case is
+    # a structural "no value" leaf, not a scalar to preserve, so it stays `None`.
+    text = str(node.value)
+    return text if text else None
+
+
+for _tag in (
+    "tag:yaml.org,2002:bool",
+    "tag:yaml.org,2002:int",
+    "tag:yaml.org,2002:float",
+    "tag:yaml.org,2002:timestamp",
+):
+    _StringPreservingLoader.add_constructor(_tag, _construct_as_written)
+_StringPreservingLoader.add_constructor("tag:yaml.org,2002:null", _construct_null_as_written)
+
+
+def _load_yaml(yaml_text: str) -> Any:
+    """Parses `yaml_text` with every scalar preserved as its literal source text (S1).
+
+    Deliberately unguarded, like the `yaml.safe_load` it replaces: a `yaml.YAMLError` from
+    malformed input is allowed to propagate rather than being caught and turned into an
+    empty node list. See `parse_aria_snapshot`'s docstring for why a loud failure is correct
+    here.
+    """
+    return yaml.load(yaml_text, Loader=_StringPreservingLoader)
+
+
 def _iter_container(container: Any) -> list[tuple[Any, Any]]:
     """Normalizes one level of the parsed YAML into (key, value) pairs.
 
@@ -146,29 +206,29 @@ def _scrub_text(name: str, secret: str) -> str:
 
 
 def _scrub_ancestor_names(entries: list[_Entry]) -> None:
-    """R12: a protected value leaks through the accessible names of its ancestors, not just
-    its own value. Ancestors are identified through the `depth` chain -- walking backward from
-    the protected entry and taking, in order, each preceding entry whose depth is strictly
-    less than the shallowest ancestor depth found so far. That skips sibling subtrees (a
-    preceding entry at the same or greater depth) without breaking the walk, which is what
-    lets it reach a grandparent past an intervening sibling cell.
+    """R12/S2: a protected value leaks through its own entry's name and through the
+    accessible names of its ancestors, not just its own value. Ancestors are identified
+    through the shared `cua.surface.models.ancestor_positions` walk (R22) -- the same one
+    `locators.ancestors_of` uses -- rather than a second, separately-maintained copy.
 
     Ancestor-scoped, not a global sweep: only entries identified as ancestors of a specific
     protected entry are touched, so an unrelated two-character password cannot blank out
     unrelated text elsewhere on the page.
     """
+    depths = [e.depth for e in entries]
     for i, entry in enumerate(entries):
         if not (_is_protected(entry.name) and entry.value):
             continue
         secret = entry.value
-        current_min_depth = entry.depth
-        for other in reversed(entries[:i]):
-            if other.depth < current_min_depth:
-                if other.name and secret in other.name:
-                    other.name = _scrub_text(other.name, secret)
-                current_min_depth = other.depth
-                if current_min_depth <= 0:
-                    break
+        # S2: the protected entry's own name is scrubbed too -- a hostile but real label
+        # shape (`textbox "Password hunter2"`) leaks the value right there, and only the
+        # ancestors were ever touched before.
+        if entry.name and secret in entry.name:
+            entry.name = _scrub_text(entry.name, secret)
+        for j in ancestor_positions(i, depths):
+            other = entries[j]
+            if other.name and secret in other.name:
+                other.name = _scrub_text(other.name, secret)
 
 
 def parse_aria_snapshot(
@@ -183,16 +243,16 @@ def parse_aria_snapshot(
     Every returned node carries `surface_path` unmodified and `depth` set to its nesting level
     in the snapshot (0 for a top-level entry).
 
-    `yaml.safe_load` is deliberately unguarded here: a `yaml.YAMLError` from malformed input
-    is allowed to propagate rather than being caught and turned into an empty node list.
-    Totality is about tolerating unrecognized *entries* within otherwise well-formed YAML (an
-    unfamiliar line becomes an `unknown`-role node rather than raising), not about tolerating
-    broken YAML syntax. `aria_snapshot()` always emits well-formed YAML, so malformed input
-    here means something upstream is plumbed wrong, and a loud failure is the correct
-    response: silently degrading to an empty `Observation` would read to the discovery loop as
-    "this page has no controls," which is a worse failure than a crash.
+    Parsing (`_load_yaml`, S1) is deliberately unguarded here: a `yaml.YAMLError` from
+    malformed input is allowed to propagate rather than being caught and turned into an
+    empty node list. Totality is about tolerating unrecognized *entries* within otherwise
+    well-formed YAML (an unfamiliar line becomes an `unknown`-role node rather than raising),
+    not about tolerating broken YAML syntax. `aria_snapshot()` always emits well-formed YAML,
+    so malformed input here means something upstream is plumbed wrong, and a loud failure is
+    the correct response: silently degrading to an empty `Observation` would read to the
+    discovery loop as "this page has no controls," which is a worse failure than a crash.
     """
-    data = yaml.safe_load(yaml_text)
+    data = _load_yaml(yaml_text)
     entries: list[_Entry] = []
     _walk(data, 0, entries)
     _scrub_ancestor_names(entries)
@@ -222,16 +282,25 @@ def parse_aria_snapshot(
 
 
 def scrub_protected_values(yaml_text: str) -> str:
-    """Returns the raw snapshot YAML with every protected node's value removed globally.
+    """Returns the raw snapshot YAML with every protected node's value replaced by a visible
+    redaction marker, globally.
 
     For spec §3.7.2: the raw snapshot is written to an evidence directory in a later phase,
     and a password is not SSN-shaped or card-shaped, so the shape-based redaction that phase
     adds is blind to it. Unlike `parse_aria_snapshot`'s ancestor-scoped scrub, this scrubs the
-    value wherever it appears in the text -- it is written to disk for a human to read and is
-    never matched against, so there is no risk of an unrelated match elsewhere on the page
-    being blanked out by mistake in a way that matters.
+    value wherever it appears in the text, because it is written to disk for a human to read
+    and is never matched against programmatically.
+
+    S3: that global replace is a real risk, not a cosmetic one, if the substitution is the
+    empty string -- a legitimate `button "Search"` silently becomes `button ""` when the
+    password happens to be "Search", and a one-character password (`"e"`) mangles role names
+    outright (`textbox` -> `txtbox`). Substituting a visible marker instead does not prevent
+    an unrelated match from being touched -- a global textual replace has no way to tell "the
+    secret" from "unrelated text that happens to contain the same substring" -- but it does
+    mean the touched-but-unrelated text now reads as visibly redacted rather than silently
+    blanked or corrupted into a different, plausible-looking word.
     """
-    data = yaml.safe_load(yaml_text)
+    data = _load_yaml(yaml_text)
     entries: list[_Entry] = []
     _walk(data, 0, entries)
 
@@ -239,5 +308,5 @@ def scrub_protected_values(yaml_text: str) -> str:
 
     scrubbed = yaml_text
     for secret in secrets:
-        scrubbed = scrubbed.replace(secret, "")
+        scrubbed = scrubbed.replace(secret, _REDACTION_MARKER)
     return scrubbed

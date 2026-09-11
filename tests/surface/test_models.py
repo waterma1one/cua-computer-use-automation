@@ -98,3 +98,25 @@ def test_a_fallback_in_a_different_surface_path_is_rejected() -> None:
             fallbacks=[fallback],
             rationale="x", confidence="high",
         )
+
+
+# I8 / R26: the seam must not carry a browser-only word. A desktop surface's path is
+# window then pane (spec §3.3); before this, `"pane"` was not a legal `SurfaceSegment.kind`
+# at all, so a desktop implementer could not satisfy the vocabulary without editing this
+# module.
+def test_surface_segment_accepts_a_pane_kind_for_desktop_surfaces() -> None:
+    segment = SurfaceSegment(kind="pane", name="main")
+    assert segment.kind == "pane"
+
+
+# Also fix: a negative ordinal is exactly the DOM-ish positional index spec §3.4 rule 1
+# outlaws, and it behaved inconsistently besides (-2 resolved via Python's negative-slice
+# semantics; -1 always came back not_found because `matches[-1:0]` is empty). Constrained
+# to >= 0 at construction, not merely at resolution time.
+def test_ordinal_rejects_a_negative_value() -> None:
+    with pytest.raises(ValidationError):
+        Locator(
+            role="button", name="Select", ordinal=-1,
+            surface_path=[seg("window", "main")],
+            rationale="x", confidence="high",
+        )

@@ -170,3 +170,105 @@ def test_scrub_protected_values_removes_the_secret_from_raw_yaml() -> None:
     assert "Password" in scrubbed
     assert "table" in scrubbed
     assert "rowgroup" in scrubbed
+
+
+# S1: `yaml.safe_load` re-types a plain scalar (an octal-looking digit string, a bool word,
+# a float) before the parser ever sees it as text, and `str()` on the re-typed Python value
+# does not always round-trip to the original source text. Scrubbing must work against the
+# value as it was written, not as re-stringified from a parsed scalar, or the secret survives
+# verbatim in the row/cell names of the Observation and in the evidence YAML.
+def test_octal_looking_secret_is_not_bypassed_by_yaml_int_coercion() -> None:
+    # PyYAML 1.1 resolves a bare `0755` to the Python int 493; str(493) == "493", which does
+    # not match the literal "0755" substring in the row name, so a naive str()-based scrub
+    # misses it entirely.
+    yaml_text = (
+        '- row "PIN 0755":\n'
+        '  - cell "PIN"\n'
+        '  - textbox "PIN": 0755\n'
+    )
+    parsed = parse_aria_snapshot(yaml_text, PATH)
+    row = next(n for n in parsed if n.role == "row")
+    assert row.name == "PIN"
+    pin = next(n for n in parsed if n.role == "textbox")
+    assert pin.value is None
+
+
+def test_bool_looking_secret_is_not_bypassed_by_yaml_bool_coercion() -> None:
+    # PyYAML 1.1 resolves the bare word `off` to Python False; str(False) == "False", which
+    # never appears in the row name at all.
+    yaml_text = (
+        '- row "PIN off":\n'
+        '  - cell "PIN"\n'
+        '  - textbox "PIN": off\n'
+    )
+    parsed = parse_aria_snapshot(yaml_text, PATH)
+    row = next(n for n in parsed if n.role == "row")
+    assert row.name == "PIN"
+    pin = next(n for n in parsed if n.role == "textbox")
+    assert pin.value is None
+
+
+def test_float_looking_secret_is_not_partially_scrubbed_by_yaml_float_coercion() -> None:
+    # str(1.5) == "1.5" -- the trailing zero from "1.50" is silently dropped, so a naive
+    # scrub of "1.5" out of "PIN 1.50" leaves a dangling "PIN 0" behind.
+    yaml_text = (
+        '- row "PIN 1.50":\n'
+        '  - cell "PIN"\n'
+        '  - textbox "PIN": 1.50\n'
+    )
+    parsed = parse_aria_snapshot(yaml_text, PATH)
+    row = next(n for n in parsed if n.role == "row")
+    assert row.name == "PIN"
+    pin = next(n for n in parsed if n.role == "textbox")
+    assert pin.value is None
+
+
+# S2: the protected node's own name was never scrubbed -- only its ancestors were. A label
+# that carries the value inline (a hostile but real shape: `textbox "Password hunter2"`)
+# must not leak the value through the node's own `name` field.
+def test_a_protected_nodes_own_name_is_scrubbed_of_its_value() -> None:
+    yaml_text = 'textbox "Password hunter2": hunter2\n'
+    parsed = parse_aria_snapshot(yaml_text, PATH)
+    node = parsed[0]
+    assert node.state.protected is True
+    assert node.value is None
+    assert "hunter2" not in (node.name or "")
+
+
+# S3: a global textual replace with the empty string does not just remove the secret, it
+# corrupts unrelated content that happens to share the same substring -- a legitimate
+# `button "Search"` becomes `button ""` when the password is "Search", and a one-character
+# password mangles role names outright (`textbox` -> `txtbox` for password "e"). A visible
+# redaction marker means a reader can tell scrubbing happened instead of silently losing or
+# corrupting unrelated text.
+def test_scrub_protected_values_uses_a_visible_marker_not_a_blank() -> None:
+    yaml_text = (
+        '- row "Password Search":\n'
+        '  - cell "Password"\n'
+        '  - textbox "Password": Search\n'
+        '- button "Search"\n'
+    )
+    scrubbed = scrub_protected_values(yaml_text)
+    assert "Search" not in scrubbed
+    assert "[REDACTED]" in scrubbed
+    assert 'button ""' not in scrubbed
+
+
+def test_scrub_protected_values_does_not_mangle_role_names_for_a_short_secret() -> None:
+    yaml_text = '- textbox "Password": e\n'
+    scrubbed = scrub_protected_values(yaml_text)
+    assert "txtbox" not in scrubbed
+    assert "[REDACTED]" in scrubbed
+
+
+# R3, widened: protection is inferred from the accessible name alone (PROTECTED_NAME_TOKENS
+# matched against `name`), so a password field with NO name at all carries no signal a
+# parser could use -- not just a field with an unusual label. Pinned deliberately so the next
+# reader meets this gap on purpose rather than discovering it by leaking a credential.
+def test_an_unnamed_password_field_is_not_protected_a_known_blind_spot() -> None:
+    yaml_text = '- textbox: hunter2\n'
+    parsed = parse_aria_snapshot(yaml_text, PATH)
+    node = parsed[0]
+    assert node.name is None
+    assert node.state.protected is False
+    assert node.value == "hunter2"
