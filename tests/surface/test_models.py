@@ -1,7 +1,16 @@
 import pytest
 from pydantic import ValidationError
 
-from cua.surface.models import Locator, Node, NodeState, Observation, SurfaceSegment
+from cua.artifact import validate
+from cua.surface import snapshot
+from cua.surface.models import (
+    Locator,
+    Node,
+    NodeState,
+    Observation,
+    SurfaceSegment,
+    is_protected_name,
+)
 
 
 def seg(kind: str, name: str) -> SurfaceSegment:
@@ -120,3 +129,49 @@ def test_ordinal_rejects_a_negative_value() -> None:
             surface_path=[seg("window", "main")],
             rationale="x", confidence="high",
         )
+
+
+# E6/R22: the credential-name rule is security-relevant and is needed in two layers -- the
+# aria-snapshot parser infers `Node.state.protected` from it, and `cua.artifact.validate`
+# uses it for spec S4.4's sixth condition. Two copies of a rule like this drift, and a drift
+# is a credential leaking past one of the two checks that exist to stop it, so there is
+# exactly one implementation and these tests pin its behaviour at the shared site.
+def test_is_protected_name_matches_a_credential_token_case_insensitively() -> None:
+    assert is_protected_name("Password")
+    assert is_protected_name("teller passwd")
+    assert is_protected_name("CVV")
+
+
+def test_is_protected_name_matches_on_word_boundaries_not_as_a_substring() -> None:
+    # A naive substring match on "pin" makes "Shipping" and "Spinner" credential fields.
+    assert not is_protected_name("Shipping Address")
+    assert not is_protected_name("Spinner")
+
+
+def test_is_protected_name_treats_a_missing_name_as_unprotected() -> None:
+    # The documented blind spot: a password field with no accessible name at all cannot be
+    # detected from its name, because there is no name to look at.
+    assert not is_protected_name(None)
+    assert not is_protected_name("")
+
+
+def test_is_protected_name_misses_plurals_and_compounds() -> None:
+    # The third documented blind spot (M9), pinned so the next reader meets it on purpose
+    # rather than assuming coverage. A persisted locator name is likelier to carry a plural
+    # than a live node's label is.
+    assert not is_protected_name("Passwords")
+    assert not is_protected_name("PINs")
+    assert not is_protected_name("password_field")
+    assert not is_protected_name("MyPassword")
+
+
+def test_the_protected_name_rule_has_exactly_one_implementation() -> None:
+    # The drift guard for E6. Before this, `snapshot.py` and `validate.py` each compiled a
+    # byte-identical regex over the shared tuple and nothing held them equal. Both now route
+    # through `is_protected_name`; a module-private copy reappearing in either is the defect
+    # this test exists to catch.
+    assert not hasattr(snapshot, "_PROTECTED_NAME_RE")
+    assert not hasattr(validate, "_PROTECTED_NAME_RE")
+    assert not hasattr(snapshot, "_is_protected")
+    assert snapshot.is_protected_name is is_protected_name
+    assert validate.is_protected_name is is_protected_name

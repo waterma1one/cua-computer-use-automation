@@ -8,6 +8,7 @@ browser library installed at all.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from typing import Annotated, Literal
 
@@ -18,26 +19,8 @@ NameMatch = Literal["exact", "contains", "prefix"]
 Strategy = Literal["role_name", "text", "ax_path"]
 
 # Credential-token vocabulary used to infer that a control holds a secret from its
-# accessible name alone. Matched case-insensitively on word boundaries, never as a
-# substring: a naive substring match would make "shipping" and "spinner" protected.
-# Deliberately extensible -- add tokens here as new leaky labels turn up in real
-# applications.
-#
-# It lives here, beside the data it describes, for R22's reason: two modules in different
-# layers need it, and `models.py` is already a dependency both take. `cua.surface.snapshot`
-# infers `Node.state.protected` from it while parsing aria-snapshot YAML, and
-# `cua.artifact.validate` uses it for spec §4.4's sixth condition (no literal originates
-# from a protected field). The artifact layer has no business importing an accessibility
-# YAML parser to reach a tuple of strings, and two divergent copies of this vocabulary
-# would mean a credential leaking past one of the two checks that exist to stop it.
-#
-# Only the vocabulary is shared. Each side compiles its own matcher over it, because the
-# thing each side matches differs: `snapshot.py` matches a live node's accessible name
-# while parsing, and `validate.py` matches a persisted locator's `name` field.
-#
-# R3's known blind spot, widened: protection inferred from an accessible name alone cannot
-# catch a password field labelled with none of these tokens, nor one with no accessible
-# name at all. Both are pinned deliberately by tests in `tests/surface/test_snapshot.py`.
+# accessible name alone. Deliberately extensible -- add tokens here as new leaky labels turn
+# up in real applications.
 PROTECTED_NAME_TOKENS = (
     "password",
     "passwd",
@@ -48,6 +31,51 @@ PROTECTED_NAME_TOKENS = (
     "otp",
     "cvv",
 )
+
+# Private to this module by E6. The rule this compiles is the rule, and it must have exactly
+# one implementation -- see `is_protected_name`.
+_PROTECTED_NAME_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(token) for token in PROTECTED_NAME_TOKENS) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_protected_name(name: str | None) -> bool:
+    """Does this accessible name indicate a control holding a credential?
+
+    E6, following R22's precedent: one security-relevant rule, one implementation. Two
+    layers need this predicate -- `cua.surface.snapshot` infers `Node.state.protected` from
+    it while parsing aria-snapshot YAML, and `cua.artifact.validate` uses it for spec §4.4's
+    sixth condition (no literal originates from a protected field). Both had their own
+    byte-identical compiled copy, and nothing held the two equal; a drift between them is a
+    credential leaking past one of the two checks that exist to stop it. It lives here, in
+    `models.py`, beside the vocabulary it matches, because `models.py` is already a
+    dependency both layers take and the artifact layer has no business importing an
+    accessibility-YAML parser to reach it.
+
+    Matched case-insensitively **on word boundaries, never as a substring**: a naive
+    substring match on "pin" would make "Shipping" and "Spinner" credential fields.
+
+    Three blind spots, all of them consequences of inferring protection from a name alone,
+    all pinned by tests in `tests/surface/test_models.py` so the next reader meets them on
+    purpose rather than assuming coverage:
+
+    1. A credential field labelled with none of these tokens -- a custom "Secret Word" field
+       spelled so it misses every one.
+    2. A credential field with **no accessible name at all** (`name is None`), where there
+       is nothing for this to look at.
+    3. Plurals and compounds: "Passwords", "PINs", "password_field" and "MyPassword" all
+       fail the word-boundary test. This matters more on the artifact side than the parser
+       side -- a persisted locator name is likelier to carry a plural than a live field's
+       label is -- and widening the rule to catch them is what would reintroduce "Shipping".
+
+    Because of all three, this is a backstop and never the only control: a live node's
+    `protected` state comes from the parser, and §8.3 step 4 puts the primary refusal in the
+    compiler, which can still see the observation the artifact was built from.
+    """
+    if not name:
+        return False
+    return _PROTECTED_NAME_RE.search(name) is not None
 
 
 class SurfaceSegment(BaseModel):

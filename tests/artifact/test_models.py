@@ -14,6 +14,7 @@ from cua.artifact.models import (
     LiteralValue,
     Matcher,
     OutputSpec,
+    Overlay,
     Provenance,
     Settle,
     Step,
@@ -171,3 +172,20 @@ def test_a_step_built_without_risk_is_unclassified_not_safe() -> None:
     # default to `"safe"`.
     step = Step(id="s2", action="fill", value={"literal": "12345"})
     assert step.risk is None
+
+
+# S4.4's fifth condition: an overlay may not change `inputs` or `outputs`. That would
+# silently break every caller, so it is rejected rather than merged. `Overlay` declares no
+# such field and sets `extra="forbid"`, which means the prohibition is enforced at parse
+# time -- but until this test existed, nothing anywhere pinned it, and a later `extra`
+# relaxation would have removed the enforcement with every test still green.
+def test_an_overlay_cannot_declare_inputs() -> None:
+    with pytest.raises(ValidationError):
+        Overlay(targets="tenant_acme", base_id="corebank.probe", base_version=1,
+                inputs={"member_id": InputSpec(type="string")})
+
+
+def test_an_overlay_cannot_declare_outputs() -> None:
+    with pytest.raises(ValidationError):
+        Overlay(targets="tenant_acme", base_id="corebank.probe", base_version=1,
+                outputs={"balance": OutputSpec(type="string")})
