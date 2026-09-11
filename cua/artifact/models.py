@@ -346,11 +346,22 @@ class Overlay(BaseModel):
     An overlay may override a locator's `name` or `surface_path` (`locator_overrides`,
     keyed by step id), insert new steps after an existing one (`insert_after`, keyed by
     the step id they follow), skip a step (`skip_steps`), and extend a step's `expects`
-    (`extend_expects`, keyed by step id) -- and nothing else: S4.3 forbids an overlay from
-    touching `inputs` or `outputs`, which would silently break every caller, and that
-    prohibition is exactly why this model declares no such field to touch. Enforcing the
-    prohibition, and resolving an overlay onto its base, is Task 3's job; this model only
-    has to be able to represent one.
+    (`extend_expects`, keyed by step id) -- and nothing else.
+
+    Task 3 revision: `inputs`/`outputs` below were absent from Task 1's version of this
+    model, on the reasoning that `extra="forbid"` already made `Overlay(inputs=...)`
+    structurally impossible, so S4.3's fifth condition needed no runtime check. Task 3's
+    tests (`test_an_overlay_changing_inputs_is_rejected`,
+    `test_an_overlay_changing_outputs_is_rejected`) require the opposite: an overlay that
+    attempts to change the contract must construct successfully and be caught by
+    `cua.artifact.overlay.validate_overlay` as `OVERLAY_CHANGES_CONTRACT`. That is also the
+    literal wording of S4.3 -- "it is rejected by the validator rather than merged" -- which
+    names the validator, not the parser, as the enforcement point. So this model now
+    declares both fields (defaulting to `None`, meaning "not attempted") purely so the
+    validator has something to see and reject; nothing in `cua/artifact/` ever merges a
+    non-`None` value here into a resolved artifact. This supersedes Task 1's two
+    `test_an_overlay_cannot_declare_inputs`/`test_an_overlay_cannot_declare_outputs` tests
+    in `tests/artifact/test_models.py`, updated alongside this change rather than left red.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -366,3 +377,8 @@ class Overlay(BaseModel):
     insert_after: dict[str, list[Step]] = Field(default_factory=dict)
     skip_steps: list[str] = Field(default_factory=list)
     extend_expects: dict[str, list[Expect]] = Field(default_factory=dict)
+    # Present only so `validate_overlay` can reject an attempt to declare either -- see the
+    # docstring above. `None` means "the overlay file did not try"; a non-`None` value is
+    # always an error and is never read by `resolve_overlay`.
+    inputs: dict[str, InputSpec] | None = None
+    outputs: dict[str, OutputSpec] | None = None

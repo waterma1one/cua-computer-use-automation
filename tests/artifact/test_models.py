@@ -174,18 +174,34 @@ def test_a_step_built_without_risk_is_unclassified_not_safe() -> None:
     assert step.risk is None
 
 
-# S4.4's fifth condition: an overlay may not change `inputs` or `outputs`. That would
-# silently break every caller, so it is rejected rather than merged. `Overlay` declares no
-# such field and sets `extra="forbid"`, which means the prohibition is enforced at parse
-# time -- but until this test existed, nothing anywhere pinned it, and a later `extra`
-# relaxation would have removed the enforcement with every test still green.
-def test_an_overlay_cannot_declare_inputs() -> None:
-    with pytest.raises(ValidationError):
-        Overlay(targets="tenant_acme", base_id="corebank.probe", base_version=1,
-                inputs={"member_id": InputSpec(type="string")})
+# S4.4's fifth condition: an overlay may not change `inputs` or `outputs`. Task 1 enforced
+# this by giving `Overlay` no such field at all, under `extra="forbid"`, so construction
+# itself raised. Task 3 revisited this: S4.3's own wording is "it is rejected by the
+# validator rather than merged", naming the validator as the enforcement point, and Task
+# 3's tests need a constructible overlay for `cua.artifact.overlay.validate_overlay` to
+# reject as `OVERLAY_CHANGES_CONTRACT`. `Overlay` now declares both fields (defaulting to
+# `None`, meaning "not attempted"), so these two tests changed from "construction raises"
+# to "construction succeeds and the value round-trips" -- the rejection itself is pinned by
+# `tests/artifact/test_overlay.py::test_an_overlay_changing_inputs_is_rejected` and
+# `test_an_overlay_changing_outputs_is_rejected`, which is where the enforcement now lives.
+def test_an_overlay_can_declare_inputs_for_the_validator_to_reject() -> None:
+    overlay = Overlay(targets="tenant_acme", base_id="corebank.probe", base_version=1,
+                       inputs={"member_id": InputSpec(type="string")})
+    assert overlay.inputs is not None
+    assert "member_id" in overlay.inputs
 
 
-def test_an_overlay_cannot_declare_outputs() -> None:
-    with pytest.raises(ValidationError):
-        Overlay(targets="tenant_acme", base_id="corebank.probe", base_version=1,
-                outputs={"balance": OutputSpec(type="string")})
+def test_an_overlay_can_declare_outputs_for_the_validator_to_reject() -> None:
+    overlay = Overlay(targets="tenant_acme", base_id="corebank.probe", base_version=1,
+                       outputs={"balance": OutputSpec(type="string")})
+    assert overlay.outputs is not None
+    assert "balance" in overlay.outputs
+
+
+def test_an_overlay_with_no_inputs_or_outputs_declared_reads_back_as_none() -> None:
+    # The `None`/absent distinction is what lets `validate_overlay` tell "the overlay did
+    # not touch the contract" apart from "the overlay declared an empty contract block" --
+    # the same reasoning `Artifact.policy` uses for narrowing (E4).
+    overlay = Overlay(targets="tenant_acme", base_id="corebank.probe", base_version=1)
+    assert overlay.inputs is None
+    assert overlay.outputs is None
