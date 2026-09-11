@@ -77,6 +77,31 @@ def _contract_findings(overlay: Overlay) -> list[Finding]:
     return findings
 
 
+def _override_has_no_locator_findings(base: Artifact, overlay: Overlay) -> list[Finding]:
+    """E10: a `locator_overrides` entry naming a step whose `locator` is `None` (a
+    `navigate` step, or a mistyped target) used to apply silently -- no error, no warning,
+    the step left unchanged. That is the "explicit instruction that silently does nothing"
+    shape this project rejects everywhere else it has come up (`DUPLICATE_STEP_ID`,
+    `LOCATOR_FALLBACK_CYCLE`). Only checked for step ids the base actually has --
+    `_unknown_step_findings` already reports an id that does not exist at all, and this
+    would otherwise double-report it under a second code.
+    """
+    by_id = {step.id: step for step in base.steps}
+    findings: list[Finding] = []
+    for step_id in overlay.locator_overrides:
+        step = by_id.get(step_id)
+        if step is not None and step.locator is None:
+            findings.append(Finding(
+                level="error", code="OVERLAY_OVERRIDE_HAS_NO_LOCATOR",
+                where=f"locator_overrides.{step_id}",
+                message=(
+                    f"locator_overrides names step {step_id!r}, but that step has no "
+                    f"locator to override"
+                ),
+            ))
+    return findings
+
+
 def _unknown_step_findings(base: Artifact, overlay: Overlay) -> list[Finding]:
     """Every step id an overlay names must exist in the base artifact.
 
@@ -183,7 +208,16 @@ def _resolve(base: Artifact, overlay: Overlay) -> Artifact:
     # resolved base-plus-overlay against the variant it targets. A verified base says
     # nothing about the overlay, so `verified` always comes from the overlay, never a
     # carry-over from `base.verified`.
-    return base.model_copy(update={"steps": resolved_steps, "verified": overlay.verified})
+    #
+    # E11: a resolved base-plus-overlay *is* the tenant variant it was resolved for, not
+    # the base -- so `app.variant` becomes `overlay.targets`, never a carry-over from
+    # `base.app.variant`. S4.1 types `app.variant` as `base | tenant_<x>`, exactly the
+    # vocabulary `targets` already uses. The base lineage is not lost: `overlay.base_id`
+    # and `overlay.base_version` still carry it.
+    resolved_app = base.app.model_copy(update={"variant": overlay.targets})
+    return base.model_copy(update={
+        "steps": resolved_steps, "verified": overlay.verified, "app": resolved_app,
+    })
 
 
 def validate_overlay(base: Artifact, overlay: Overlay) -> list[Finding]:
@@ -197,6 +231,7 @@ def validate_overlay(base: Artifact, overlay: Overlay) -> list[Finding]:
     """
     findings = _contract_findings(overlay)
     findings.extend(_unknown_step_findings(base, overlay))
+    findings.extend(_override_has_no_locator_findings(base, overlay))
     if any(f.level == "error" for f in findings):
         return _sorted(findings)
 
