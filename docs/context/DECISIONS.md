@@ -462,3 +462,30 @@ whichever frame the driver happens to enumerate last.
 **Cost accepted:** the discovery phase may add a second action enumeration rather than
 extending the recorded one — which is correct anyway, since the recorded set is closed so that
 the policy engine can classify risk per action type.
+
+## D24 — The model id is configuration, and D11's diagnosis was wrong on both counts
+D11 recorded two conclusions, and live verification has now falsified both.
+
+**It said the credential was the problem.** The key in the environment is `AQ.`-prefixed,
+and D11 concluded that shape was an OAuth-style token the Gemini Developer API would not
+accept, on the evidence of a 401 `ACCESS_TOKEN_TYPE_UNSUPPORTED`. A key of that shape,
+passed as `X-goog-api-key`, now returns `HTTP 200` from `GET /v1beta/models`, generates
+content, and honours a `responseSchema` with an enum — all three verified directly. Whatever
+produced that 401, the prefix was not it. The rule this leaves behind: diagnose a credential
+failure by the endpoint that is failing, not by the shape of the string.
+
+**It said `gemini-2.5-flash-lite` was the confirmed replacement.** That id now returns
+`404 NOT_FOUND`: *"no longer available to new users. Please update your code to use
+models/gemini-3.5-flash-lite."* So the replacement for a shut-down model was itself
+superseded between the spike and the phase that would have used it, while still appearing
+in `GET /v1beta/models` — the listing shows it, `generateContent` refuses it.
+
+**Decision.** The model id lives in `.env` as `CUA_LLM_MODEL`, defaulting to
+`gemini-3.5-flash-lite`, never as a constant in code. Two ids have now gone out from under
+this project inside one build; a third will. The discovery client must also fail usefully:
+when `generateContent` returns 404, report the configured id **and** the ids that currently
+support `generateContent`, because the provider's own list endpoint disagrees with its
+generate endpoint and a bare 404 sends the reader to the wrong question entirely.
+
+**Cost accepted:** a run can be pointed at a model nobody tested. The verification step in
+phase 7 is what catches that, and the error message is what makes it a ten-second fix.
