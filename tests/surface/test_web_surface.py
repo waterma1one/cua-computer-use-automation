@@ -1,10 +1,10 @@
 import pytest
 
-from cua.surface.base import SurfaceError
+from cua.surface.base import StaleObservationError, Surface, SurfaceError
 from cua.surface.locators import ancestors_of, synthesize
-from cua.surface.models import Action
+from cua.surface.models import Action, Locator, SurfaceSegment
 from cua.surface.snapshot import parse_aria_snapshot
-from cua.surface.web import ObservationBudget, StaleObservationError, WebSurface
+from cua.surface.web import ObservationBudget, WebSurface
 from mockapp.app import DEFAULT_LOGIN_PASSWORD, DEFAULT_LOGIN_USER
 
 
@@ -26,6 +26,16 @@ def surface(live_mockapp, browser_page):  # fixtures defined in tests/conftest.p
     browser_page.goto(live_mockapp + "/")
     browser_page.wait_for_load_state("networkidle")
     return WebSurface(browser_page, ObservationBudget(max_nodes=200))
+
+
+@pytest.fixture
+def surface_low_budget(live_mockapp, browser_page):
+    # Deferred-minor 6: a budget tight enough that naive positional slicing (page.frames
+    # enumerates nav before content) would return only nav's branding chrome.
+    _login(browser_page, live_mockapp)
+    browser_page.goto(live_mockapp + "/")
+    browser_page.wait_for_load_state("networkidle")
+    return WebSurface(browser_page, ObservationBudget(max_nodes=5))
 
 
 def test_observe_reaches_every_frame(surface) -> None:
@@ -311,3 +321,317 @@ def test_act_on_index_refuses_kinds_it_cannot_supply_a_value_for(surface, kind: 
 def test_observation_indices_are_dense_and_zero_based(surface) -> None:
     obs = surface.observe()
     assert [n.index for n in obs.nodes] == list(range(len(obs.nodes)))
+
+
+# CRITICAL 1: `_handle_for` computed a node's position among nodes matching its own
+# role/name (nameless, for `search.html`'s unnamed "note" input), but built the live handle
+# with no name filter at all -- which matches named and nameless nodes alike. `.nth(position)`
+# then indexed into a different, larger population than the one the position was computed
+# in, and silently landed on the Member ID field instead. This drives a real `fill` at the
+# unnamed input and asserts BOTH that it received the value AND that Member ID stayed empty
+# -- asserting only the first half would also pass against a bug that fills every matching
+# textbox.
+def test_acting_on_the_unnamed_input_never_touches_the_member_id_field(surface) -> None:
+    obs = surface.observe()
+    target = next(n for n in obs.nodes if n.role == "textbox" and n.name is None)
+    loc = synthesize(target, obs.nodes)
+    # The pinned unnamed-input hostile case (phase 1): empty at observation time (no name,
+    # no value yet), so synthesis has nothing to identify it by but role/position --
+    # `ax_path`, spec 3.4 rule 2's explicit last resort -- not `role_name` (would fabricate
+    # a role-based name-match that doesn't exist) and not yet `text` (there is no text to
+    # match until something is typed).
+    assert loc.strategy != "role_name"
+
+    result = surface.act(Action(kind="fill", locator=loc, value="ZZZPROBE"))
+    assert result.ok is True
+
+    content = surface.page.frame(name="content")
+    unnamed_value = content.get_by_role("textbox", name="", exact=True).input_value()
+    member_id_value = content.get_by_role(
+        "textbox", name="Member ID", exact=True
+    ).input_value()
+
+    assert unnamed_value == "ZZZPROBE"
+    assert member_id_value == ""
+
+
+# CRITICAL 1, via the discovery-time entry point: `act_on_index(gen, index, "click")` on the
+# unnamed input must focus the unnamed input, not the Member ID field. Checked by the DOM
+# `name` attribute (`note` vs `mid`), independent of accessible-name ambiguity.
+def test_act_on_index_on_the_unnamed_input_focuses_the_unnamed_field(surface) -> None:
+    obs = surface.observe()
+    target = next(n for n in obs.nodes if n.role == "textbox" and n.name is None)
+    result = surface.act_on_index(obs.generation, target.index, "click")
+    assert result.ok is True
+
+    focused_name = surface.page.frame(name="content").evaluate(
+        "() => document.activeElement && document.activeElement.name"
+    )
+    assert focused_name == "note"
+
+
+# CRITICAL 2: `_handle_for` mapped every strategy through `frame.get_by_role`, but
+# `get_by_role("text")` matches nothing in Playwright -- there is no such queryable role --
+# so a `text`-strategy locator (spec 3.4's escape hatch for a control with no accessible
+# name worth relying on) could never resolve through `WebSurface` at all, and the empty
+# handle's `is_visible()` reported `False`, misdiagnosing a present, unique, visible node as
+# failing a visibility precondition. `get_by_text` is the Playwright counterpart. This
+# resolves AND acts (via `read`) on a `text`-strategy locator against a real page -- nothing
+# in the suite touched this path before.
+def test_text_strategy_locator_resolves_and_reads_through_the_web_surface(browser_page) -> None:
+    browser_page.set_content("<body>Transfer posted successfully<button>OK</button></body>")
+    surface = WebSurface(browser_page, ObservationBudget(max_nodes=200))
+    obs = surface.observe()
+
+    target = next(n for n in obs.nodes if n.role == "text")
+    loc = synthesize(target, obs.nodes)
+    assert loc.strategy == "text"
+
+    resolved = surface.resolve(loc)
+    assert resolved.kind == "unique"
+
+    result = surface.act(Action(kind="read", locator=loc, value=None))
+    assert result.ok is True
+    assert result.read_value == "Transfer posted successfully"
+
+
+# CRITICAL 2, general case: if a strategy's resolved node cannot actually be mapped to a
+# live handle, the honest answer is `not_found`, never a `precondition_failed` inferred from
+# an empty handle. Forces `get_by_role` to return an always-empty locator group so the
+# resolved node (real, unique, visible) cannot be mapped to anything live, and checks the
+# result is `not_found` -- not `precondition_failed(visible)`.
+def test_an_unmappable_resolved_node_reports_not_found_not_precondition_failed(
+    surface, monkeypatch
+) -> None:
+    obs = surface.observe()
+    target = next(n for n in obs.nodes if n.role == "button" and n.name == "Search")
+    loc = synthesize(target, obs.nodes)
+
+    content = surface.page.frame(name="content")
+    empty = content.get_by_role("heading", name="nothing matches this, ever")
+    monkeypatch.setattr(content, "get_by_role", lambda *a, **kw: empty)
+
+    result = surface.resolve(loc)
+    assert result.kind == "not_found"
+
+
+# I2: `act_on_index` used to synthesize against `self._last_nodes` -- the filtered,
+# budget-truncated list the model was shown -- rather than the raw, unfiltered population.
+# With a budget tight enough to cut the Checking row (and its Select button) out of the
+# model-facing Observation entirely, the Savings Select button looked globally unique to
+# synthesis (only one "Select"-named button survived truncation), so it was synthesized with
+# no scope at all. `act()` then re-resolves against a fresh, unfiltered snapshot -- which
+# still has both buttons -- and that unscoped locator resolves `ambiguous`, failing an
+# action for a node that was genuinely, uniquely nameable by index. The budget below was
+# picked empirically to admit the Savings row and button but not the Checking row.
+def test_act_on_index_synthesizes_against_the_full_population_not_the_truncated_view(
+    live_mockapp, browser_page
+) -> None:
+    _login(browser_page, live_mockapp)
+    browser_page.goto(live_mockapp + "/member/12345")
+    browser_page.wait_for_load_state("networkidle")
+
+    surface = WebSurface(browser_page, ObservationBudget(max_nodes=11))
+    obs = surface.observe()
+    assert obs.truncated is True
+    select_buttons = [n for n in obs.nodes if n.role == "button" and n.name == "Select"]
+    assert len(select_buttons) == 1, "the budget must cut off the second Select button"
+
+    target = select_buttons[0]
+    result = surface.act_on_index(obs.generation, target.index, "click")
+    browser_page.wait_for_load_state("networkidle")
+
+    assert result.ok is True
+    assert "000100045512-01" in browser_page.url, (
+        "the truncated view must not stop synthesis from finding the real scope that "
+        "disambiguates the Savings account"
+    )
+
+
+# I3: spec 3.6's observation budget was entirely untested -- `_is_relevant -> return True`
+# (no filtering) and `truncated = False` (never truncates) both survived the whole suite.
+# This pins filtering: a bare, unlabelled structural wrapper (table/rowgroup/document) must
+# not appear in the Observation, while a genuinely interactive, labelled control still does.
+def test_observation_filters_out_unlabelled_structural_nodes(surface) -> None:
+    obs = surface.observe()
+    assert not any(
+        n.role in {"table", "rowgroup", "document"} and n.name is None and n.value is None
+        for n in obs.nodes
+    )
+    assert any(n.role == "button" and n.name == "Search" for n in obs.nodes)
+
+
+# I3: a small budget must set `truncated` and actually clip the node count.
+def test_a_small_budget_truncates_and_flags_it(live_mockapp, browser_page) -> None:
+    _login(browser_page, live_mockapp)
+    browser_page.goto(live_mockapp + "/")
+    browser_page.wait_for_load_state("networkidle")
+
+    surface = WebSurface(browser_page, ObservationBudget(max_nodes=3))
+    obs = surface.observe()
+    assert obs.truncated is True
+    assert len(obs.nodes) == 3
+
+
+# Deferred-minor 6, promoted: `page.frames` enumerates `nav` before `content`, so a naive
+# positional slice of a small budget returns only the nav frame's branding chrome and drops
+# the entire content frame -- verified live. Truncation must be frame-fair: every frame
+# should still contribute nodes under a tight budget, not just the first one enumerated.
+def test_truncation_is_frame_fair_not_naive_positional_slicing(surface_low_budget) -> None:
+    obs = surface_low_budget.observe()
+    assert obs.truncated is True
+    frames = {seg.name for n in obs.nodes for seg in n.surface_path if seg.kind == "frame"}
+    assert "content" in frames, "a tight budget must not drop the content frame entirely"
+
+
+# I4: `act(read)` returned `result.node.value or result.node.name`, so an empty field
+# silently reported its own accessible name as if it were the field's contents. `read` is
+# how phase 4 will read application state for an `expects` checkpoint; an empty field
+# reporting its own label as its value is a silently wrong read.
+def test_read_on_an_empty_field_returns_none_not_the_accessible_name(surface) -> None:
+    obs = surface.observe()
+    target = next(n for n in obs.nodes if n.role == "textbox" and n.name == "Member ID")
+    loc = synthesize(target, obs.nodes)
+
+    result = surface.act(Action(kind="read", locator=loc, value=None))
+    assert result.ok is True
+    assert result.read_value is None
+
+
+def test_read_on_a_filled_field_returns_the_typed_value(surface) -> None:
+    obs = surface.observe()
+    target = next(n for n in obs.nodes if n.role == "textbox" and n.name == "Member ID")
+    loc = synthesize(target, obs.nodes)
+
+    fill_result = surface.act(Action(kind="fill", locator=loc, value="12345"))
+    assert fill_result.ok is True
+
+    result = surface.act(Action(kind="read", locator=loc, value=None))
+    assert result.ok is True
+    assert result.read_value == "12345"
+
+
+def test_read_on_a_filled_protected_field_never_returns_its_value_or_its_label(
+    live_mockapp, browser_page
+) -> None:
+    browser_page.goto(live_mockapp + "/login")
+    surface = WebSurface(browser_page, ObservationBudget(max_nodes=200))
+    obs = surface.observe()
+    target = next(n for n in obs.nodes if n.role == "textbox" and n.name == "Password")
+    loc = synthesize(target, obs.nodes)
+
+    fill_result = surface.act(Action(kind="fill", locator=loc, value="hunter2"))
+    assert fill_result.ok is True
+
+    result = surface.act(Action(kind="read", locator=loc, value=None))
+    assert result.ok is True
+    assert result.read_value is None
+    assert result.read_value != "Password"
+
+
+# I5: `_frame_for` raised a bare `builtins.ValueError` when a named frame no longer exists.
+# R21's invariant is that a caller which may not import Playwright has an importable type to
+# catch, and a frame disappearing after a navigation is routine in a frameset app -- this is
+# the better answer for that case: `not_found`, the same outcome vocabulary already used for
+# "the target locator's node is not there," reached through a fresh navigation that
+# dismantles the frameset entirely.
+def test_resolving_against_a_frame_that_no_longer_exists_reports_not_found(
+    live_mockapp, browser_page
+) -> None:
+    _login(browser_page, live_mockapp)
+    browser_page.goto(live_mockapp + "/")
+    browser_page.wait_for_load_state("networkidle")
+
+    surface = WebSurface(browser_page, ObservationBudget(max_nodes=200))
+    obs = surface.observe()
+    target = next(
+        n
+        for n in obs.nodes
+        if n.role == "button"
+        and n.name == "Search"
+        and any(s.kind == "frame" and s.name == "content" for s in n.surface_path)
+    )
+    loc = synthesize(target, obs.nodes)
+
+    # Navigate the top-level page clean away from the frameset -- the "content" frame this
+    # locator's surface_path names no longer exists at all.
+    browser_page.goto(live_mockapp + "/search")
+    browser_page.wait_for_load_state("networkidle")
+
+    result = surface.resolve(loc)
+    assert result.kind == "not_found"
+
+
+# I5, the other half: a surface_path shape this surface does not know how to interpret at
+# all is a genuine implementation-level anomaly, not something a frameset navigation can
+# produce -- that case still raises `SurfaceError`, translated from the bare `ValueError`
+# `_frame_for` used to raise directly.
+def test_an_unsupported_surface_path_shape_raises_surfaceerror(
+    live_mockapp, browser_page
+) -> None:
+    _login(browser_page, live_mockapp)
+    browser_page.goto(live_mockapp + "/")
+    browser_page.wait_for_load_state("networkidle")
+    surface = WebSurface(browser_page, ObservationBudget(max_nodes=200))
+
+    bogus = Locator(
+        strategy="role_name", role="button", name="Search",
+        surface_path=[
+            SurfaceSegment(kind="frame", name="content"),
+            SurfaceSegment(kind="frame", name="nav"),
+        ],
+        rationale="malformed on purpose", confidence="low",
+    )
+    with pytest.raises(SurfaceError):
+        surface.resolve(bogus)
+
+
+# I6: R24's live half. `require.visible` is checked only against the live handle, because a
+# snapshot can go stale between observation and action. Hides a resolvable, previously-visible
+# control after observation and confirms `resolve()` reports `precondition_failed(visible)`.
+def test_a_control_hidden_after_observation_reports_precondition_failed_visible(
+    live_mockapp, browser_page
+) -> None:
+    _login(browser_page, live_mockapp)
+    browser_page.goto(live_mockapp + "/search")
+    browser_page.wait_for_load_state("networkidle")
+
+    surface = WebSurface(browser_page, ObservationBudget(max_nodes=200))
+    obs = surface.observe()
+    target = next(n for n in obs.nodes if n.role == "button" and n.name == "Search")
+    loc = synthesize(target, obs.nodes)
+
+    # `display:none`/`visibility:hidden` remove the element from the accessibility tree
+    # entirely (verified empirically), which would make this `not_found`, not the
+    # precondition failure this test targets. `transform: scale(0)` shrinks the element's
+    # box to nothing -- Playwright's `is_visible()` reports `False` -- while the element
+    # stays in the accessibility tree, so `resolve_against` still finds it.
+    browser_page.get_by_role("button", name="Search", exact=True).evaluate(
+        "el => el.style.transform = 'scale(0)'"
+    )
+
+    result = surface.resolve(loc)
+    assert result.kind == "precondition_failed"
+    assert result.which == "visible"
+
+
+# I7: nothing pinned that `WebSurface` actually satisfies `Surface` at all. `Surface` is
+# `runtime_checkable` (base.py) specifically so this isinstance check is meaningful; a
+# structural drift (a renamed or removed method) fails this test even though nothing here
+# ever names `WebSurface` in a type annotation.
+def test_web_surface_conforms_to_the_surface_protocol_at_runtime(browser_page) -> None:
+    surface: Surface = WebSurface(browser_page)
+    assert isinstance(surface, Surface)
+
+
+# Also fix: `capture()` before any `observe()` used to return `generation=0`, numerically
+# indistinguishable from a real first generation if that numbering scheme ever changed.
+# Real generations are always >= 1 (spec 3.1); the never-observed state now uses a sentinel
+# that is unambiguous regardless of numbering scheme.
+def test_capture_before_any_observation_reports_a_distinguishable_generation(
+    browser_page,
+) -> None:
+    surface = WebSurface(browser_page)
+    frame = surface.capture()
+    assert frame.generation < 0
+    assert frame.generation != surface.observe().generation

@@ -9,7 +9,7 @@ which concrete implementation backs it.
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from cua.surface.models import (
     Action,
@@ -46,8 +46,15 @@ class SurfaceError(RuntimeError):
     """
 
 
+@runtime_checkable
 class Surface(Protocol):
-    """Perceives and acts on one application, one frame tree at a time."""
+    """Perceives and acts on one application, one frame tree at a time.
+
+    `@runtime_checkable` so `isinstance(some_surface, Surface)` is a meaningful conformance
+    check (I7) -- it verifies every method below is present on the instance, which is what
+    catches a structural drift (a renamed or removed method) without any caller ever naming
+    a concrete surface type in an annotation.
+    """
 
     def observe(self) -> Observation:
         """Snapshots every frame and returns the current, budget-capped Observation."""
@@ -63,4 +70,18 @@ class Surface(Protocol):
 
     def capture(self) -> EvidenceFrame:
         """Captures a scrubbed evidence frame (screenshot plus raw snapshot YAML)."""
+        ...
+
+    def act_on_index(self, generation: int, index: int, action: str) -> ActionResult:
+        """The discovery-time entry point (spec §3.1): acts on a node named by index from a
+        previously returned Observation, rather than a caller-built Locator.
+
+        `generation` must match the generation of the Observation `index` was drawn from; a
+        mismatch (a stale index from a page that has since changed, or a fabricated future
+        generation) is rejected -- by raising `StaleObservationError` -- rather than
+        executed. R25: this stale-index rejection is a promise the protocol itself makes,
+        not an implementation detail of any one concrete surface, so phase 3's compiler and
+        phase 4's replay engine can type against `Surface` for this too, without ever
+        importing `cua.surface.web` (the only module allowed to import Playwright).
+        """
         ...

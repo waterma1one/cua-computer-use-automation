@@ -21,7 +21,7 @@ from playwright.sync_api import Dialog, Frame, Page
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator as PlaywrightLocator
 
-from cua.surface.base import StaleObservationError, SurfaceError
+from cua.surface.base import StaleObservationError, Surface, SurfaceError
 from cua.surface.locators import resolve_against, synthesize
 from cua.surface.models import (
     Action,
@@ -39,7 +39,18 @@ from cua.surface.models import (
 )
 from cua.surface.snapshot import parse_aria_snapshot, scrub_protected_values
 
-__all__ = ["ObservationBudget", "StaleObservationError", "WebSurface"]
+# Also fix: `StaleObservationError` lives in `base.py` precisely so a caller that must not
+# import Playwright (phase 3's compiler, phase 4's replay engine) can still catch it.
+# Re-exporting it from this, the one Playwright-importing module, would invite exactly the
+# import it exists to avoid -- so it is imported here (raised by `act_on_index`) but not
+# re-exported.
+__all__ = ["ObservationBudget", "WebSurface"]
+
+# Also fix: a real Observation's generation is always >= 1 (spec §3.1: `observe()`
+# increments before returning). This sentinel is what `capture()` reports before the first
+# `observe()` call -- unambiguously distinct from any real generation regardless of whether
+# a future numbering scheme ever started at 0.
+_NEVER_OBSERVED = -1
 
 # A blocked navigation (most realistically: the target app's own `dialog` fault, whose
 # inline `window.confirm(...)` stalls the load event) must fail fast enough for `act()`
@@ -85,6 +96,41 @@ class ObservationBudget:
     max_nodes: int = 120
 
 
+def _budget_frame_fair(
+    frame_relevant: list[list[Node]], max_nodes: int
+) -> tuple[list[Node], bool]:
+    """Distributes `max_nodes` across `frame_relevant` (one relevant-node list per frame, in
+    `page.frames` order) round-robin, rather than slicing the concatenation positionally.
+
+    Deferred-minor 6, promoted: `page.frames` enumerates `nav` before `content`, so a plain
+    `concatenated[:max_nodes]` under a tight budget returned only `nav`'s branding chrome
+    and dropped the entire `content` frame -- verified live. Taking nodes one at a time from
+    each frame in turn (preserving each frame's own document order) means every frame with
+    any relevant nodes at all contributes something before any single frame can exhaust the
+    whole budget, so a tight cap degrades every frame instead of deleting one outright.
+    """
+    total = sum(len(frame_nodes) for frame_nodes in frame_relevant)
+    if total <= max_nodes:
+        return [n for frame_nodes in frame_relevant for n in frame_nodes], False
+
+    selected: list[list[Node]] = [[] for _ in frame_relevant]
+    cursors = [0] * len(frame_relevant)
+    count = 0
+    while count < max_nodes:
+        progressed = False
+        for i, frame_nodes in enumerate(frame_relevant):
+            if count >= max_nodes:
+                break
+            if cursors[i] < len(frame_nodes):
+                selected[i].append(frame_nodes[cursors[i]])
+                cursors[i] += 1
+                count += 1
+                progressed = True
+        if not progressed:
+            break
+    return [n for frame_nodes in selected for n in frame_nodes], True
+
+
 def _snapshot_frame(frame: Frame) -> str:
     """Returns one frame's raw accessibility-tree snapshot YAML.
 
@@ -122,38 +168,99 @@ def _is_relevant(node: Node) -> bool:
     return node.role in _INTERACTIVE_ROLES or node.name is not None or node.value is not None
 
 
+def _text_of(node: Node) -> str | None:
+    """The text a `text`-role node is identified by when mapping it to a live handle:
+    mirrors `cua.surface.locators._text_of` (name, falling back to value), because a
+    `text`-strategy locator's resolved node is matched against exactly that text.
+    """
+    return node.name if node.name else node.value
+
+
+def _handle_group_for(frame: Frame, node: Node) -> PlaywrightLocator | None:
+    """Returns the Playwright locator *group* (before `.nth(...)`) that addresses nodes of
+    `node`'s shape, or `None` if this surface has no way to address that shape at all.
+
+    CRITICAL 2: a `role="text"` node (a bare accessibility-tree text node, Playwright's own
+    synthetic category for it) is not addressable through `get_by_role` at all --
+    `get_by_role("text")` matches nothing, silently, because "text" is not a queryable ARIA
+    role. `get_by_text` is the Playwright counterpart for this shape.
+
+    For every other role, `get_by_role(role, name=...)` is used, with `name=""` (not
+    "no filter") when `node.name` is `None` -- CRITICAL 1's fix. Playwright's own accessible
+    name computation treats "no name" as an empty-string exact match, the same way this
+    surface's own parser normalizes an empty accessible name to `None`
+    (`cua.surface.snapshot.parse_aria_snapshot`), so `get_by_role(role, name="", exact=True)`
+    addresses exactly the population of *unnamed* nodes of that role -- never named ones too.
+    """
+    if node.role == "text":
+        text = _text_of(node)
+        if text is None:
+            return None
+        return frame.get_by_text(text)
+    role = cast(Any, node.role)
+    return frame.get_by_role(role, name=node.name if node.name is not None else "", exact=True)
+
+
+def _population_for(node: Node, nodes: list[Node]) -> list[Node]:
+    """The `nodes` sharing `node`'s identity, in the same terms `_handle_group_for` uses to
+    build the live locator group -- the population `.nth(position)` indexes into must be
+    computed the same way the group is addressed, or a position computed in one population
+    lands on a different element in the other (CRITICAL 1's actual failure mode).
+    """
+    if node.role == "text":
+        text = _text_of(node)
+        return [n for n in nodes if n.role == "text" and _text_of(n) == text]
+    return [n for n in nodes if n.role == node.role and n.name == node.name]
+
+
 def _handle_for(frame: Frame, node: Node, nodes: list[Node]) -> PlaywrightLocator | None:
     """Maps a resolved `Node` to a live Playwright handle for acting on it, or `None` if
-    `node` is not actually present in `nodes` (defensive: every real caller passes a
-    `nodes` list that `node` was drawn from, so this should be unreachable, but an
-    unguarded lookup that raises `StopIteration` on a miss is worse than a `None`).
+    this surface cannot address it at all: `node` is not actually present in `nodes`
+    (defensive -- every real caller passes a `nodes` list `node` was drawn from, so this
+    should be unreachable), `node`'s shape has no live counterpart (`_handle_group_for`
+    returns `None`), or the resulting handle group does not actually contain `position`
+    live elements. That last check matters on its own: CRITICAL 2 showed an empty handle
+    group answering `.is_visible() == False` for `.nth(k)` on a group with zero elements,
+    which `_failed_live_precondition` would then misreport as `precondition_failed(visible)`
+    -- a present, unique, visible node reported as failing a check it never actually ran.
+    Checking `.count()` here means an unaddressable node always becomes `NotFound`, never a
+    false precondition failure.
 
-    `get_by_role(role, name=...)` scoped to `frame`, then `.nth(k)` where `k` is `node`'s
-    position among the nodes in `nodes` (already scoped to one frame) sharing its role and
-    accessible name -- the same identity `resolve_against` used to pick `node` out in the
-    first place, just re-expressed as a live locator rather than a data match.
+    `.nth(position)` where `position` is `node`'s position within `_population_for(node,
+    nodes)` -- the same identity `resolve_against` used to pick `node` out in the first
+    place (role/name, or text for a `text`-role node), just re-expressed as a live locator
+    rather than a data match, and computed against the *same* population `_handle_group_for`
+    addresses.
     """
-    same_role_and_name = [n for n in nodes if n.role == node.role and n.name == node.name]
-    position = next(
-        (i for i, n in enumerate(same_role_and_name) if n.index == node.index), None
-    )
+    population = _population_for(node, nodes)
+    position = next((i for i, n in enumerate(population) if n.index == node.index), None)
     if position is None:
         return None
-    role = cast(Any, node.role)
-    handle = (
-        frame.get_by_role(role, name=node.name, exact=True)
-        if node.name is not None
-        else frame.get_by_role(role)
-    )
-    return handle.nth(position)
+
+    group = _handle_group_for(frame, node)
+    if group is None:
+        return None
+
+    if group.count() <= position:
+        return None
+
+    return group.nth(position)
 
 
 def _failed_live_precondition(
     handle: PlaywrightLocator, require: Require
 ) -> Literal["visible", "enabled"] | None:
-    """Checks `require` against the live handle rather than the snapshot: the
-    accessibility snapshot's state coverage is partial, so both checks are re-verified
-    against reality before a resolution is reported `unique`."""
+    """Checks `require` against the live handle rather than the snapshot (R24's live half).
+
+    The pure layer (`cua.surface.locators._failed_precondition`) cannot check visibility at
+    all -- a node's mere presence in a snapshot is the only offline signal available, and
+    that snapshot has already excluded elements the browser considers hidden. This is the
+    one place `require.visible` is actually enforced, re-verified here (rather than trusted
+    from the snapshot) because a snapshot can go stale between observation and action.
+    `enabled` is deliberately checked at both layers: the pure layer's check is what a
+    locator's `require.enabled=True` can fail during synthesis-time reasoning that never
+    touches a browser, and this check re-verifies it live for the same staleness reason.
+    """
     if require.visible and not handle.is_visible():
         return "visible"
     if require.enabled and not handle.is_enabled():
@@ -167,8 +274,19 @@ class WebSurface:
     def __init__(self, page: Page, budget: ObservationBudget | None = None) -> None:
         self.page = page
         self.budget = budget or ObservationBudget()
-        self._generation = 0
+        self._generation = _NEVER_OBSERVED
+        # I2: two parallel node lists from the same `observe()` call, deliberately kept
+        # distinct. `_last_nodes` is the filtered-and-renumbered list the model was shown
+        # (what `Observation.nodes` contains) -- the "arbitrarily filtered list" `ancestors_
+        # of`'s docstring warns produces silently wrong containment. `_last_raw_nodes` is
+        # the complete, unfiltered, un-renumbered parse, in true document order, and is what
+        # `act_on_index` uses for `synthesize`'s scope/ancestor reasoning. `_last_raw_for_
+        # observed[i]` is the raw node underlying `_last_nodes[i]` (same object, original
+        # index), so `act_on_index` can map a model-facing index back to its raw identity
+        # without ever mutating a raw node's own index.
         self._last_nodes: list[Node] = []
+        self._last_raw_nodes: list[Node] = []
+        self._last_raw_for_observed: list[Node] = []
         self._pending_dialog: Dialog | None = None
         # Registering a listener stops Playwright's default behaviour of auto-dismissing
         # native dialogs, so one raised by the target app (e.g. the `dialog` fault) stays
@@ -182,32 +300,32 @@ class WebSurface:
 
     def observe(self) -> Observation:
         try:
-            nodes: list[Node] = []
+            frame_relevant: list[list[Node]] = []
+            raw_nodes: list[Node] = []
             index = 0
             for frame in self.page.frames:
                 path = _surface_path_for(frame)
                 raw = _snapshot_frame(frame)
                 frame_nodes = parse_aria_snapshot(raw, path, start_index=index)
-                nodes.extend(frame_nodes)
+                raw_nodes.extend(frame_nodes)
                 index += len(frame_nodes)
+                frame_relevant.append([n for n in frame_nodes if _is_relevant(n)])
         except PlaywrightError as exc:
             raise SurfaceError(f"observe() failed while snapshotting: {exc}") from exc
 
-        filtered = [n for n in nodes if _is_relevant(n)]
-        truncated = len(filtered) > self.budget.max_nodes
-        if truncated:
-            filtered = filtered[: self.budget.max_nodes]
-        # Task 2's parser contract is dense, zero-based indices; filtering after parsing
-        # (necessarily -- relevance depends on the parsed node) leaves gaps from the
-        # entries it drops, so the surviving nodes are renumbered to close them. Mutating
-        # in place is safe: these Node objects are freshly built by this call and shared
-        # with nothing else yet.
-        for position, node in enumerate(filtered):
-            node.index = position
+        selected, truncated = _budget_frame_fair(frame_relevant, self.budget.max_nodes)
+        # Task 2's parser contract is dense, zero-based indices; filtering (and, now,
+        # frame-fair truncation) necessarily leaves gaps, so the model-facing list is
+        # renumbered to close them. `model_copy` rather than in-place mutation (I2): the
+        # renumbered objects are copies, so `raw_nodes`' own indices -- and the objects in
+        # `selected`, which are the *same* objects as in `raw_nodes` -- are never touched.
+        renumbered = [n.model_copy(update={"index": i}) for i, n in enumerate(selected)]
 
-        self._generation += 1
-        self._last_nodes = filtered
-        return Observation(generation=self._generation, nodes=filtered, truncated=truncated)
+        self._generation = 1 if self._generation == _NEVER_OBSERVED else self._generation + 1
+        self._last_nodes = renumbered
+        self._last_raw_nodes = raw_nodes
+        self._last_raw_for_observed = selected
+        return Observation(generation=self._generation, nodes=renumbered, truncated=truncated)
 
     def capture(self) -> EvidenceFrame:
         # Both halves of a capture raise on failure rather than degrading quietly. A
@@ -232,7 +350,17 @@ class WebSurface:
 
     # ---- resolution ---------------------------------------------------------
 
-    def _frame_for(self, surface_path: list[SurfaceSegment]) -> Frame:
+    def _frame_for(self, surface_path: list[SurfaceSegment]) -> Frame | None:
+        """Resolves `surface_path` to a live Playwright frame, or `None` if it names a frame
+        that is not currently attached.
+
+        I5: a frame disappearing after a navigation is routine in a frameset app, so that
+        case is not an exception at all -- `_resolve_with_handle` turns a `None` here into a
+        `NotFound` resolution, the same outcome vocabulary already used for "the target
+        locator's node is not there." Raising `SurfaceError` is reserved for a surface_path
+        *shape* this surface does not know how to interpret -- a genuine implementation-
+        level anomaly a frameset navigation cannot produce, unlike a vanished frame.
+        """
         if len(surface_path) == 1 and surface_path[0].kind == "window":
             return self.page.main_frame
         if (
@@ -240,11 +368,8 @@ class WebSurface:
             and surface_path[0].kind == "window"
             and surface_path[1].kind == "frame"
         ):
-            frame = self.page.frame(name=surface_path[1].name)
-            if frame is None:
-                raise ValueError(f"no live frame named {surface_path[1].name!r}")
-            return frame
-        raise ValueError(f"unsupported surface_path shape: {surface_path!r}")
+            return self.page.frame(name=surface_path[1].name)
+        raise SurfaceError(f"unsupported surface_path shape: {surface_path!r}")
 
     def _resolve_with_handle(
         self, locator: Locator
@@ -262,6 +387,21 @@ class WebSurface:
         """
         try:
             frame = self._frame_for(locator.surface_path)
+        except PlaywrightError as exc:
+            raise SurfaceError(f"resolve() failed while locating the frame: {exc}") from exc
+
+        if frame is None:
+            return (
+                NotFound(
+                    reason=(
+                        f"no live frame for surface_path {locator.surface_path!r}; it may "
+                        "have disappeared after a navigation"
+                    )
+                ),
+                None,
+            )
+
+        try:
             raw = _snapshot_frame(frame)
             nodes = parse_aria_snapshot(raw, locator.surface_path, start_index=0)
         except PlaywrightError as exc:
@@ -271,12 +411,17 @@ class WebSurface:
         if result.kind != "unique":
             return result, None
 
-        handle = _handle_for(frame, result.node, nodes)
+        try:
+            handle = _handle_for(frame, result.node, nodes)
+        except PlaywrightError as exc:
+            raise SurfaceError(f"resolve() failed while mapping to a live handle: {exc}") from exc
         if handle is None:
-            # Should be unreachable: `result.node` was drawn from `nodes` by
-            # `resolve_against` itself. A `None` here means resolution and handle-mapping
-            # have started disagreeing about identity, which is worth surfacing loudly as
-            # a `NotFound` rather than raising `StopIteration` out of `_handle_for`.
+            # CRITICAL 2's general case: `result.node` was drawn from `nodes` by
+            # `resolve_against` itself, but this surface may still have no live counterpart
+            # for its shape (an unaddressable strategy) or find its handle group does not
+            # actually contain it (`_handle_for`'s own `.count()` check). Either way, the
+            # honest answer is `NotFound`, never a `PreconditionFailed` inferred from an
+            # empty handle.
             return (
                 NotFound(reason="resolved node could not be mapped to a live handle"),
                 None,
@@ -355,9 +500,10 @@ class WebSurface:
             elif action.kind == "wait_for":
                 handle.wait_for(state="visible")
             elif action.kind == "read":
-                return ActionResult(
-                    ok=True, action=action, read_value=result.node.value or result.node.name
-                )
+                # I4: the value, and only the value -- an empty field must read back empty,
+                # not its own accessible name. `result.node.value` is already `None` for a
+                # protected node (spec §3.7.1), so this never leaks a password either.
+                return ActionResult(ok=True, action=action, read_value=result.node.value)
             else:
                 return ActionResult(ok=False, action=action, read_value=None)
         except PlaywrightError as exc:
@@ -373,11 +519,22 @@ class WebSurface:
 
         `generation` must match the observation this surface most recently produced --
         any mismatch (an older generation the page has changed under, or a fabricated
-        future one) raises `StaleObservationError` rather than executing (spec §3.1). A
-        fresh locator is then synthesized for the named node (`cua.surface.locators.
-        synthesize`, the same synthesis phase 3's compiler uses) and executed through
-        `act()`, so there is exactly one implementation of "perform an action" underneath
-        both entry points.
+        future one) raises `StaleObservationError` rather than executing (spec §3.1).
+
+        I2: the fresh locator is synthesized (`cua.surface.locators.synthesize`, the same
+        synthesis phase 3's compiler uses) against `self._last_raw_nodes` -- the complete,
+        unfiltered population from this same observation -- not `self._last_nodes`, the
+        filtered-and-renumbered list the model was shown. `ancestors_of`'s own docstring
+        warns that an arbitrarily filtered list yields silently wrong containment, not an
+        error; synthesizing against the model-facing list risks exactly that; the raw list
+        is the one `resolve_against` (via `_resolve_with_handle`'s own fresh, unfiltered
+        parse) actually resolves against, so synthesis and resolution must reason about the
+        same population `resolve_against` will use. `index` names a position in the
+        model-facing `Observation.nodes`; `self._last_raw_for_observed[index]` is the raw
+        node underlying it, drawn from the same objects `self._last_raw_nodes` holds.
+
+        Executed through `act()`, so there is exactly one implementation of "perform an
+        action" underneath both entry points.
 
         This entry point's `action` parameter is a bare kind string with no way to carry
         a `value` -- the brief pins this signature, and widening it is phase 3's call to
@@ -401,9 +558,26 @@ class WebSurface:
                     "locator-driven act() instead"
                 ),
             )
-        node = next((n for n in self._last_nodes if n.index == index), None)
-        if node is None:
+        if not (0 <= index < len(self._last_raw_for_observed)):
             raise ValueError(f"no node with index {index} in the current observation")
-        locator = synthesize(node, self._last_nodes)
+        raw_node = self._last_raw_for_observed[index]
+        locator = synthesize(raw_node, self._last_raw_nodes)
         built = Action(kind=cast(ActionKind, action), locator=locator, value=None)
         return self.act(built)
+
+
+def _typed_as_a_surface(page: Page) -> Surface:
+    """I7: exists only for `mypy cua mockapp` -- never called at runtime.
+
+    `Surface` (`cua/surface/base.py`) is a `Protocol`, so structural drift between it and
+    `WebSurface` (a method renamed, dropped, or given an incompatible signature) is
+    otherwise invisible to a type checker unless something, somewhere, actually assigns a
+    `WebSurface` to a `Surface`-typed name. R25 folded `act_on_index` into the protocol
+    specifically so a caller could type against `Surface` alone without importing this,
+    the only Playwright-importing module -- which is exactly why this check has to live
+    here rather than in `cua/surface/base.py` itself: it is the one place in the system
+    both types are legitimately in scope together. The runtime half of this same
+    conformance check (`isinstance(surface, Surface)`) lives in
+    `tests/surface/test_web_surface.py`.
+    """
+    return WebSurface(page)
