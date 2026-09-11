@@ -39,6 +39,8 @@ class Matcher(BaseModel):
     member, so a matcher can never carry a regular expression either.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     strategy: Strategy = "role_name"
     role: str | None = None
     name: str | None = None
@@ -52,6 +54,12 @@ class Target(BaseModel):
     tenant-locked by construction; the base URL comes from per-instance configuration at
     replay time.
     """
+
+    # E5: `extra="forbid"` across every model in this module (the three `StepValue` arms
+    # already had it). This is a file a human authors and hand-edits, so a mistyped or
+    # misplaced key -- `host` being the case this rule exists to catch -- must be a loud
+    # parse failure, never a silently discarded field.
+    model_config = ConfigDict(extra="forbid")
 
     path: str
 
@@ -106,6 +114,13 @@ class Expect(BaseModel):
     business outcome is `outcome`."
     """
 
+    # `validate_assignment=True` follows phase 2's `Node` precedent (its protected-value
+    # validator in `cua/surface/models.py`) so the proposed/verified check below reruns on
+    # ordinary attribute assignment, not just construction -- see that validator's comment
+    # for what this pattern does and does not cover, restated below for this model's own
+    # fields. `extra="forbid"` is E5.
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
     when: Matcher
     outcome: Outcome
     code: str | None = None
@@ -119,6 +134,20 @@ class Expect(BaseModel):
 
     @model_validator(mode="after")
     def _a_proposed_expect_cannot_claim_to_be_verified(self) -> Expect:
+        # What this guarantee actually covers: normal construction (`Expect(...)`),
+        # `Expect.model_validate(...)`, and -- because `validate_assignment=True` is set
+        # above -- ordinary attribute assignment to either field (`expect.verified = True`
+        # on a proposed clause, or `expect.source = "proposed"` on a verified one). Both
+        # fields live directly on this model, so assignment to either alone is enough to
+        # retrigger this check; there is no nested sub-model to lose track of the way
+        # `Node.state.protected` is.
+        #
+        # It deliberately does NOT cover two bypasses: `Expect.model_construct(...)` and
+        # `expect.model_copy(update={...})` -- both skip validation entirely by Pydantic's
+        # design. An `Expect` built or copied through either can end up proposed-and-
+        # verified with no error raised. Anything reaching for `model_copy(update=...)` on
+        # an `Expect` -- an overlay's `extend_expects` merge is the obvious candidate --
+        # must not assume this validator will catch a mistake there.
         if self.source == "proposed" and self.verified:
             raise ValueError("a proposed expect cannot be verified")
         return self
@@ -130,6 +159,8 @@ class Step(BaseModel):
     `id` is a plain string; step ordering comes from list position on
     `Artifact.steps`, never from `id`.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     action: ActionKind
@@ -150,6 +181,8 @@ class InputSpec(BaseModel):
     artifact doubles as a tool definition with no second schema to drift from.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     type: str
     # The one deliberate regular expression allowed anywhere in an artifact: a JSON Schema
     # validation pattern for a caller's argument, never a locator.
@@ -163,6 +196,8 @@ class InputSpec(BaseModel):
 class OutputSpec(BaseModel):
     """A JSON-Schema-shaped description of one declared capability output."""
 
+    model_config = ConfigDict(extra="forbid")
+
     type: str
     format: str | None = None
     # S4.2 decision 6: declared, not inferred.
@@ -174,6 +209,8 @@ class App(BaseModel):
     never the tenant (S4.2 decision 4).
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     vendor_product: str
     variant: str
     surface: str
@@ -183,12 +220,16 @@ class App(BaseModel):
 class Settle(BaseModel):
     """How long, and how often, to wait for the surface to settle after an action."""
 
+    model_config = ConfigDict(extra="forbid")
+
     timeout_ms: int
     poll_ms: int
 
 
 class Success(BaseModel):
     """The observation that marks the whole capability as having succeeded."""
+
+    model_config = ConfigDict(extra="forbid")
 
     checkpoint: Matcher
 
@@ -197,6 +238,8 @@ class Recovery(BaseModel):
     """A globally recoverable condition, detected and handled independently of any single
     step's `expects`.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str
     detect: Matcher
@@ -211,6 +254,8 @@ class Provenance(BaseModel):
     """Where a capability came from, recorded so the artifact is reviewable without the
     raw model transcript.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     discovered_at: datetime
     model: str
@@ -228,8 +273,10 @@ class CapabilityPolicy(BaseModel):
     E4: declared here; Task 2 is what enforces it (load-time validation narrows rather
     than widens a tenant overlay's deployment allowlist, S4.4). All three narrow an
     otherwise-unconstrained deployment, so "not stated" means "not narrowed", not
-    "narrowed to nothing" -- hence `None`, not an empty list, as the default.
+    "narrowed to nothing" -- hence `None`, not an empty list, as each field's default.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     allowed_origins: list[str] | None = None
     allowed_paths: list[str] | None = None
@@ -243,6 +290,8 @@ class Artifact(BaseModel):
     lives in `artifacts/registry.json`, keyed by `(id, version)`; the artifact file at
     `artifacts/<id>/v<version>.yaml` is immutable, so lifecycle state cannot live in it.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     # Governs how to parse this file.
     schema_version: int
@@ -264,7 +313,13 @@ class Artifact(BaseModel):
     success: Success
     recovery: list[Recovery] = Field(default_factory=list)
     provenance: Provenance
-    policy: CapabilityPolicy = Field(default_factory=CapabilityPolicy)
+    # `None` means no `policy` block was declared at all; `CapabilityPolicy()` means one
+    # was declared and left empty. `Field(default_factory=CapabilityPolicy)` collapsed
+    # both into the same all-`None` state, which is exactly the distinction E4's narrowing
+    # check needs to draw -- it must tell "not checked" from "checked and clean" apart, and
+    # can only do that if "not declared" survives parsing as a different value than
+    # "declared empty".
+    policy: CapabilityPolicy | None = None
 
 
 class LocatorOverride(BaseModel):
@@ -272,6 +327,8 @@ class LocatorOverride(BaseModel):
     `name`, or the `surface_path` it is reached through. Everything else about the base
     locator -- its strategy, its rationale, its confidence -- is not overlay territory.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
     surface_path: list[SurfaceSegment] | None = None
@@ -291,6 +348,8 @@ class Overlay(BaseModel):
     prohibition, and resolving an overlay onto its base, is Task 3's job; this model only
     has to be able to represent one.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     targets: str
     base_id: str
