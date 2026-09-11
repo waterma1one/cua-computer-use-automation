@@ -293,3 +293,32 @@ def test_resolve_against_a_scoped_locator_with_real_depths() -> None:
     result = resolve_against(loc, nodes)
     assert result.kind == "unique"
     assert result.node.index == 4
+
+
+# E8: a cyclic fallback chain is constructible with plain Pydantic attribute assignment --
+# no `model_construct` or `model_copy` bypass -- so `resolve_against` recursing through
+# `fallbacks` reached `RecursionError`. Phase 2 triaged this as deferred partly on the
+# belief that building one required a bypass; it does not, phase 3's compiler is the first
+# real producer of `fallbacks`, and phase 4 replays fallback chains.
+def test_resolve_against_terminates_on_a_cyclic_fallback_chain() -> None:
+    first = Locator(role="button", name="Select", surface_path=PATH,
+                    rationale="primary", confidence="high")
+    second = Locator(role="button", name="Choose", surface_path=PATH,
+                     rationale="fallback", confidence="low")
+    first.fallbacks = [second]
+    second.fallbacks = [first]
+
+    result = resolve_against(first, [node(0, "button", "Choose")])
+
+    # It must terminate *and* still reach the fallback: a guard that bailed out of the
+    # whole walk would return not_found here, which is a silent resolution failure -- the
+    # exact class `require` and `ambiguous` exist to surface.
+    assert result.kind == "unique"
+    assert result.node.name == "Choose"
+
+
+def test_a_self_referencing_fallback_terminates() -> None:
+    loc = Locator(role="button", name="Select", surface_path=PATH,
+                  rationale="primary", confidence="high")
+    loc.fallbacks = [loc]
+    assert resolve_against(loc, []).kind == "not_found"

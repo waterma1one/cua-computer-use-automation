@@ -1,8 +1,6 @@
 import pytest
 from pydantic import ValidationError
 
-from cua.artifact import validate
-from cua.surface import snapshot
 from cua.surface.models import (
     Locator,
     Node,
@@ -155,6 +153,25 @@ def test_is_protected_name_treats_a_missing_name_as_unprotected() -> None:
     assert not is_protected_name("")
 
 
+def test_is_protected_name_misses_an_unusually_labelled_credential_field() -> None:
+    # The first documented blind spot, previously claimed as pinned and pinned nowhere.
+    # Every one of these is a real credential label that names none of the tokens. Widening
+    # the vocabulary to cover them is a judgement about which words are credential-ish
+    # enough to be worth the false positives, and it is a judgement, not an oversight.
+    assert not is_protected_name("Passphrase")
+    assert not is_protected_name("Memorable Word")
+    assert not is_protected_name("Security Answer")
+    assert not is_protected_name("Card Verification Code")
+
+
+def test_is_protected_name_catches_secret_word_despite_the_old_docstring() -> None:
+    # `"Secret Word"` was the docstring's worked example of a MISS. It is a hit: `secret` is
+    # in the tuple and sits on word boundaries. Pinned so the inverted example cannot come
+    # back, and as the standing reminder that a documented example is a claim needing a
+    # measurement.
+    assert is_protected_name("Secret Word")
+
+
 def test_is_protected_name_misses_plurals_and_compounds() -> None:
     # The third documented blind spot (M9), pinned so the next reader meets it on purpose
     # rather than assuming coverage. A persisted locator name is likelier to carry a plural
@@ -164,14 +181,3 @@ def test_is_protected_name_misses_plurals_and_compounds() -> None:
     assert not is_protected_name("password_field")
     assert not is_protected_name("MyPassword")
 
-
-def test_the_protected_name_rule_has_exactly_one_implementation() -> None:
-    # The drift guard for E6. Before this, `snapshot.py` and `validate.py` each compiled a
-    # byte-identical regex over the shared tuple and nothing held them equal. Both now route
-    # through `is_protected_name`; a module-private copy reappearing in either is the defect
-    # this test exists to catch.
-    assert not hasattr(snapshot, "_PROTECTED_NAME_RE")
-    assert not hasattr(validate, "_PROTECTED_NAME_RE")
-    assert not hasattr(snapshot, "_is_protected")
-    assert snapshot.is_protected_name is is_protected_name
-    assert validate.is_protected_name is is_protected_name

@@ -56,12 +56,17 @@ def is_protected_name(name: str | None) -> bool:
     Matched case-insensitively **on word boundaries, never as a substring**: a naive
     substring match on "pin" would make "Shipping" and "Spinner" credential fields.
 
-    Three blind spots, all of them consequences of inferring protection from a name alone,
-    all pinned by tests in `tests/surface/test_models.py` so the next reader meets them on
-    purpose rather than assuming coverage:
+    Three blind spots, all of them consequences of inferring protection from a name alone.
+    Every example below was executed against this predicate, and each of the three has a
+    test in `tests/surface/test_models.py`, so the next reader meets them on purpose rather
+    than assuming coverage:
 
-    1. A credential field labelled with none of these tokens -- a custom "Secret Word" field
-       spelled so it misses every one.
+    1. A credential field labelled with none of these tokens: "Passphrase", "Memorable
+       Word", "Security Answer" and "Card Verification Code" are all real credential labels
+       that return `False`. (An earlier draft of this docstring offered "Secret Word" as the
+       example. It returns `True` -- `secret` is in the tuple and sits on word boundaries --
+       so the example of a miss was a string the rule catches. Measured, not assumed, is the
+       standard here.)
     2. A credential field with **no accessible name at all** (`name is None`), where there
        is nothing for this to look at.
     3. Plurals and compounds: "Passwords", "PINs", "password_field" and "MyPassword" all

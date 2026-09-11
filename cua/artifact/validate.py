@@ -118,9 +118,12 @@ def _locator_chain(locator: Locator) -> list[Locator]:
     plain Pydantic attribute assignment -- no `model_construct` bypass needed -- and an
     unguarded walk would raise `RecursionError` out of a `validate` that documents that it
     never raises. A cyclic chain cannot arrive from a YAML load, but Task 3 mutates locators
-    in memory while resolving an overlay, which is where this would first be hit. Phase 2
-    left the same cycle open in fallback *resolution* as a deferred minor; there it needs a
-    Pydantic bypass to construct, here it does not.
+    in memory while resolving an overlay, which is where this would first be hit.
+
+    Phase 2 left the same cycle open in fallback *resolution* as a deferred minor, on the
+    understanding that constructing one required a Pydantic bypass. That was wrong --
+    `fallbacks` is an ordinary assignable field and `a.fallbacks = [b]; b.fallbacks = [a]`
+    is enough -- so `cua.surface.locators.resolve_against` now carries the same guard (E8).
     """
     seen: set[int] = set()
     chain: list[Locator] = []
