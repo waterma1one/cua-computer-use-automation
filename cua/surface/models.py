@@ -17,6 +17,38 @@ Confidence = Literal["high", "medium", "low"]
 NameMatch = Literal["exact", "contains", "prefix"]
 Strategy = Literal["role_name", "text", "ax_path"]
 
+# Credential-token vocabulary used to infer that a control holds a secret from its
+# accessible name alone. Matched case-insensitively on word boundaries, never as a
+# substring: a naive substring match would make "shipping" and "spinner" protected.
+# Deliberately extensible -- add tokens here as new leaky labels turn up in real
+# applications.
+#
+# It lives here, beside the data it describes, for R22's reason: two modules in different
+# layers need it, and `models.py` is already a dependency both take. `cua.surface.snapshot`
+# infers `Node.state.protected` from it while parsing aria-snapshot YAML, and
+# `cua.artifact.validate` uses it for spec §4.4's sixth condition (no literal originates
+# from a protected field). The artifact layer has no business importing an accessibility
+# YAML parser to reach a tuple of strings, and two divergent copies of this vocabulary
+# would mean a credential leaking past one of the two checks that exist to stop it.
+#
+# Only the vocabulary is shared. Each side compiles its own matcher over it, because the
+# thing each side matches differs: `snapshot.py` matches a live node's accessible name
+# while parsing, and `validate.py` matches a persisted locator's `name` field.
+#
+# R3's known blind spot, widened: protection inferred from an accessible name alone cannot
+# catch a password field labelled with none of these tokens, nor one with no accessible
+# name at all. Both are pinned deliberately by tests in `tests/surface/test_snapshot.py`.
+PROTECTED_NAME_TOKENS = (
+    "password",
+    "passwd",
+    "passcode",
+    "pin",
+    "secret",
+    "token",
+    "otp",
+    "cvv",
+)
+
 
 class SurfaceSegment(BaseModel):
     """One hop in a control's path from the top-level window into nested frames.
