@@ -37,8 +37,14 @@ def _all_keys(obj: object) -> set[str]:
 
 
 def test_the_export_is_itself_valid_json_schema() -> None:
+    # Fix round 2: this used to check only `input_schema`. The reviewer confirmed by
+    # execution that checking `output_schema` too would have caught the always-emit
+    # `format: null` mutation below (`None is not of type 'string'`) -- the assertion
+    # that would have closed that gap already existed, it was just pointed at only half
+    # the export.
     schema = export_tool_schema(base())
     jsonschema.Draft202012Validator.check_schema(schema["input_schema"])
+    jsonschema.Draft202012Validator.check_schema(schema["output_schema"])
 
 
 def test_declared_inputs_round_trip_into_the_schema() -> None:
@@ -180,6 +186,18 @@ def test_declared_outputs_round_trip_into_the_output_schema() -> None:
     props = export_tool_schema(a)["output_schema"]["properties"]
     assert props["balance"]["type"] == "string"
     assert props["balance"]["format"] == "date"
+
+
+def test_no_format_declared_means_no_format_key_exported() -> None:
+    # Fix round 2: the output-side counterpart to
+    # test_no_pattern_declared_means_no_pattern_key_exported. Before this test existed,
+    # removing `_output_property`'s `if spec.format is not None:` guard -- so it always
+    # emitted `"format": spec.format`, i.e. `"format": null` when unset -- left every
+    # test in this module green. A `format` must not be fabricated for an output that
+    # declares none.
+    a = base(outputs={"balance": OutputSpec(type="string")})
+    props = export_tool_schema(a)["output_schema"]["properties"]
+    assert "format" not in props["balance"]
 
 
 def test_an_argument_without_the_pattern_field_is_not_over_constrained() -> None:
