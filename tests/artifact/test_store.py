@@ -63,18 +63,20 @@ def test_an_input_pattern_survives_serialization(tmp_path) -> None:
 def test_status_and_stability_never_reach_the_artifact_file(tmp_path) -> None:
     # Acceptance criterion 2, and §4.1: the artifact file is immutable, lifecycle state is not.
     #
-    # Ruling E18 changed write_registry_entry's resolution rules: an "approved" entry for an
-    # (id, version) the store holds no file for at all is now refused (the ghost-id hole I1
-    # named). So this test now saves first, then registers -- the artifact bytes are captured
-    # immediately after save() either way, before the registry write happens, so the property
-    # under test (registry state never leaks into the artifact file) is exactly as directly
-    # pinned as before.
+    # Restored to the brief's original order -- register, THEN save (fix round 2, item 2). Fix
+    # round 1 reordered this to save-then-register to satisfy ruling E18's ghost-id refusal,
+    # but a re-review mutant (a `save` that folds any *existing* registry entry's status/
+    # stability into the artifact file) passed cleanly against that reordering: the registry was
+    # still empty at save time, so there was nothing yet to leak, and the test proved nothing.
+    # `artifact=a` makes the original order legal again under E18 (path 1: the passed artifact's
+    # identity matches the key, and it holds no unverified expects and passes load-time
+    # validation, so approving it needs no file on disk at all).
     a = base()
-    text = save(a, tmp_path).read_text().lower()
     write_registry_entry(
         tmp_path, "corebank.probe", 1,
         RegistryEntry(status="approved", replays=3, successes=3), artifact=a,
     )
+    text = save(a, tmp_path).read_text().lower()
     assert "status" not in text
     assert "stability" not in text
     assert "approved" not in text
@@ -237,6 +239,69 @@ def test_write_registry_entry_draft_with_no_artifact_and_no_file_still_writes(tm
     write_registry_entry(tmp_path, "corebank.probe", 1, RegistryEntry(status="draft"))
     registry = read_registry(tmp_path)
     assert registry["corebank.probe"]["1"].status == "draft"
+
+
+def test_write_registry_entry_refuses_clearing_requires_human_approval_with_nothing_resolved(
+    tmp_path,
+) -> None:
+    # E15's other clause (fix round 2, item 1): the fallback for requires_human_approval is
+    # True, not "silently rewrite whatever the caller asked for to True". With no artifact and
+    # no file to check an irreversible step against, the store cannot prove the flag clearable,
+    # so an explicit False is refused rather than silently accepted or silently overwritten.
+    with pytest.raises(ValueError):
+        write_registry_entry(tmp_path, "ghost.id", 8, RegistryEntry(requires_human_approval=False))
+
+
+def test_write_registry_entry_default_requires_human_approval_writes_with_nothing_resolved(
+    tmp_path,
+) -> None:
+    # The other direction: the field's own default (True) needs no artifact to justify itself,
+    # so a draft entry that never touches the field still writes with nothing resolved.
+    write_registry_entry(tmp_path, "ghost.id", 8, RegistryEntry(status="draft"))
+    registry = read_registry(tmp_path)
+    assert registry["ghost.id"]["8"].requires_human_approval is True
+
+
+# --- E19: a draft registration never depends on load-time validation passing; approval
+# always does -- pinned identically for the on-disk-file path and the passed-artifact path. ---
+
+
+def test_e19_draft_registers_a_file_that_fails_load_time_validation(tmp_path) -> None:
+    a = base()
+    a.steps[0].risk = None  # RISK_UNCLASSIFIED -- an error-level validate() finding
+    save(a, tmp_path)
+    write_registry_entry(tmp_path, "corebank.probe", 1, RegistryEntry(status="draft"))
+    registry = read_registry(tmp_path)
+    assert registry["corebank.probe"]["1"].status == "draft"
+
+
+def test_e19_approval_of_a_file_that_fails_load_time_validation_is_refused(tmp_path) -> None:
+    a = base()
+    a.steps[0].risk = None
+    save(a, tmp_path)
+    with pytest.raises(ValueError):
+        write_registry_entry(tmp_path, "corebank.probe", 1, RegistryEntry(status="approved"))
+
+
+def test_e19_draft_registers_a_passed_artifact_that_fails_load_time_validation(tmp_path) -> None:
+    # The passed-artifact path must behave identically to the on-disk path above -- the
+    # asymmetry ruling E19 closes is between the two paths, not just within one of them.
+    a = base()
+    a.steps[0].risk = None
+    write_registry_entry(tmp_path, "corebank.probe", 1, RegistryEntry(status="draft"), artifact=a)
+    registry = read_registry(tmp_path)
+    assert registry["corebank.probe"]["1"].status == "draft"
+
+
+def test_e19_approval_of_a_passed_artifact_that_fails_load_time_validation_is_refused(
+    tmp_path,
+) -> None:
+    a = base()
+    a.steps[0].risk = None
+    with pytest.raises(ValueError):
+        write_registry_entry(
+            tmp_path, "corebank.probe", 1, RegistryEntry(status="approved"), artifact=a,
+        )
 
 
 def test_write_registry_entry_with_no_artifact_argument_gates_on_the_file_when_clean(

@@ -35,21 +35,33 @@ This module does not decide whether a `draft` artifact may be exported as a call
 -- ruling E12, carried from Task 4's handoff, puts that three-part gate (`validate`
 clean, `artifact.verified`, registry `status != draft`) on whoever calls
 `export_tool_schema`, not on this module or that one. What this module *does* gate is
-narrower and different, and (ruling E18) now has three parts instead of one:
+narrower and different, and (rulings E18, E19) now has three parts instead of one:
 
 1. `write_registry_entry` refuses to set `status="approved"` on an artifact that still
    carries an unverified `Expect` (acceptance criterion 6, §8.3 step 5) -- a promotion-time
    check about the artifact's own admitted state.
-2. `write_registry_entry` refuses `requires_human_approval=False` on an artifact holding
-   any step classified `risk="irreversible"` (§6.4, ruling E15) -- the flag defaults `True`
-   and may be *cleared* only where §6.4 gives no rule against it.
-3. Both of the above need an artifact to inspect. `write_registry_entry` no longer trusts
-   an `artifact` argument blindly, and no longer treats "I was not given one" as "nothing
-   to check" when the entry claims `approved`. See `write_registry_entry`'s own docstring
-   for the resolution order this implements (ruling E18) and why: an artifact argument
-   naming a different `(id, version)` than the call, and an `approved` entry for an
-   `(id, version)` this store holds no file for at all, were both silent holes in the
-   original gate, closed here.
+2. `write_registry_entry` refuses `requires_human_approval=False` wherever it cannot prove
+   the flag clearable: on an artifact holding any step classified `risk="irreversible"`
+   (§6.4, ruling E15), and -- ruling E15's other clause -- when no artifact can be
+   resolved at all, because "nothing to check against" is not proof of anything. The flag
+   defaults `True` and may be *cleared* only where §6.4 gives no rule against it AND an
+   artifact was actually available to check.
+3. `write_registry_entry` refuses `status="approved"` if the resolved artifact fails
+   load-time validation (any `error`-level finding from `validate()`) -- ruling E19. This
+   is deliberately **not** required for `status="draft"`: a fresh discovery run's file, or
+   an artifact still being iterated on, must be registrable as `draft` whether or not it
+   would pass `validate()` yet. Only promotion to `approved` demands that.
+4. All three of the above need an artifact to inspect, and treat "resolving" and
+   "validating" as two different steps (ruling E19) -- resolving an on-disk file for the
+   identity/E15/expect checks never runs `validate()`'s full gate (see `_parse_artifact`),
+   so a `draft` registration never depends on that gate passing; only the `approved` check
+   above explicitly re-invokes it. `write_registry_entry` no longer trusts an `artifact`
+   argument blindly either: passing one that does not itself claim this `(id, version)` is
+   refused rather than silently trusted. See `write_registry_entry`'s own docstring for the
+   exact resolution order (ruling E18) and why: an artifact argument naming a different
+   `(id, version)` than the call, an `approved` entry for an `(id, version)` this store
+   holds no file for at all, and a `requires_human_approval=False` entry with nothing to
+   check it against, were all silent holes in the original gate, closed here.
 
 **Criterion 1 is now enforced at `save`, not only pinned by a fixture-shaped test.**
 Ruling E16: a hostname, an IP address, a URL scheme, a CSS selector, an XPath, or a
@@ -322,6 +334,28 @@ def save(artifact: Artifact, root: Path) -> Path:
     return path
 
 
+def _parse_artifact(path: Path) -> Artifact:
+    """Reads and parses one artifact file's YAML into an `Artifact` -- structural parsing
+    only, no `validate()` call.
+
+    Factored out of `load` (ruling E19) so `write_registry_entry` can resolve an on-disk
+    file for its identity/expect/irreversible-step checks without going through `load`'s
+    load-time-validation gate: a `draft` registration must never depend on the artifact
+    passing `validate()` -- only a promotion to `approved` does, and that gate calls
+    `validate()` explicitly for itself (see `write_registry_entry`).
+    """
+    data = yaml.safe_load(path.read_text())
+    return Artifact.model_validate(data)
+
+
+def _load_time_errors(artifact: Artifact) -> list[Finding]:
+    """`validate()`'s `error`-level findings only -- the same rule `load` raises over,
+    reused (not re-implemented) by `write_registry_entry`'s approval gate (ruling E19) so
+    "what counts as invalid" has exactly one definition.
+    """
+    return [f for f in validate(artifact) if f.level == "error"]
+
+
 def load(id: str, version: int, root: Path) -> tuple[Artifact, list[Finding]]:
     """Reads back `artifacts/<id>/v<version>.yaml` under `root`, validating on the way out.
 
@@ -340,8 +374,7 @@ def load(id: str, version: int, root: Path) -> tuple[Artifact, list[Finding]]:
     path = _artifact_path(root, id, version)
     if not path.exists():
         raise FileNotFoundError(f"no artifact at {path}")
-    data = yaml.safe_load(path.read_text())
-    artifact = Artifact.model_validate(data)
+    artifact = _parse_artifact(path)
 
     findings = validate(artifact)
     _log_findings(findings, artifact_id=id, version=version)
@@ -419,22 +452,33 @@ def write_registry_entry(
     1. If `artifact` is given, its `.id`/`.version` MUST equal the `id`/`version`
        arguments, or this raises `ValueError` -- closes I1's identity hole (an artifact
        for a different capability being used to clear this one's gates).
-    2. Otherwise, if `artifacts/<id>/v<version>.yaml` exists, it is loaded from the store
-       (via `load`, which logs its own findings; they are discarded here because `load`
-       already surfaced them, and an artifact that fails load-time validation cannot be
-       approved either way).
+    2. Otherwise, if `artifacts/<id>/v<version>.yaml` exists, it is **parsed**
+       (`_parse_artifact`, structural only -- deliberately not `load`, ruling E19): a
+       `draft` registration must not depend on the file passing `validate()`.
     3. Otherwise, nothing is resolved -- there is no artifact anywhere to check.
 
-    With something resolved: `status="approved"` is refused if the artifact holds any
-    unverified `Expect` (acceptance criterion 6, §8.3 step 5), and
-    `requires_human_approval=False` is refused if the artifact holds any
-    `risk="irreversible"` step (§6.4, ruling E15) -- both regardless of which of the two
-    resolution paths produced the artifact.
+    With something resolved, regardless of which of the two resolution paths produced it:
 
-    With nothing resolved: `status="approved"` is refused outright -- the store cannot
-    approve a capability it does not hold any record of (closes I1's "ghost id" hole).
-    `status="draft"` still writes; a fresh discovery run must be registrable before it has
-    been compiled to disk or handed back to this call.
+    - `status="approved"` is refused if the artifact holds any unverified `Expect`
+      (acceptance criterion 6, §8.3 step 5), or if it fails load-time validation --
+      any `error`-level finding from `validate()` (ruling E19; `_load_time_errors` reuses
+      `validate()` itself rather than re-deriving what counts as an error). Neither check
+      runs for `status="draft"`: an artifact still being iterated on, or one nobody has
+      finished classifying yet, must still be registrable as a draft.
+    - `requires_human_approval=False` is refused if the artifact holds any
+      `risk="irreversible"` step (§6.4, ruling E15).
+
+    With nothing resolved:
+
+    - `status="approved"` is refused outright -- the store cannot approve a capability it
+      does not hold any record of (closes I1's "ghost id" hole).
+    - `requires_human_approval=False` is also refused (ruling E15's fallback clause): with
+      no artifact to check, the store cannot prove no step is irreversible, and silently
+      keeping the entry at `True` instead of raising would hide the caller's explicit
+      disagreement with the store rather than surface it.
+    - `status="draft"` with the field left at its default still writes; a fresh discovery
+      run must be registrable before it has been compiled to disk or handed back to this
+      call.
     """
     resolved: Artifact | None
     if artifact is not None:
@@ -447,17 +491,25 @@ def write_registry_entry(
             )
         resolved = artifact
     elif _artifact_path(root, id, version).exists():
-        resolved, _ = load(id, version, root)
+        resolved = _parse_artifact(_artifact_path(root, id, version))
     else:
         resolved = None
 
     if resolved is not None:
-        if entry.status == "approved" and _has_unverified_expect(resolved):
-            raise ValueError(
-                f"{id} v{version} cannot be marked approved: it holds at least one "
-                f"unverified expect (§8.3 step 5 -- the compiler cannot invent knowledge of "
-                f"a state it never observed)"
-            )
+        if entry.status == "approved":
+            if _has_unverified_expect(resolved):
+                raise ValueError(
+                    f"{id} v{version} cannot be marked approved: it holds at least one "
+                    f"unverified expect (§8.3 step 5 -- the compiler cannot invent "
+                    f"knowledge of a state it never observed)"
+                )
+            errors = _load_time_errors(resolved)
+            if errors:
+                summary = "; ".join(f"{f.code}: {f.message}" for f in errors)
+                raise ValueError(
+                    f"{id} v{version} cannot be marked approved: it fails load-time "
+                    f"validation with {len(errors)} error(s): {summary}"
+                )
         if entry.requires_human_approval is False and _has_irreversible_step(resolved):
             raise ValueError(
                 f"{id} v{version} cannot clear requires_human_approval: it holds at "
@@ -465,12 +517,20 @@ def write_registry_entry(
                 f"capability may not run unattended, so this flag cannot be turned off "
                 f"for it"
             )
-    elif entry.status == "approved":
-        raise ValueError(
-            f"{id} v{version} cannot be marked approved: no artifact is on disk for this "
-            f"(id, version) and none was supplied to check against -- the store cannot "
-            f"approve a capability it does not hold"
-        )
+    else:
+        if entry.status == "approved":
+            raise ValueError(
+                f"{id} v{version} cannot be marked approved: no artifact is on disk for "
+                f"this (id, version) and none was supplied to check against -- the store "
+                f"cannot approve a capability it does not hold"
+            )
+        if entry.requires_human_approval is False:
+            raise ValueError(
+                f"{id} v{version} cannot clear requires_human_approval: no artifact is on "
+                f"disk for this (id, version) and none was supplied to check against -- "
+                f"the store cannot prove no step is irreversible, so the flag stays "
+                f"un-clearable until it can be checked (§6.4, ruling E15)"
+            )
 
     path = _registry_path(root)
     raw: dict[str, dict[str, Any]] = json.loads(path.read_text()) if path.exists() else {}
