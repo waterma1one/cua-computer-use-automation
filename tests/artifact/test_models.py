@@ -205,3 +205,49 @@ def test_an_overlay_with_no_inputs_or_outputs_declared_reads_back_as_none() -> N
     overlay = Overlay(targets="tenant_acme", base_id="corebank.probe", base_version=1)
     assert overlay.inputs is None
     assert overlay.outputs is None
+
+
+# --- E21: `inputs`/`outputs` keys are identifiers, constrained at the model -----------------
+
+
+def test_an_input_key_that_is_not_an_identifier_is_refused_at_construction() -> None:
+    # C2: a hostname, URL, path or selector cannot be `^[a-z][a-z0-9_]*$`, so the key surface
+    # closes at parse time. The rejection is the model's (`ValidationError`), which is what
+    # makes the store's "a key is an identifier the schema itself constrains" claim true.
+    with pytest.raises(ValidationError):
+        Artifact(**_minimal_artifact_kwargs(
+            inputs={"http://acme.corebank.internal/evil": InputSpec(type="string")},
+        ))
+
+
+def test_an_output_key_that_is_not_an_identifier_is_refused_at_construction() -> None:
+    with pytest.raises(ValidationError):
+        Artifact(**_minimal_artifact_kwargs(
+            outputs={"acme.corebank.internal": OutputSpec(type="string")},
+        ))
+
+
+@pytest.mark.parametrize("key", ["Member_ID", "member-id", "1member", "_member", "member id"])
+def test_a_key_that_is_not_lower_snake_case_is_refused(key: str) -> None:
+    # The exact shape, not merely "no hostname": the tool-schema export gets clean property
+    # names for free, and phase 7's compiler normalises what the model proposes (§8.3 step 4
+    # -- the model contributes names, the compiler decides).
+    with pytest.raises(ValidationError):
+        Artifact(**_minimal_artifact_kwargs(inputs={key: InputSpec(type="string")}))
+    with pytest.raises(ValidationError):
+        Artifact(**_minimal_artifact_kwargs(outputs={key: OutputSpec(type="string")}))
+
+
+@pytest.mark.parametrize("key", ["account_status", "member_id", "pin", "a", "x2"])
+def test_a_lower_snake_case_key_is_accepted(key: str) -> None:
+    a = Artifact(**_minimal_artifact_kwargs(inputs={key: InputSpec(type="string")},
+                                            outputs={key: OutputSpec(type="string")}))
+    assert key in a.inputs and key in a.outputs
+
+
+def test_an_overlay_contract_key_is_constrained_the_same_way() -> None:
+    # `Overlay.inputs`/`outputs` exist only to be rejected by the validator, but a key shape
+    # `Artifact` refuses must not be accepted there either -- one alias, no drift.
+    with pytest.raises(ValidationError):
+        Overlay(targets="tenant_acme", base_id="corebank.probe", base_version=1,
+                inputs={"Member-ID": InputSpec(type="string")})

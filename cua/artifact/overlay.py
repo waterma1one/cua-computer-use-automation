@@ -37,7 +37,7 @@ validator*, not by the parser. `Overlay` now declares both fields, defaulting to
 
 Like the rest of `cua/artifact/`, nothing here imports a browser driver, references a DOM,
 or carries a CSS selector or an XPath -- `tests/test_architecture.py` greps the package for
-`playwright`/`selenium` and nothing else.
+`Playwright`/`Selenium` and nothing else.
 """
 
 from __future__ import annotations
