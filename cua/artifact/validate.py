@@ -19,8 +19,8 @@ the only part of the finding a caller could act on.
 
 Like `cua/artifact/models.py`, nothing here imports a browser driver, references a DOM, or
 carries a CSS selector or an XPath. Only the first of those is mechanically enforced:
-`tests/test_architecture.py` greps `cua/artifact/` for an `import`/`from` of `playwright`
-or `selenium` and nothing else. The rest is convention held up by review, and saying so is
+`tests/test_architecture.py` greps `cua/artifact/` for an `import`/`from` of `Playwright`
+or `Selenium` and nothing else. The rest is convention held up by review, and saying so is
 the point -- an overstated guarantee in a docstring is the same defect phase 2 hit on its
 protected-value validator, where a reader trusted a check that did not cover what the words
 claimed.
