@@ -5,7 +5,7 @@ no cross-field validation beyond what the nine decisions in spec S4.2 and the am
 resolutions in the phase-3 task brief actually require, and (like `cua/surface/models.py`)
 nothing here imports a browser driver, references a DOM, or carries a CSS selector or an
 XPath. Only the first of those is mechanically enforced: `tests/test_architecture.py` greps
-the whole `cua/artifact/` package for an `import`/`from` of `playwright` or `selenium`, and
+the whole `cua/artifact/` package for an `import`/`from` of `Playwright` or `Selenium`, and
 nothing else. The rest is convention held up by review. The distinction is stated rather
 than glossed, because a docstring claiming more than its test delivers is how a reader
 comes to trust a check that does not cover what the words say.
