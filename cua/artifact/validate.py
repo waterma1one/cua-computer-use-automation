@@ -17,6 +17,13 @@ gate; warnings and notes are for the reviewer.
 fixed by breaking the loop, so collapsing both into "invalid reference" would throw away
 the only part of the finding a caller could act on.
 
+*Acceptance criterion 1 -- no hostname, credential, CSS selector, XPath or regular
+expression in the artifact -- is a finding family here, not a check the store owns.* Ruling
+E22: `save`, `load` and the registry's approval gate all inherit it from this one place
+(`CRITERION_1_CODES`), so a property of *the artifact* is enforced identically whichever
+door the artifact comes through. Before E22 the pattern detectors lived in `store.py` and ran
+on the write path only, so a file hand-edited on disk loaded clean.
+
 Like `cua/artifact/models.py`, nothing here imports a browser driver, references a DOM, or
 carries a CSS selector or an XPath. Only the first of those is mechanically enforced:
 `tests/test_architecture.py` greps `cua/artifact/` for an `import`/`from` of `Playwright`
@@ -29,7 +36,8 @@ claimed.
 from __future__ import annotations
 
 import re
-from typing import Literal
+from collections.abc import Iterator
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -37,6 +45,16 @@ from cua.artifact.models import Artifact, CapabilityPolicy, FromInput, FromStep,
 from cua.surface.models import ActionKind, Locator, is_protected_name
 
 FindingLevel = Literal["error", "warning", "note"]
+
+# Acceptance criterion 1's finding family (ruling E22). `save` refuses on exactly these codes
+# and on nothing else: E19 deliberately lets a draft carrying `RISK_UNCLASSIFIED` be saved and
+# registered, so "any error" is the wrong gate for the write path. `load` and the approval
+# gate refuse on every error-level finding, which includes these.
+CRITERION_1_CODES: frozenset[str] = frozenset({
+    "FORBIDDEN_CONTENT",
+    "LITERAL_FROM_PROTECTED_FIELD",
+    "LITERAL_WITHOUT_LOCATOR",
+})
 
 
 class Finding(BaseModel):
@@ -204,8 +222,11 @@ def _step_findings(artifact: Artifact) -> list[Finding]:
                 ),
             ))
 
+        # Every step, not only those with a locator (E20): a literal on a locator-less step
+        # is itself a finding, and the old guard here was what let it through unchecked.
+        findings.extend(_literal_findings(artifact, step, where))
+
         if step.locator is not None:
-            findings.extend(_literal_findings(artifact, step, where))
             chain, cyclic = _locator_chain(step.locator)
             if cyclic:
                 # E9: not one of §4.4's literal seven, kept for the same reason
@@ -271,9 +292,28 @@ def _literal_findings(artifact: Artifact, step: Step, where: str) -> list[Findin
     observation the compiler saw. That, plus both signals' documented blind spots (see
     `is_protected_name`), is precisely why the compiler holds the primary control and this
     is only the backstop.
+
+    A literal on a step with **no locator** is `LITERAL_WITHOUT_LOCATOR`, an error (ruling
+    E20, closing C1). Both signals above need a control name to look at, so with no locator
+    there is nothing to check the literal against -- and an earlier revision returned `[]`
+    here, the same value it returns for "checked, found nothing", so a credential literal on
+    a locator-less `press_key` step validated clean and was written to disk verbatim. The
+    empty list must never mean "could not check". Fail-closed costs nothing real: every
+    value-consuming replay action (`fill`, `select`, `press_key`) acts on a resolved handle,
+    so a locator-less literal is unreplayable as well as uncheckable. Cost if wrong: a
+    future page-level keystroke action needs a deliberate change here, not a silent one.
     """
-    if not isinstance(step.value, LiteralValue) or step.locator is None:
+    if not isinstance(step.value, LiteralValue):
         return []
+    if step.locator is None:
+        return [Finding(
+            level="error", code="LITERAL_WITHOUT_LOCATOR", where=where,
+            message=(
+                f"step {step.id} carries a literal value but no locator; the literal "
+                f"cannot be checked against the control it fills, and no replay action "
+                f"can consume it without one"
+            ),
+        )]
 
     chain, _ = _locator_chain(step.locator)
     for link in chain:
@@ -298,6 +338,172 @@ def _literal_findings(artifact: Artifact, step: Step, where: str) -> list[Findin
                 ),
             )]
     return []
+
+
+# --- Acceptance criterion 1: the pattern detectors (rulings E16 and E22) ------------------
+#
+# These ran in `store.py` on the write path alone until E22 moved them here, so that `save`,
+# `load` and the approval gate enforce one rule from one place. They are pattern-based and
+# their blind spots are documented on each, in the style `is_protected_name` uses, because a
+# detector whose limits are unstated is one a reader will over-trust. The credential leg is
+# not here: it is `_literal_findings` above, the same §4.4 sixth-condition check.
+
+# A scheme prefix: "http://", "https://", "ws://", "ftp://", etc. Requires "://" so a
+# locator's `role_name` strategy or an ordinary sentence ending in a colon never matches.
+_URL_SCHEME_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]{1,15}://")
+
+# An IPv4 address, with an optional ":port". Four dot-separated 1-3 digit groups is
+# structural enough that it will not fire on a version string ("2.5") or a decimal id.
+# Blind spot: IPv6 literals are not modelled.
+_IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b(?::\d{1,5})?")
+
+# A bare hostname: a label immediately followed by one of a curated set of TLD-shaped
+# suffixes. The suffix list, not a bare "label.label" pattern, is what keeps this from
+# tripping on `Artifact.id` values like "corebank.probe" -- "probe" is not a TLD. Blind
+# spot, documented rather than silently assumed away: a real host under an unlisted
+# suffix (".xyz", ".ai", a corporate TLD not in this list) is not caught. Executed:
+# `_HOSTNAME_SUFFIX_RE.search("corebank.probe")` is `None`;
+# `_HOSTNAME_SUFFIX_RE.search("acme.corebank.internal")` matches `"corebank.internal"`.
+_HOSTNAME_SUFFIX_RE = re.compile(
+    r"\b[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\."
+    r"(?:com|net|org|io|dev|app|co|biz|info|gov|edu|internal|local|corp|lan|test|example)\b",
+    re.IGNORECASE,
+)
+_LOCALHOST_RE = re.compile(r"\blocalhost\b", re.IGNORECASE)
+
+# A CSS-selector-shaped token: a "." or "#" that starts the string or follows whitespace,
+# immediately followed by an identifier character. Anchoring on "start-of-token" is what
+# keeps this from matching the "." inside "corebank.probe" or "gemini-2.5-flash-lite" --
+# those dots are preceded by a letter or digit, never by whitespace or the start of the
+# field. Blind spot: a selector embedded mid-word with no separating space ("seeclass.btn")
+# is not caught, and a combinator-only selector ("div > span") with no leading "." or "#"
+# is not caught either -- both documented rather than assumed covered. Executed:
+# `_CSS_SELECTOR_RE.search("corebank.probe")` is `None`;
+# `_CSS_SELECTOR_RE.search(".btn-primary")` matches; `_CSS_SELECTOR_RE.search("a #submit")`
+# matches.
+_CSS_SELECTOR_RE = re.compile(r"(?:^|\s)[.#][A-Za-z_][\w-]*")
+
+# An XPath-shaped token: "//" starting the string or following whitespace and immediately
+# followed by a tag/role character, an attribute predicate "[@...", or an axis "::". A
+# single leading "/" is deliberately NOT enough -- `App.entry` and `Target.path` are
+# legitimate single-slash application paths (e.g. "/teller/index.html") and must save.
+# Blind spot: a relative XPath with no leading slash at all ("button[@id='x']") is not
+# caught by the "//" leg, though it is still caught by "[@". Executed:
+# `_XPATH_RE.search("/teller/index.html")` is `None`;
+# `_XPATH_RE.search("//button[@id='x']")` matches.
+_XPATH_RE = re.compile(r"(?:^|\s)//[A-Za-z@*]|\[@[A-Za-z]|::[A-Za-z]")
+
+# Locator-string-style substrings a Playwright/Selenium-flavored locator would carry.
+# Blunt on purpose, as a backstop for exactly the syntax the two regexes above do not
+# structurally model.
+_LOCATOR_SYNTAX_SUBSTRINGS = ("css=", "xpath", "queryselector", "nth-child")
+
+
+def _iter_string_leaves(value: Any, path: str) -> Iterator[tuple[str, str]]:
+    """Every `(path, text)` string leaf reachable from `value`, a `model_dump(mode="json")`
+    tree. `path` is dotted-and-indexed (`steps[0].locator.rationale`) so a finding can point
+    at the field at fault.
+
+    Walks dict values and list items only. Dict *keys* are not yielded, and that is safe
+    only because the schema constrains them: the artifact's two string-keyed maps,
+    `inputs` and `outputs`, are typed `dict[IdentifierKey, ...]` in `models.py` (ruling E21)
+    and a key that is not `^[a-z][a-z0-9_]*$` fails to parse. A hostname, URL, path or
+    selector cannot be an identifier, so the key surface closes at parse time rather than
+    by scanning. Before E21 this docstring's claim was false -- C2 saved an artifact whose
+    input key was a URL -- which is why the constraint is at the model, not here.
+    """
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _iter_string_leaves(item, f"{path}.{key}" if path else str(key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _iter_string_leaves(item, f"{path}[{index}]")
+
+
+def _pattern_violations(text: str) -> list[str]:
+    """What, if anything, in `text` acceptance criterion 1 forbids -- one entry per kind."""
+    hits: list[str] = []
+    if _URL_SCHEME_RE.search(text):
+        hits.append(f"a URL scheme in {text!r}")
+    if _IP_RE.search(text):
+        hits.append(f"an IP address in {text!r}")
+    if _HOSTNAME_SUFFIX_RE.search(text) or _LOCALHOST_RE.search(text):
+        hits.append(f"a hostname in {text!r}")
+    if _CSS_SELECTOR_RE.search(text):
+        hits.append(f"a CSS selector in {text!r}")
+    if _XPATH_RE.search(text):
+        hits.append(f"an XPath in {text!r}")
+    lowered = text.lower()
+    for substring in _LOCATOR_SYNTAX_SUBSTRINGS:
+        if substring in lowered:
+            hits.append(f"locator syntax ({substring!r}) in {text!r}")
+    return hits
+
+
+def _forbidden_content_findings(artifact: Artifact) -> list[Finding]:
+    """Acceptance criterion 1 over every string leaf of the artifact's serialized tree.
+
+    Runs on `model_dump(mode="json")` -- the exact tree `save` writes -- so a hostname or
+    selector arriving through *any* field is covered, including one a later phase adds
+    without anyone remembering to extend a test fixture (E16's reasoning, now E22's home).
+
+    **One code, `FORBIDDEN_CONTENT`, with the kind in `message`** rather than one code per
+    kind. This module's rule is that different defects get different codes *when the fixes
+    differ*; here they do not. A hostname in `description`, a CSS selector in `rationale`
+    and an XPath in `name` are all fixed the same way -- delete the value, or replace it
+    with the path or accessible name the artifact is allowed to carry -- so per-kind codes
+    would give a caller nothing it could act on differently, while making `CRITERION_1_CODES`
+    a set that must be kept in lockstep with the detector list, which is exactly the kind of
+    drift a single code cannot suffer. The kind is still in every message, and `where`
+    names the field, so a reviewer loses nothing.
+
+    **Two declared exemptions, and only two.** `inputs.<name>.pattern` is the one regular
+    expression an artifact may carry (`InputSpec.pattern`); it is scanned like any other
+    leaf and passes because a JSON Schema validation pattern is not shaped like a host or
+    a selector. `policy.allowed_origins[*]` is skipped outright: its entire purpose is to
+    name origins for `_narrowing_findings` to compare against the deployment's own list
+    (ruling E4, spec §6.1 "a per-capability policy may narrow"), so an origin there is the
+    field working as declared, not a leak. A value in that list can only ever *narrow*
+    what a deployment already permits -- it never directs a replay anywhere; the base URL
+    comes from per-instance configuration -- which is what makes the exemption safe. It is
+    limited to that one list: the same string in `description` or a locator's `rationale`
+    is still `FORBIDDEN_CONTENT`. Moving the scan here from `save` is what surfaced the
+    tension; at the commit before E22, `save` refused every artifact carrying a narrowing
+    origin and no test noticed, because none saved one. If the repository owner would
+    rather the artifact never carry an origin at all, the change is to `CapabilityPolicy`
+    (drop `allowed_origins`), not to this exemption.
+
+    A cyclic locator graph cannot be serialized (`model_dump` raises), so on that artifact
+    the scan does not run and says so with a `note` (E4: "not checked" is never silent).
+    The cycle itself is already `LOCATOR_FALLBACK_CYCLE`, an error, so nothing gating on
+    errors can be misled by the note.
+    """
+    try:
+        data: dict[str, Any] = artifact.model_dump(mode="json")
+    except ValueError:
+        return [Finding(
+            level="note", code="FORBIDDEN_CONTENT_NOT_CHECKED", where=None,
+            message=(
+                "the artifact could not be serialized (its locator graph closes a loop), "
+                "so it was NOT scanned for forbidden content; do not read this result as "
+                "scanned and clean"
+            ),
+        )]
+    findings: list[Finding] = []
+    for path, text in _iter_string_leaves(data, ""):
+        if path.startswith("policy.allowed_origins["):
+            continue
+        for hit in _pattern_violations(text):
+            findings.append(Finding(
+                level="error", code="FORBIDDEN_CONTENT", where=path,
+                message=(
+                    f"{path} carries {hit}; an artifact never holds a hostname, an "
+                    f"address, a URL, a CSS selector or an XPath (acceptance criterion 1)"
+                ),
+            ))
+    return findings
 
 
 def _output_findings(artifact: Artifact) -> list[Finding]:
@@ -514,6 +720,7 @@ def validate(artifact: Artifact, deployment: DeploymentAllowlist | None = None) 
     only the narrowing check, and says so with a `note`-level finding.
     """
     findings = _step_findings(artifact)
+    findings.extend(_forbidden_content_findings(artifact))
     findings.extend(_output_findings(artifact))
     findings.extend(_from_step_findings(artifact))
     if deployment is None:

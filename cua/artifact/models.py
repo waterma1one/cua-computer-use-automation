@@ -22,9 +22,9 @@ why neither field exists on `Artifact` here.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from cua.surface.models import ActionKind, Locator, NameMatch, Strategy, SurfaceSegment
 
@@ -107,6 +107,16 @@ class FromStep(BaseModel):
 # the three keys matches none of the arms and is rejected rather than silently resolved
 # to whichever arm happened to match first.
 StepValue = FromInput | LiteralValue | FromStep
+
+# Ruling E21: the key of an `inputs`/`outputs` map is an identifier, `^[a-z][a-z0-9_]*$`,
+# constrained here at the model rather than scanned for forbidden content downstream. §8.3
+# step 4 makes parameter names model-authored metadata -- exactly the page-influenced text
+# §6.7 worries about -- and a hostname, URL, path or selector cannot be an identifier, so the
+# key surface closes at parse time. The tool-schema export gets clean property names for
+# free. Cost if wrong: an upper-case or hyphenated name the model proposes must be normalised
+# by phase 7's compiler, which is the direction §8.3 step 4 already implies (the model
+# contributes names; the compiler decides).
+IdentifierKey = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]*$")]
 
 Risk = Literal["safe", "risky", "irreversible"]
 Outcome = Literal["continue", "business", "retry", "fail"]
@@ -311,8 +321,8 @@ class Artifact(BaseModel):
     app: App
     settle: Settle
     max_duration_ms: int
-    inputs: dict[str, InputSpec] = Field(default_factory=dict)
-    outputs: dict[str, OutputSpec] = Field(default_factory=dict)
+    inputs: dict[IdentifierKey, InputSpec] = Field(default_factory=dict)
+    outputs: dict[IdentifierKey, OutputSpec] = Field(default_factory=dict)
     steps: list[Step]
     success: Success
     recovery: list[Recovery] = Field(default_factory=list)
@@ -380,5 +390,5 @@ class Overlay(BaseModel):
     # Present only so `validate_overlay` can reject an attempt to declare either -- see the
     # docstring above. `None` means "the overlay file did not try"; a non-`None` value is
     # always an error and is never read by `resolve_overlay`.
-    inputs: dict[str, InputSpec] | None = None
-    outputs: dict[str, OutputSpec] | None = None
+    inputs: dict[IdentifierKey, InputSpec] | None = None
+    outputs: dict[IdentifierKey, OutputSpec] | None = None

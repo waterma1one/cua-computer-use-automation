@@ -13,8 +13,9 @@ from cua.artifact.models import (
     OutputSpec,
     Step,
 )
-from cua.artifact.validate import DeploymentAllowlist, Finding, validate
-from tests.artifact.factories import base, loc
+from cua.artifact.validate import CRITERION_1_CODES, DeploymentAllowlist, Finding, validate
+from cua.surface.models import Locator
+from tests.artifact.factories import PATH, base, loc
 
 
 def codes(artifact: Artifact) -> set[str]:
@@ -365,3 +366,136 @@ def test_a_policy_path_enclosing_a_denied_subtree_is_not_reported() -> None:
     # see `_narrowing_findings` for why it is the right one.
     a = base(policy=CapabilityPolicy(allowed_paths=["/teller/"]))
     assert [f for f in validate(a, DEPLOYMENT) if f.level == "error"] == []
+
+
+# --- E20: a literal on a step with no locator is an error, never a silent skip -------------
+
+
+def test_a_literal_on_a_step_with_no_locator_is_an_error() -> None:
+    # C1, the reviewer's exact construction. `_literal_findings` used to return `[]` both for
+    # "checked, found nothing" and for "no locator to check", so a credential literal on a
+    # locator-less `press_key` step validated clean and was written to disk verbatim. Every
+    # value-consuming replay action acts on a resolved handle, so a locator-less literal is
+    # unreplayable as well as uncheckable, and fail-closed here costs nothing real.
+    a = base(steps=[Step(id="s1", action="press_key", value={"literal": "hunter2-real-password"},
+                         risk="safe"),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    assert any(f.code == "LITERAL_WITHOUT_LOCATOR" and f.level == "error" for f in validate(a))
+
+
+def test_a_press_key_with_a_locator_and_a_key_chord_literal_is_clean() -> None:
+    # The other direction E20 pins: a key chord is the legitimate shape of a `press_key`
+    # literal, and with a locator to act on it must keep validating clean.
+    for chord in ("Enter", "Control+a"):
+        a = base(steps=[Step(id="s1", action="press_key", locator=loc("Member ID"),
+                             value={"literal": chord}, risk="safe"),
+                        Step(id="s2", action="read", locator=loc("y"), extract="text",
+                             into="balance", risk="safe")])
+        assert errors(a) == [], chord
+
+
+def test_a_from_input_on_a_step_with_no_locator_is_not_a_literal_finding() -> None:
+    # E20 is scoped to `LiteralValue`: a `from_input` carries nothing that could leak into
+    # the file, so the locator-less case for it is not this check's business.
+    a = base(steps=[Step(id="s1", action="press_key", value={"from_input": "member_id"},
+                         risk="safe"),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    assert "LITERAL_WITHOUT_LOCATOR" not in codes(a)
+
+
+# --- E22: acceptance criterion 1 is a finding family in `validate()`, inherited by the store ---
+
+
+def forbidden(artifact: Artifact) -> list[Finding]:
+    return [f for f in validate(artifact) if f.code == "FORBIDDEN_CONTENT"]
+
+
+def test_a_bare_hostname_in_description_is_forbidden_content() -> None:
+    hits = forbidden(base(description="Uses acme.corebank.internal as the login host."))
+    assert hits and all(f.level == "error" for f in hits)
+    assert hits[0].where == "description"
+
+
+def test_a_css_selector_in_a_locator_rationale_is_forbidden_content() -> None:
+    a = base()
+    a.steps[0].locator = Locator(
+        role="button", name="Member ID", surface_path=PATH, rationale=".btn-primary",
+        confidence="high",
+    )
+    hits = forbidden(a)
+    assert hits
+    assert hits[0].where == "steps[0].locator.rationale"
+
+
+def test_an_xpath_in_a_locator_name_is_forbidden_content() -> None:
+    a = base()
+    a.steps[0].locator = Locator(
+        role="button", name="//button[@id='x']", surface_path=PATH, rationale="test fixture",
+        confidence="high",
+    )
+    assert any(f.where == "steps[0].locator.name" for f in forbidden(a))
+
+
+def test_an_ip_address_a_url_scheme_and_locator_syntax_are_forbidden_content() -> None:
+    for text in ("hits 10.0.0.5:8080 directly", "see https://x for details",
+                 "resolved as css=button", "the third nth-child cell", "on localhost"):
+        assert forbidden(base(description=text)), text
+
+
+def test_an_input_pattern_is_not_forbidden_content() -> None:
+    # The one deliberate regular expression an artifact may carry must keep validating.
+    a = base(inputs={"member_id": InputSpec(type="string", pattern="^[0-9]{5}$", required=True)})
+    assert forbidden(a) == []
+
+
+def test_an_application_path_and_a_dotted_id_are_not_forbidden_content() -> None:
+    # `App.entry` is a single-slash path and `Artifact.id` is dotted -- both legitimate,
+    # both in `base()`, and the control test above already proves `base()` is clean. This
+    # states the two values the detectors are shaped around by name.
+    assert base().app.entry == "/teller/index.html"
+    assert base().id == "corebank.probe"
+    assert forbidden(base()) == []
+
+
+def test_a_narrowing_origin_in_the_policy_block_is_not_forbidden_content() -> None:
+    # The second declared exemption beside `inputs[].pattern`, and the reason it exists:
+    # `policy.allowed_origins` names origins *by declaration* (E4, §6.1) for the narrowing
+    # check to compare, and can only ever narrow what a deployment permits. Before E22 moved
+    # the scan into `validate()`, `save` refused every artifact carrying one and nothing
+    # noticed, because no test saved a policy-bearing artifact.
+    a = base(policy=CapabilityPolicy(allowed_origins=["https://acme.corebank.example"]))
+    assert forbidden(a) == []
+
+
+def test_the_origin_exemption_is_limited_to_the_policy_list() -> None:
+    # The same string anywhere else is still forbidden -- the exemption is a field, not a
+    # value.
+    a = base(policy=CapabilityPolicy(allowed_origins=["https://acme.corebank.example"]),
+             description="Talks to https://acme.corebank.example directly.")
+    hits = forbidden(a)
+    assert hits and all(f.where == "description" for f in hits)
+
+
+def test_the_criterion_1_family_is_exactly_the_codes_save_gates_on() -> None:
+    # `save` refuses on this family and nothing else (E19 lets a draft with
+    # `RISK_UNCLASSIFIED` be saved), so the family is named in one place and pinned here.
+    expected = {"FORBIDDEN_CONTENT", "LITERAL_FROM_PROTECTED_FIELD", "LITERAL_WITHOUT_LOCATOR"}
+    assert set(CRITERION_1_CODES) == expected
+
+
+def test_a_cyclic_locator_says_the_content_scan_did_not_run() -> None:
+    # The content scan runs over the serialized tree, and a cyclic locator cannot be
+    # serialized at all -- so the scan is skipped and, per E4, says so rather than letting
+    # "not scanned" read as "scanned and clean". The cycle itself is already an error.
+    primary = loc("Select")
+    alternate = loc("Choose")
+    primary.fallbacks = [alternate]
+    alternate.fallbacks = [primary]
+    a = base(steps=[Step(id="s1", action="click", locator=primary, risk="safe"),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    found = validate(a)
+    assert any(f.code == "FORBIDDEN_CONTENT_NOT_CHECKED" and f.level == "note" for f in found)
+    assert any(f.code == "LOCATOR_FALLBACK_CYCLE" and f.level == "error" for f in found)
