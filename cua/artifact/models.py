@@ -120,6 +120,18 @@ IdentifierKey = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]*$")]
 
 Risk = Literal["safe", "risky", "irreversible"]
 Outcome = Literal["continue", "business", "retry", "fail"]
+
+# E4': the replay engine's failure vocabulary, declared here -- not in `cua/replay/` -- because
+# a `fail` expect's `code` (below) names one of these values at artifact-authoring time, before
+# `cua/replay/` exists as a consumer. `cua.replay.result` imports this name rather than
+# redeclaring it; `tests/test_architecture.py` pins the identity so the two cannot drift apart.
+FailureKind = Literal[
+    "INVALID_INPUT", "LOCATOR_NOT_FOUND", "AMBIGUOUS_LOCATOR", "PRECONDITION_FAILED",
+    "NO_BRANCH_MATCHED", "OUTPUT_VALIDATION_FAILED", "ALLOWLIST_VIOLATION",
+    "UNHANDLED_DIALOG", "POLICY_BLOCKED", "ESCALATION_TIMEOUT", "ESCALATION_UNAVAILABLE",
+    "SESSION_LOST", "DURATION_EXCEEDED",
+]
+
 ExpectSource = Literal["observed", "proposed", "authored"]
 
 
