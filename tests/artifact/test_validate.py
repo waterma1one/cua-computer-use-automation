@@ -6,6 +6,9 @@ carried out of Task 1's review, and E4's skipped-narrowing note.
 
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError
+
 from cua.artifact.models import (
     Artifact,
     CapabilityPolicy,
@@ -211,7 +214,6 @@ def test_with_a_deployment_supplied_the_skipped_note_is_not_emitted() -> None:
 
 def test_a_policy_that_narrows_the_deployment_allowlist_is_clean() -> None:
     a = base(policy=CapabilityPolicy(
-        allowed_origins=["https://acme.corebank.example"],
         allowed_paths=["/teller/search"],
         allowed_actions=["fill", "read"],
     ))
@@ -222,12 +224,6 @@ def test_an_undeclared_policy_never_widens_anything() -> None:
     # `None` means "not narrowed", not "narrowed to nothing" -- inheriting the deployment's
     # own set is not a widening.
     assert [f for f in validate(base(), DEPLOYMENT) if f.level == "error"] == []
-
-
-def test_a_policy_origin_outside_the_deployment_widens_and_is_an_error() -> None:
-    a = base(policy=CapabilityPolicy(allowed_origins=["https://other.example"]))
-    assert any(f.code == "POLICY_WIDENS_ALLOWLIST" and f.level == "error"
-               for f in validate(a, DEPLOYMENT))
 
 
 def test_a_policy_path_outside_the_deployment_widens_and_is_an_error() -> None:
@@ -459,23 +455,21 @@ def test_an_application_path_and_a_dotted_id_are_not_forbidden_content() -> None
     assert forbidden(base()) == []
 
 
-def test_a_narrowing_origin_in_the_policy_block_is_not_forbidden_content() -> None:
-    # The second declared exemption beside `inputs[].pattern`, and the reason it exists:
-    # `policy.allowed_origins` names origins *by declaration* (E4, §6.1) for the narrowing
-    # check to compare, and can only ever narrow what a deployment permits. Before E22 moved
-    # the scan into `validate()`, `save` refused every artifact carrying one and nothing
-    # noticed, because no test saved a policy-bearing artifact.
-    a = base(policy=CapabilityPolicy(allowed_origins=["https://acme.corebank.example"]))
-    assert forbidden(a) == []
+def test_capability_policy_refuses_allowed_origins_at_construction() -> None:
+    # E25: `allowed_origins` is gone from `CapabilityPolicy`. Narrowing on origin cannot be
+    # expressed without storing a hostname in the artifact (§6.1, §4.2 decision 4), so the
+    # field is removed rather than exempted, and `extra="forbid"` refuses it outright.
+    with pytest.raises(ValidationError):
+        CapabilityPolicy(allowed_origins=["https://x.example"])  # type: ignore[call-arg]
 
 
-def test_the_origin_exemption_is_limited_to_the_policy_list() -> None:
-    # The same string anywhere else is still forbidden -- the exemption is a field, not a
-    # value.
-    a = base(policy=CapabilityPolicy(allowed_origins=["https://acme.corebank.example"]),
-             description="Talks to https://acme.corebank.example directly.")
+def test_an_origin_shaped_string_under_policy_is_forbidden_content_like_any_other() -> None:
+    # With `allowed_origins` gone, no exemption survives on the policy side: an origin
+    # written anywhere under `policy` -- here smuggled into `allowed_paths` -- is scanned
+    # and refused exactly like a hostname anywhere else in the artifact.
+    a = base(policy=CapabilityPolicy(allowed_paths=["https://acme.corebank.example"]))
     hits = forbidden(a)
-    assert hits and all(f.where == "description" for f in hits)
+    assert hits and all(f.where == "policy.allowed_paths[0]" for f in hits)
 
 
 def test_the_criterion_1_family_is_exactly_the_codes_save_gates_on() -> None:

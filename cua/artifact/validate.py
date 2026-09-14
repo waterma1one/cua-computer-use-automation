@@ -459,21 +459,14 @@ def _forbidden_content_findings(artifact: Artifact) -> list[Finding]:
     drift a single code cannot suffer. The kind is still in every message, and `where`
     names the field, so a reviewer loses nothing.
 
-    **Two declared exemptions, and only two.** `inputs.<name>.pattern` is the one regular
+    **One declared exemption, and only one.** `inputs.<name>.pattern` is the one regular
     expression an artifact may carry (`InputSpec.pattern`); it is scanned like any other
     leaf and passes because a JSON Schema validation pattern is not shaped like a host or
-    a selector. `policy.allowed_origins[*]` is skipped outright: its entire purpose is to
-    name origins for `_narrowing_findings` to compare against the deployment's own list
-    (ruling E4, spec §6.1 "a per-capability policy may narrow"), so an origin there is the
-    field working as declared, not a leak. A value in that list can only ever *narrow*
-    what a deployment already permits -- it never directs a replay anywhere; the base URL
-    comes from per-instance configuration -- which is what makes the exemption safe. It is
-    limited to that one list: the same string in `description` or a locator's `rationale`
-    is still `FORBIDDEN_CONTENT`. Moving the scan here from `save` is what surfaced the
-    tension; at the commit before E22, `save` refused every artifact carrying a narrowing
-    origin and no test noticed, because none saved one. If the repository owner would
-    rather the artifact never carry an origin at all, the change is to `CapabilityPolicy`
-    (drop `allowed_origins`), not to this exemption.
+    a selector. There used to be a second exemption here, for `policy.allowed_origins[*]`,
+    but E25 removed `CapabilityPolicy.allowed_origins` outright: narrowing on origin needs
+    a hostname to compare against, and §6.1 and §4.2 decision 4 both rule out storing one
+    in the artifact. With the field gone, a `policy` block narrows only paths and actions,
+    and neither shape needs an exemption from this scan.
 
     A cyclic locator graph cannot be serialized (`model_dump` raises), so on that artifact
     the scan does not run and says so with a `note` (E4: "not checked" is never silent).
@@ -493,8 +486,6 @@ def _forbidden_content_findings(artifact: Artifact) -> list[Finding]:
         )]
     findings: list[Finding] = []
     for path, text in _iter_string_leaves(data, ""):
-        if path.startswith("policy.allowed_origins["):
-            continue
         for hit in _pattern_violations(text):
             findings.append(Finding(
                 level="error", code="FORBIDDEN_CONTENT", where=path,
@@ -642,15 +633,6 @@ def _narrowing_findings(
         return []
 
     findings: list[Finding] = []
-    for origin in policy.allowed_origins or []:
-        if origin not in deployment.allowed_origins:
-            findings.append(Finding(
-                level="error", code="POLICY_WIDENS_ALLOWLIST", where="policy.allowed_origins",
-                message=(
-                    f"the capability policy permits origin {origin!r}, which this "
-                    f"deployment does not; a policy may only narrow"
-                ),
-            ))
     for path in policy.allowed_paths or []:
         if _permits_path(path, deployment.denied_paths):
             findings.append(Finding(
