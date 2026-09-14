@@ -14,20 +14,24 @@ Two acceptance criteria a reviewer checks first are both pinned here:
 1. The serialized artifact contains no hostname, credential, CSS selector, XPath, or
    regular expression (with the one declared exception, `InputSpec.pattern`). Enforced
    twice: once as a fixture-shaped scan against the bytes on disk (this module, unchanged
-   from the original brief), and once as a runtime check inside `save` itself (ruling E16,
-   `cua.artifact.store._forbidden_content_violations`) that runs on whatever `save` is
-   actually given, not only on what a fixture happens to carry.
+   from the original brief), and once as the `FORBIDDEN_CONTENT` / `LITERAL_*` finding
+   family in `cua.artifact.validate` (rulings E16 and E22), which `save`, `load` and the
+   approval gate all inherit, so it runs on whatever the store is actually given -- through
+   any door -- not only on what a fixture happens to carry.
 2. `status` and `stability` appear only in `registry.json`, never in the artifact file.
 """
 
 import json
+import logging
+import os
 
 import pytest
+from pydantic import ValidationError
 
-from cua.artifact.models import Expect, LiteralValue, Matcher, OutputSpec
+from cua.artifact.models import Expect, InputSpec, LiteralValue, Matcher, OutputSpec, Step
 from cua.artifact.store import RegistryEntry, load, read_registry, save, write_registry_entry
 from cua.surface.models import Locator
-from tests.artifact.factories import PATH, base
+from tests.artifact.factories import PATH, base, loc
 
 
 def test_a_saved_artifact_round_trips(tmp_path) -> None:
@@ -83,9 +87,10 @@ def test_status_and_stability_never_reach_the_artifact_file(tmp_path) -> None:
 
 
 def test_the_registry_holds_lifecycle_state_keyed_by_id_and_version(tmp_path) -> None:
-    # Ruling E18: approving an (id, version) the store holds no file for is refused (the
-    # ghost-id hole), so both versions are saved to disk first -- registering lifecycle
-    # state for a version that does not exist is not a scenario this store supports anymore.
+    # Ruling E18: *approving* an (id, version) the store holds no file for is refused (the
+    # ghost-id hole), so both versions are saved to disk first. A `draft` entry needs no file
+    # -- `test_write_registry_entry_draft_with_no_artifact_and_no_file_still_writes` pins
+    # that -- and it is only the `approved` write below that would be refused without one.
     save(base(), tmp_path)
     save(base(version=2), tmp_path)
     write_registry_entry(tmp_path, "corebank.probe", 1, RegistryEntry(status="draft"))
@@ -534,3 +539,241 @@ def test_save_allows_an_output_named_account_status(tmp_path) -> None:
     a.steps[1].into = "account_status"
     path = save(a, tmp_path)
     assert path.exists()
+
+
+# --- Final fix wave: the seams between the validator and the store ----------------------------
+# Every construction below is the whole-phase reviewer's, executed rather than read.
+
+
+def test_save_refuses_a_credential_literal_on_a_step_with_no_locator(tmp_path) -> None:
+    # C1 / E20: the reviewer's exact construction. With no locator there was nothing for the
+    # credential check to look at, and it returned the same empty list it returns for
+    # "checked, found nothing", so this saved verbatim.
+    a = base(steps=[Step(id="s1", action="press_key", value={"literal": "hunter2-real-password"},
+                         risk="safe"),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    with pytest.raises(ValueError, match="LITERAL_WITHOUT_LOCATOR"):
+        save(a, tmp_path)
+    assert not (tmp_path / "artifacts").exists()
+
+
+def test_save_accepts_a_press_key_with_a_locator_and_a_key_chord(tmp_path) -> None:
+    a = base(steps=[Step(id="s1", action="press_key", locator=loc("Member ID"),
+                         value={"literal": "Enter"}, risk="safe"),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
+    assert save(a, tmp_path).exists()
+
+
+def test_a_hostname_shaped_input_key_never_reaches_save(tmp_path) -> None:
+    # C2 / E21: the reviewer's exact construction. It is refused at construction by the
+    # model's key constraint -- a `ValidationError`, before `save` is ever reached -- which
+    # is what makes "a key is an identifier the schema itself constrains" a true statement.
+    with pytest.raises(ValidationError):
+        base(inputs={"http://acme.corebank.internal/evil": InputSpec(type="string", required=True)})
+
+
+def _hand_edit(root, old: str, new: str) -> None:
+    path = root / "artifacts" / "corebank.probe" / "v1.yaml"
+    text = path.read_text()
+    assert old in text
+    path.write_text(text.replace(old, new))
+
+
+def test_load_refuses_a_file_hand_edited_to_carry_a_hostname(tmp_path) -> None:
+    # C3 / E22: criterion 1 is a property of the artifact, not of "an artifact that happened
+    # to be written through save()". The reviewer saved a clean artifact, edited the bytes on
+    # disk, and `load` handed it back with only the allowlist note.
+    save(base(), tmp_path)
+    _hand_edit(tmp_path, "rationale: test fixture", "rationale: see acme.corebank.internal")
+    with pytest.raises(ValueError, match="FORBIDDEN_CONTENT"):
+        load("corebank.probe", 1, tmp_path)
+
+
+def test_approval_by_id_refuses_a_file_hand_edited_to_carry_a_hostname(tmp_path) -> None:
+    # The same hand-edited file, through the approval gate's disk-resolution branch with no
+    # `artifact` argument -- the path C3 showed could then approve it.
+    save(base(), tmp_path)
+    _hand_edit(tmp_path, "rationale: test fixture", "rationale: see acme.corebank.internal")
+    with pytest.raises(ValueError, match="FORBIDDEN_CONTENT"):
+        write_registry_entry(tmp_path, "corebank.probe", 1, RegistryEntry(status="approved"))
+
+
+def test_save_still_accepts_an_artifact_with_a_non_criterion_1_error(tmp_path) -> None:
+    # E22's scope: `save` refuses on the criterion-1 family only. E19 deliberately lets a
+    # draft with `RISK_UNCLASSIFIED` be saved and registered; `load` and approval still
+    # refuse it. `test_e19_draft_registers_a_file_that_fails_load_time_validation` pins the
+    # registration half; this pins the save half by name.
+    a = base()
+    a.steps[0].risk = None
+    assert save(a, tmp_path).exists()
+
+
+def _spoof(root) -> None:
+    # C4's construction: the bytes of corebank.probe/v1.yaml copied to another key's path.
+    save(base(), root)
+    source = root / "artifacts" / "corebank.probe" / "v1.yaml"
+    target = root / "artifacts" / "spoofed.capability" / "v9.yaml"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(source.read_bytes())
+
+
+def test_load_refuses_a_file_whose_content_disagrees_with_its_path(tmp_path) -> None:
+    # C4 / E23: `load("spoofed.capability", 9)` returned an artifact whose `.id` was
+    # `corebank.probe`. Identity is checked wherever a file is resolved by key.
+    _spoof(tmp_path)
+    with pytest.raises(ValueError, match="spoofed.capability"):
+        load("spoofed.capability", 9, tmp_path)
+
+
+def test_approval_by_id_refuses_a_file_whose_content_disagrees_with_its_path(tmp_path) -> None:
+    # The disk-resolution branch of the approval gate, with no `artifact` argument: E18's
+    # identity check covered the passed-artifact path only, so this succeeded.
+    _spoof(tmp_path)
+    with pytest.raises(ValueError, match="spoofed.capability"):
+        write_registry_entry(tmp_path, "spoofed.capability", 9, RegistryEntry(status="approved"))
+    assert "spoofed.capability" not in read_registry(tmp_path)
+
+
+def test_a_draft_registration_by_id_also_refuses_a_spoofed_file(tmp_path) -> None:
+    # Same `ValueError` the passed-artifact path raises, regardless of status: a file whose
+    # content disagrees with its path is a defect in every reading, not only at approval.
+    _spoof(tmp_path)
+    with pytest.raises(ValueError, match="spoofed.capability"):
+        write_registry_entry(tmp_path, "spoofed.capability", 9, RegistryEntry(status="draft"))
+
+
+def test_load_refuses_a_file_whose_version_disagrees_with_its_path(tmp_path) -> None:
+    # The version half of the key, on its own: same id, wrong version number in the file.
+    save(base(), tmp_path)
+    _hand_edit(tmp_path, "version: 1\n", "version: 2\n")
+    with pytest.raises(ValueError, match="v1"):
+        load("corebank.probe", 1, tmp_path)
+
+
+def test_a_matching_file_still_loads_after_the_identity_check(tmp_path) -> None:
+    save(base(version=2), tmp_path)
+    artifact, _ = load("corebank.probe", 2, tmp_path)
+    assert (artifact.id, artifact.version) == ("corebank.probe", 2)
+
+
+# --- E24: M3, M4, M5 closed rather than deferred a second time --------------------------------
+
+
+def _artifact_dir(root):
+    return root / "artifacts" / "corebank.probe"
+
+
+def test_a_crash_before_the_rename_leaves_no_version_file_and_the_next_save_succeeds(
+    tmp_path, monkeypatch,
+) -> None:
+    # M4: `save` used a bare `write_text`, so a crash mid-write left a truncated `v1.yaml`
+    # the immutability check then refused to overwrite forever. The write now goes to a
+    # sibling temp file that is renamed into place, so a crash leaves nothing at the final
+    # path -- and nothing else in the directory either.
+    def boom(src, dst):
+        raise OSError("simulated crash during rename")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(OSError, match="simulated crash"):
+        save(base(), tmp_path)
+    assert not (_artifact_dir(tmp_path) / "v1.yaml").exists()
+    assert list(_artifact_dir(tmp_path).iterdir()) == []
+
+    monkeypatch.undo()
+    assert save(base(), tmp_path).name == "v1.yaml"
+
+
+def test_a_crash_while_writing_the_temp_file_leaves_no_partial_file_behind(
+    tmp_path, monkeypatch,
+) -> None:
+    # M4, the other failure point: the temp file has been created but the write into it
+    # fails. The half-written temp file must be removed, not left as litter beside the
+    # artifact a reviewer opens.
+    real_fdopen = os.fdopen
+
+    class Broken:
+        def __init__(self, fh):
+            self._fh = fh
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._fh.close()
+            return False
+
+        def write(self, text):
+            raise OSError("simulated crash during write")
+
+    monkeypatch.setattr(os, "fdopen", lambda fd, *a, **k: Broken(real_fdopen(fd, *a, **k)))
+    with pytest.raises(OSError, match="simulated crash"):
+        save(base(), tmp_path)
+    assert list(_artifact_dir(tmp_path).iterdir()) == []
+
+    monkeypatch.undo()
+    assert save(base(), tmp_path).name == "v1.yaml"
+
+
+def test_a_fresh_artifact_file_carries_no_null_valued_keys(tmp_path) -> None:
+    # M5: `exclude_none=False` littered the file with `pattern: null`, `target: null`,
+    # `scope: null`, `extract: null`, `policy: null` -- none of which §4.1's worked example
+    # writes. The file is the reviewable deliverable and should read like the spec.
+    text = save(base(), tmp_path).read_text()
+    assert ": null" not in text
+    assert "policy:" not in text
+    assert "pattern:" not in text
+
+
+def test_an_omitted_optional_parses_back_to_none(tmp_path) -> None:
+    # M5's round-trip half: leaving a `None` out of the file must read back as `None`, not
+    # as a parse failure or a different default. `test_a_saved_artifact_round_trips` proves
+    # equality; this says which fields were omitted and what they came back as.
+    save(base(), tmp_path)
+    artifact, _ = load("corebank.probe", 1, tmp_path)
+    assert artifact.policy is None
+    assert artifact.inputs["member_id"].pattern is None
+    assert artifact.steps[0].target is None
+    assert artifact.steps[0].locator is not None and artifact.steps[0].locator.scope is None
+
+
+def test_a_registry_entry_with_an_unknown_key_is_refused_rather_than_rewritten(
+    tmp_path,
+) -> None:
+    # M3: `write_registry_entry` rewrote the raw JSON with `json.dumps`, re-serialising
+    # entries `read_registry` would refuse. Now every entry passes through `RegistryEntry`
+    # on the way back out, so the registry can never be written in a shape it cannot read.
+    registry = tmp_path / "artifacts" / "registry.json"
+    registry.parent.mkdir(parents=True)
+    before = json.dumps({"other.capability": {"3": {"status": "draft", "stability": "bogus"}}})
+    registry.write_text(before)
+    with pytest.raises(ValueError):
+        write_registry_entry(tmp_path, "corebank.probe", 1, RegistryEntry(status="draft"))
+    assert registry.read_text() == before
+
+
+def test_untouched_registry_entries_survive_a_write_through_the_model(tmp_path) -> None:
+    # The direction M3's fix must not break: an existing, valid entry for another key is
+    # carried through unchanged when a different key is written.
+    write_registry_entry(tmp_path, "other.capability", 3,
+                         RegistryEntry(status="draft", replays=4, successes=2, score=0.5))
+    write_registry_entry(tmp_path, "corebank.probe", 1, RegistryEntry(status="draft"))
+    registry = read_registry(tmp_path)
+    assert registry["other.capability"]["3"] == RegistryEntry(
+        status="draft", replays=4, successes=2, score=0.5,
+    )
+    assert registry["corebank.probe"]["1"].status == "draft"
+
+
+# --- Deferred minor 8: approval by id logs what the gate saw ------------------------------------
+
+
+def test_approval_by_id_logs_the_findings_the_gate_saw(tmp_path, caplog) -> None:
+    # Approval by id stopped routing through `load` under E19, and with it lost E17's
+    # logging: a warning-level finding seen during an on-disk approval was logged nowhere.
+    # A clean `base()` still carries the ALLOWLIST_NOT_CHECKED note, so it must appear.
+    save(base(), tmp_path)
+    with caplog.at_level(logging.WARNING, logger="cua.artifact.store"):
+        write_registry_entry(tmp_path, "corebank.probe", 1, RegistryEntry(status="approved"))
+    assert any("ALLOWLIST_NOT_CHECKED" in record.getMessage() for record in caplog.records)

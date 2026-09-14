@@ -35,7 +35,7 @@ This module does not decide whether a `draft` artifact may be exported as a call
 -- ruling E12, carried from Task 4's handoff, puts that three-part gate (`validate`
 clean, `artifact.verified`, registry `status != draft`) on whoever calls
 `export_tool_schema`, not on this module or that one. What this module *does* gate is
-narrower and different, and (rulings E18, E19) now has three parts instead of one:
+narrower and different, and (rulings E18, E19, E23) now has four parts instead of one:
 
 1. `write_registry_entry` refuses to set `status="approved"` on an artifact that still
    carries an unverified `Expect` (acceptance criterion 6, §8.3 step 5) -- a promotion-time
@@ -57,18 +57,35 @@ narrower and different, and (rulings E18, E19) now has three parts instead of on
    so a `draft` registration never depends on that gate passing; only the `approved` check
    above explicitly re-invokes it. `write_registry_entry` no longer trusts an `artifact`
    argument blindly either: passing one that does not itself claim this `(id, version)` is
-   refused rather than silently trusted. See `write_registry_entry`'s own docstring for the
-   exact resolution order (ruling E18) and why: an artifact argument naming a different
-   `(id, version)` than the call, an `approved` entry for an `(id, version)` this store
-   holds no file for at all, and a `requires_human_approval=False` entry with nothing to
-   check it against, were all silent holes in the original gate, closed here.
+   refused rather than silently trusted -- and (ruling E23) neither is a *file* trusted
+   blindly: `_parse_artifact` compares the parsed `.id`/`.version` to the key it was
+   resolved by and raises the same `ValueError`, on `load` and on the disk-resolution
+   branch alike. A byte-copy of `corebank.probe/v1.yaml` at `spoofed.capability/v9.yaml`
+   loaded and approved under the spoofed key before that (C4). See
+   `write_registry_entry`'s own docstring for the exact resolution order (ruling E18) and
+   why: an artifact argument naming a different `(id, version)` than the call, an
+   `approved` entry for an `(id, version)` this store holds no file for at all, and a
+   `requires_human_approval=False` entry with nothing to check it against, were all silent
+   holes in the original gate, closed here.
 
-**Criterion 1 is now enforced at `save`, not only pinned by a fixture-shaped test.**
-Ruling E16: a hostname, an IP address, a URL scheme, a CSS selector, an XPath, or a
-credential literal written into a protected control must never reach the artifact file,
-whichever field it arrives through -- including one a later phase adds without anyone
-remembering to extend a test fixture. See `_forbidden_content_violations`'s docstring for
-the detector's shape and its documented blind spots.
+**Criterion 1 is enforced by `validate()`, and this module inherits it (ruling E22).** A
+hostname, an IP address, a URL scheme, a CSS selector, an XPath, or a credential literal
+must never reach the artifact file, whichever field it arrives through. Ruling E16 first
+put that check inside `save`, which closed the write path and nothing else: a file
+hand-edited on disk loaded clean and could be approved by id (C3). The detectors now live
+in `cua.artifact.validate` as the `FORBIDDEN_CONTENT` finding family, so `load` refuses
+through its existing error-level rule, the approval gate refuses through
+`_load_time_errors`, and `save` refuses on `CRITERION_1_CODES` -- that family only, not
+every error, because E19 deliberately lets a draft carrying `RISK_UNCLASSIFIED` be saved
+and registered. One rule, one place, three doors.
+
+**Writes are atomic (ruling E24, M4).** `save` writes to a sibling temp file in the same
+directory and `os.replace`s it into place, so a crash mid-write leaves no partial
+`v<N>.yaml` for the immutability check to refuse forever; the registry is written the same
+way. **The file carries §4.1's shape (M5):** `None`-valued optionals are omitted rather
+than written as `pattern: null`, `scope: null`, and read back as `None`. **The registry is
+rewritten through `RegistryEntry` for every entry (M3)**, so it can never be written in a
+shape `read_registry` refuses.
 
 **On E11 and `app.variant`: this store keys and paths by `(id, version)` alone, never by
 variant, and that is a conscious choice, not an oversight.** `resolve_overlay` (Task 3)
@@ -92,8 +109,8 @@ from __future__ import annotations
 
 import json
 import logging
-import re
-from collections.abc import Iterator
+import os
+import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
@@ -101,7 +118,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict
 
 from cua.artifact.models import Artifact
-from cua.artifact.validate import Finding, _literal_findings, validate
+from cua.artifact.validate import CRITERION_1_CODES, Finding, validate
 
 logger = logging.getLogger(__name__)
 
@@ -167,134 +184,26 @@ def _log_findings(findings: list[Finding], *, artifact_id: str, version: int) ->
         )
 
 
-# --- Acceptance criterion 1, enforced at the one chokepoint every byte crosses (E16) ------
-#
-# The test-level scan in `tests/artifact/test_store.py` pins this against `factories.base()`
-# alone: it can only ever catch a forbidden value that some fixture happens to carry. The
-# checks below run on whatever `save` is actually about to write, so a field a later phase
-# adds is covered the day it is added, with nobody needing to remember to extend a test.
-#
-# Credentials reuse `cua.artifact.validate._literal_findings` -- the same §4.4 sixth-
-# condition rule `load` already enforces -- rather than a second, drifting copy (E6/R22:
-# one security-relevant rule, one implementation). The remaining legs (hostname, IP
-# address, URL scheme, CSS selector, XPath) have no existing implementation to reuse; they
-# are pattern-based and their blind spots are documented on `_forbidden_content_violations`
-# itself, in the style `is_protected_name` uses.
+def _write_atomically(path: Path, text: str) -> None:
+    """Writes `text` to `path` through a sibling temp file and a rename (ruling E24, M4).
 
-# A scheme prefix: "http://", "https://", "ws://", "ftp://", etc. Requires "://" so a
-# locator's `role_name` strategy or an ordinary sentence ending in a colon never matches.
-_URL_SCHEME_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]{1,15}://")
-
-# An IPv4 address, with an optional ":port". Four dot-separated 1-3 digit groups is
-# structural enough that it will not fire on a version string ("2.5") or a decimal id.
-_IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b(?::\d{1,5})?")
-
-# A bare hostname: a label immediately followed by one of a curated set of TLD-shaped
-# suffixes. The suffix list, not a bare "label.label" pattern, is what keeps this from
-# tripping on `Artifact.id` values like "corebank.probe" -- "probe" is not a TLD. Blind
-# spot, documented rather than silently assumed away: a real host under an unlisted
-# suffix (".xyz", ".ai", a corporate TLD not in this list) is not caught. Executed:
-# `_HOSTNAME_SUFFIX_RE.search("corebank.probe")` is `None`;
-# `_HOSTNAME_SUFFIX_RE.search("acme.corebank.internal")` matches `"corebank.internal"`.
-_HOSTNAME_SUFFIX_RE = re.compile(
-    r"\b[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\."
-    r"(?:com|net|org|io|dev|app|co|biz|info|gov|edu|internal|local|corp|lan|test|example)\b",
-    re.IGNORECASE,
-)
-_LOCALHOST_RE = re.compile(r"\blocalhost\b", re.IGNORECASE)
-
-# A CSS-selector-shaped token: a "." or "#" that starts the string or follows whitespace,
-# immediately followed by an identifier character. Anchoring on "start-of-token" is what
-# keeps this from matching the "." inside "corebank.probe" or "gemini-2.5-flash-lite" --
-# those dots are preceded by a letter or digit, never by whitespace or the start of the
-# field. Blind spot: a selector embedded mid-word with no separating space ("seeclass.btn")
-# is not caught, and a combinator-only selector ("div > span") with no leading "." or "#"
-# is not caught either -- both documented rather than assumed covered. Executed:
-# `_CSS_SELECTOR_RE.search("corebank.probe")` is `None`;
-# `_CSS_SELECTOR_RE.search(".btn-primary")` matches; `_CSS_SELECTOR_RE.search("a #submit")`
-# matches.
-_CSS_SELECTOR_RE = re.compile(r"(?:^|\s)[.#][A-Za-z_][\w-]*")
-
-# An XPath-shaped token: "//" starting the string or following whitespace and immediately
-# followed by a tag/role character, an attribute predicate "[@...", or an axis "::". A
-# single leading "/" is deliberately NOT enough -- `App.entry` and `Target.path` are
-# legitimate single-slash application paths (e.g. "/teller/index.html") and must save.
-# Blind spot: a relative XPath with no leading slash at all ("button[@id='x']") is not
-# caught by the "//" leg, though it is still caught by "[@". Executed:
-# `_XPATH_RE.search("/teller/index.html")` is `None`;
-# `_XPATH_RE.search("//button[@id='x']")` matches.
-_XPATH_RE = re.compile(r"(?:^|\s)//[A-Za-z@*]|\[@[A-Za-z]|::[A-Za-z]")
-
-# Locator-string-style substrings a Playwright/Selenium-flavored locator would carry.
-# Blunt on purpose, as a backstop for exactly the syntax the two regexes above do not
-# structurally model.
-_LOCATOR_SYNTAX_SUBSTRINGS = ("css=", "xpath", "queryselector", "nth-child")
-
-
-def _iter_strings(value: Any) -> Iterator[str]:
-    """Every string leaf reachable from `value` (a `model_dump(mode="json")` tree).
-
-    Walks dict values and list items only -- dict *keys* (e.g. an output's declared name)
-    are never yielded, because a key is an identifier the schema itself constrains, not
-    free text a discovery run could have injected a hostname or selector into.
+    The temp file lives in `path`'s own directory so the final `os.replace` is a same-
+    filesystem rename, which is atomic on every platform this runs on: a reader sees the
+    old file or the whole new one, never a prefix. A failure at any point -- the write, or
+    the rename -- removes the temp file, so a crash leaves nothing behind at the final path
+    and no litter beside it. Before this, `save` used a bare `write_text`, and a crash
+    mid-write left a truncated `v<N>.yaml` that the immutability check then refused to
+    overwrite forever.
     """
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for v in value.values():
-            yield from _iter_strings(v)
-    elif isinstance(value, list):
-        for v in value:
-            yield from _iter_strings(v)
-
-
-def _pattern_violations(text: str) -> list[str]:
-    hits: list[str] = []
-    if _URL_SCHEME_RE.search(text):
-        hits.append(f"a URL scheme in {text!r}")
-    if _IP_RE.search(text):
-        hits.append(f"an IP address in {text!r}")
-    if _HOSTNAME_SUFFIX_RE.search(text) or _LOCALHOST_RE.search(text):
-        hits.append(f"a hostname in {text!r}")
-    if _CSS_SELECTOR_RE.search(text):
-        hits.append(f"a CSS selector in {text!r}")
-    if _XPATH_RE.search(text):
-        hits.append(f"an XPath in {text!r}")
-    lowered = text.lower()
-    for substring in _LOCATOR_SYNTAX_SUBSTRINGS:
-        if substring in lowered:
-            hits.append(f"locator syntax ({substring!r}) in {text!r}")
-    return hits
-
-
-def _where(index: int, artifact: Artifact) -> str:
-    return f"steps[{index}] ({artifact.steps[index].id})"
-
-
-def _forbidden_content_violations(artifact: Artifact, data: dict[str, Any]) -> list[str]:
-    """Acceptance criterion 1, run on the exact tree `save` is about to write.
-
-    Two independent passes:
-
-    1. Credentials: `cua.artifact.validate._literal_findings` -- the same §4.4 sixth-
-       condition check `load` runs -- applied per step. This is intentionally the *same*
-       function, not a re-implementation, per E6/R22 and ruling E16. It is why a `Locator`
-       named "Password" filled from an *input* (M1's mock-app scenario) saves cleanly:
-       the rule fires only when a `LiteralValue` is written into a protected-named
-       control, never merely because a control happens to be named one.
-    2. Network/locator-syntax patterns: `_pattern_violations`, applied to every string leaf
-       of the serialized tree (`_iter_strings`), because a hostname or selector can arrive
-       through any field, including one a later phase adds.
-
-    Returns human-readable violation strings; an empty list means `save` proceeds.
-    """
-    violations: list[str] = []
-    for index, step in enumerate(artifact.steps):
-        for finding in _literal_findings(artifact, step, _where(index, artifact)):
-            violations.append(finding.message)
-    for text in _iter_strings(data):
-        violations.extend(_pattern_violations(text))
-    return violations
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+        os.replace(temp_name, path)
+    except BaseException:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
 
 
 def save(artifact: Artifact, root: Path) -> Path:
@@ -302,18 +211,23 @@ def save(artifact: Artifact, root: Path) -> Path:
 
     Refuses (`FileExistsError`) to overwrite an existing version file -- §4.1: the
     artifact file is immutable, and a new revision is a new version number, never an
-    in-place edit. Refuses (`ValueError`, ruling E16) to write an artifact whose serialized
-    content carries a hostname, an IP address, a URL scheme, a CSS selector, an XPath, or a
-    credential literal written into a protected control -- see
-    `_forbidden_content_violations` for the detector and its documented blind spots. Both
-    checks run before any directory is created or any byte written, so a refused save
-    leaves the store untouched.
+    in-place edit. Refuses (`ValueError`, rulings E16 and E22) to write an artifact on
+    which `validate()` reports any finding in acceptance criterion 1's family
+    (`CRITERION_1_CODES`: a hostname, IP address, URL scheme, CSS selector or XPath in any
+    string field, a credential literal written into a protected control, or a literal on a
+    step with no locator to check it against). Only that family: E19 lets a draft with
+    `RISK_UNCLASSIFIED` be saved and registered, and `load` is where every error-level
+    finding is refused. Both checks run before any directory is created or any byte
+    written, so a refused save leaves the store untouched.
 
     Written with `mode="json"` (so `datetime`, and every nested Pydantic model, becomes
-    plain YAML-representable data) and `sort_keys=False`, so the file reads in the field
-    order §4.1's shape declares -- a human reviews this file, and `schema_version` before
-    `id` before `version` is the order the spec itself writes them in, which alphabetical
-    sorting would scramble.
+    plain YAML-representable data), `exclude_none=True` (ruling E24, M5: a `None`-valued
+    optional is omitted, as §4.1's worked example omits it, rather than written as
+    `pattern: null`; an omitted optional parses back to `None`, which the round-trip test
+    pins) and `sort_keys=False`, so the file reads in the field order §4.1's shape declares
+    -- a human reviews this file, and `schema_version` before `id` before `version` is the
+    order the spec itself writes them in, which alphabetical sorting would scramble. The
+    bytes reach `path` through `_write_atomically`, so a crash never leaves a partial file.
     """
     path = _artifact_path(root, artifact.id, artifact.version)
     if path.exists():
@@ -321,49 +235,67 @@ def save(artifact: Artifact, root: Path) -> Path:
             f"{path} already exists; artifacts/<id>/v<version>.yaml is immutable -- "
             f"write a new version instead of overwriting this one"
         )
-    data: dict[str, Any] = artifact.model_dump(mode="json", exclude_none=False)
-    violations = _forbidden_content_violations(artifact, data)
+    violations = [f for f in validate(artifact) if f.code in CRITERION_1_CODES]
     if violations:
         raise ValueError(
-            f"refusing to save {artifact.id} v{artifact.version}: the serialized artifact "
-            f"would carry content acceptance criterion 1 forbids: "
-            + "; ".join(violations)
+            f"refusing to save {artifact.id} v{artifact.version}: the artifact carries "
+            f"content acceptance criterion 1 forbids: "
+            + "; ".join(f"{f.code}: {f.message}" for f in violations)
         )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(data, sort_keys=False, default_flow_style=False))
+    data: dict[str, Any] = artifact.model_dump(mode="json", exclude_none=True)
+    _write_atomically(path, yaml.safe_dump(data, sort_keys=False, default_flow_style=False))
     return path
 
 
-def _parse_artifact(path: Path) -> Artifact:
-    """Reads and parses one artifact file's YAML into an `Artifact` -- structural parsing
-    only, no `validate()` call.
+def _parse_artifact(root: Path, id: str, version: int) -> Artifact:
+    """Reads and parses `artifacts/<id>/v<version>.yaml` into an `Artifact` -- structural
+    parsing only, no `validate()` call -- and checks that the file is what its path says.
 
     Factored out of `load` (ruling E19) so `write_registry_entry` can resolve an on-disk
     file for its identity/expect/irreversible-step checks without going through `load`'s
     load-time-validation gate: a `draft` registration must never depend on the artifact
     passing `validate()` -- only a promotion to `approved` does, and that gate calls
     `validate()` explicitly for itself (see `write_registry_entry`).
+
+    Ruling E23: the parsed `.id` and `.version` must equal the key the file was resolved
+    by, or this raises the same `ValueError` the passed-artifact path of
+    `write_registry_entry` raises. Identity is checked wherever a file is resolved by key,
+    because a file whose content disagrees with its path is a defect in every reading: E18
+    compared only a *passed* artifact to the key, so a byte-copy of one version's file at
+    another key's path loaded and approved under the spoofed key (C4).
     """
-    data = yaml.safe_load(path.read_text())
-    return Artifact.model_validate(data)
+    path = _artifact_path(root, id, version)
+    artifact = Artifact.model_validate(yaml.safe_load(path.read_text()))
+    if artifact.id != id or artifact.version != version:
+        raise ValueError(
+            f"{path} declares itself {artifact.id!r} v{artifact.version}, which does not "
+            f"match the path it was resolved by ({id!r}, v{version}); a file whose "
+            f"content disagrees with its location is refused rather than trusted"
+        )
+    return artifact
 
 
-def _load_time_errors(artifact: Artifact) -> list[Finding]:
-    """`validate()`'s `error`-level findings only -- the same rule `load` raises over,
-    reused (not re-implemented) by `write_registry_entry`'s approval gate (ruling E19) so
-    "what counts as invalid" has exactly one definition.
+def _load_time_errors(findings: list[Finding]) -> list[Finding]:
+    """The `error`-level findings among `findings` -- the one definition of "what counts as
+    invalid", shared by `load` and by `write_registry_entry`'s approval gate (ruling E19).
+
+    Takes the findings rather than the artifact so each caller runs `validate()` exactly
+    once and can log the full list (`_log_findings`) before filtering it.
     """
-    return [f for f in validate(artifact) if f.level == "error"]
+    return [f for f in findings if f.level == "error"]
 
 
 def load(id: str, version: int, root: Path) -> tuple[Artifact, list[Finding]]:
     """Reads back `artifacts/<id>/v<version>.yaml` under `root`, validating on the way out.
 
-    Raises `FileNotFoundError` if the version does not exist. Runs `validate()` (with no
-    `DeploymentAllowlist` -- this store has no way to obtain one; every load therefore
-    carries Task 2's `ALLOWLIST_NOT_CHECKED` note) and raises `ValueError` if any finding
-    is `error`-level, so a caller can never receive an `Artifact` back that the validator
-    considers broken.
+    Raises `FileNotFoundError` if the version does not exist, and `ValueError` if the
+    file's own `id`/`version` disagree with the ones asked for (ruling E23, via
+    `_parse_artifact`). Runs `validate()` (with no `DeploymentAllowlist` -- this store has
+    no way to obtain one; every load therefore carries Task 2's `ALLOWLIST_NOT_CHECKED`
+    note) and raises `ValueError` if any finding is `error`-level, so a caller can never
+    receive an `Artifact` back that the validator considers broken. Acceptance criterion 1
+    is among those errors (`FORBIDDEN_CONTENT`, ruling E22), so a file hand-edited on disk
+    to carry a hostname is refused here exactly as `save` would have refused it.
 
     Always returns `(artifact, findings)` (ruling E17) -- there is no opt-in call shape
     that hands back a bare `Artifact` looking fully checked when it is not. Every finding,
@@ -374,11 +306,11 @@ def load(id: str, version: int, root: Path) -> tuple[Artifact, list[Finding]]:
     path = _artifact_path(root, id, version)
     if not path.exists():
         raise FileNotFoundError(f"no artifact at {path}")
-    artifact = _parse_artifact(path)
+    artifact = _parse_artifact(root, id, version)
 
     findings = validate(artifact)
     _log_findings(findings, artifact_id=id, version=version)
-    errors = [f for f in findings if f.level == "error"]
+    errors = _load_time_errors(findings)
     if errors:
         summary = "; ".join(f"{f.code}: {f.message}" for f in errors)
         raise ValueError(
@@ -454,17 +386,21 @@ def write_registry_entry(
        for a different capability being used to clear this one's gates).
     2. Otherwise, if `artifacts/<id>/v<version>.yaml` exists, it is **parsed**
        (`_parse_artifact`, structural only -- deliberately not `load`, ruling E19): a
-       `draft` registration must not depend on the file passing `validate()`.
+       `draft` registration must not depend on the file passing `validate()`. The file's
+       own `id`/`version` must match the key, or this raises the same `ValueError` as
+       step 1 (ruling E23) -- whatever `status` is being written.
     3. Otherwise, nothing is resolved -- there is no artifact anywhere to check.
 
     With something resolved, regardless of which of the two resolution paths produced it:
 
     - `status="approved"` is refused if the artifact holds any unverified `Expect`
       (acceptance criterion 6, §8.3 step 5), or if it fails load-time validation --
-      any `error`-level finding from `validate()` (ruling E19; `_load_time_errors` reuses
-      `validate()` itself rather than re-deriving what counts as an error). Neither check
-      runs for `status="draft"`: an artifact still being iterated on, or one nobody has
-      finished classifying yet, must still be registrable as a draft.
+      any `error`-level finding from `validate()` (ruling E19; `_load_time_errors` is the
+      same filter `load` applies, not a second definition of what counts as an error).
+      Every finding the gate saw is logged through `_log_findings` first, whichever path
+      resolved the artifact, so approval by id carries the same log trail `load` does.
+      Neither check runs for `status="draft"`: an artifact still being iterated on, or one
+      nobody has finished classifying yet, must still be registrable as a draft.
     - `requires_human_approval=False` is refused if the artifact holds any
       `risk="irreversible"` step (§6.4, ruling E15).
 
@@ -479,6 +415,11 @@ def write_registry_entry(
     - `status="draft"` with the field left at its default still writes; a fresh discovery
       run must be registrable before it has been compiled to disk or handed back to this
       call.
+
+    The registry itself is read back through `read_registry` and every entry -- the one
+    being written and every untouched one -- is re-serialised from its `RegistryEntry`
+    (ruling E24, M3), so an entry `read_registry` would refuse (an unknown key, a bad
+    status) is refused here rather than copied forward; the write is atomic (M4).
     """
     resolved: Artifact | None
     if artifact is not None:
@@ -491,7 +432,7 @@ def write_registry_entry(
             )
         resolved = artifact
     elif _artifact_path(root, id, version).exists():
-        resolved = _parse_artifact(_artifact_path(root, id, version))
+        resolved = _parse_artifact(root, id, version)
     else:
         resolved = None
 
@@ -503,7 +444,9 @@ def write_registry_entry(
                     f"unverified expect (§8.3 step 5 -- the compiler cannot invent "
                     f"knowledge of a state it never observed)"
                 )
-            errors = _load_time_errors(resolved)
+            findings = validate(resolved)
+            _log_findings(findings, artifact_id=id, version=version)
+            errors = _load_time_errors(findings)
             if errors:
                 summary = "; ".join(f"{f.code}: {f.message}" for f in errors)
                 raise ValueError(
@@ -532,8 +475,13 @@ def write_registry_entry(
                 f"un-clearable until it can be checked (§6.4, ruling E15)"
             )
 
-    path = _registry_path(root)
-    raw: dict[str, dict[str, Any]] = json.loads(path.read_text()) if path.exists() else {}
-    raw.setdefault(id, {})[str(version)] = entry.model_dump(mode="json")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(raw, indent=2, sort_keys=True))
+    registry = read_registry(root)
+    registry.setdefault(id, {})[str(version)] = entry
+    serialised = {
+        artifact_id: {
+            version_key: version_entry.model_dump(mode="json")
+            for version_key, version_entry in versions.items()
+        }
+        for artifact_id, versions in registry.items()
+    }
+    _write_atomically(_registry_path(root), json.dumps(serialised, indent=2, sort_keys=True))
