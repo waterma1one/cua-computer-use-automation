@@ -489,3 +489,122 @@ generate endpoint and a bare 404 sends the reader to the wrong question entirely
 
 **Cost accepted:** a run can be pointed at a model nobody tested. The verification step in
 phase 7 is what catches that, and the error message is what makes it a ten-second fix.
+
+## D25 — A `when` clause is a `Matcher`, not a `Locator`
+§4.1 writes `expects[].when`, `recovery[].detect` and `success.checkpoint` as
+`{ role: heading, name: "Member Search" }` — no `surface_path`, no `rationale`, no
+`confidence`, all three of which D13 makes `Locator` require. A predicate over what is on
+screen is not an instruction to act on one control and has no business carrying a resolution
+strategy's apparatus. `Matcher` holds `strategy`, `role`, `name`, `name_match` and nothing
+else, reusing the surface layer's literals so the vocabulary cannot drift.
+**Cost accepted:** two shapes for "which node" — one to act on, one to check — and a reader
+has to know which is which.
+
+## D26 — The artifact's on-disk shape is the reviewable deliverable, so the model bends to it
+Three rulings share one reason: a human reviews the YAML file, so its shape is the spec's
+§4.1 shape and the Pydantic layer adapts rather than the other way round.
+- `value` is discriminated by which key is present (`{from_input: x}`, `{literal: "..."}`,
+  `{from_step: s3}`), not by a `kind:` tag. Three single-field classes, presence
+  discriminates, and `{from_input: x, literal: y}` is rejected rather than resolved to
+  whichever arm matched first.
+- `extra="forbid"` on every artifact model. `Target(path="/x", host="evil.example.com")`
+  parsed cleanly with `host` silently discarded — the exact leak `Target` exists to prevent,
+  failing quietly. An artifact is authored, reviewed and hand-edited by people; a key that
+  vanishes without complaint is a defect the reviewer cannot see. `schema_version` is the
+  deliberate decision point for readers meeting a shape they do not understand.
+- `save` dumps with `exclude_none=True` and `sort_keys=False`, so the file carries §4.1's
+  worked example shape in §4.1's field order, with no `pattern: null` litter.
+**Cost accepted:** a future field addition makes older readers reject newer artifacts,
+which is what `schema_version` is for.
+
+## D27 — Every check that cannot run says so; nothing is inert or silent
+- §4.4's seventh condition ("policy narrows, never widens, the deployment allowlist")
+  cannot be checked against a deployment that does not exist until phase 5.
+  `validate(artifact, deployment=None)` skips it and emits a `note`-level
+  `ALLOWLIST_NOT_CHECKED`, so a caller can never read "not checked" as "checked and clean".
+  The same shape recurs when the content scan cannot serialise a cyclic locator graph: it
+  emits `FORBIDDEN_CONTENT_NOT_CHECKED` beside the cycle error rather than passing silently.
+  `load` returns `(artifact, findings)` unconditionally — an opt-in `return_findings` made
+  the default call shape hand back a bare `Artifact` that looked fully checked, and its union
+  return broke `mypy --strict` at every call site. A pair cannot be not-noticed.
+- A `locator_overrides` entry naming a step with no locator is an error-level finding.
+  It produced zero findings and left the step unchanged: an explicit instruction that does
+  nothing, with no diagnostic, is worse than a hard failure because the author believes it
+  worked. Same through-line as `DUPLICATE_STEP_ID`, `LOCATOR_FALLBACK_CYCLE` (a cyclic
+  chain had validated clean and was silently pruned at replay), and `RISK_UNCLASSIFIED` as
+  an error rather than a `safe` default.
+- A `LiteralValue` on a step with no locator is an error-level `LITERAL_WITHOUT_LOCATOR`.
+  The credential check inspects the locator's name, so "no locator to check" and "checked,
+  found nothing" had shared the same empty return, and a `press_key` step carrying a
+  password literal saved verbatim. Every value-consuming replay action acts on a resolved
+  handle, so the step was unreplayable as well as uncheckable.
+**Cost accepted:** phase 9's catalog must gate on the note, and every `load` call site
+unpacks a tuple. Both are the point.
+
+## D28 — One security-relevant rule has exactly one implementation
+`is_protected_name` moved beside `PROTECTED_NAME_TOKENS` in `cua/surface/models.py`
+because two layers — the snapshot parser inferring `protected`, and the validator's "no
+literal originates from a protected field" — each held a byte-identical compiled copy that
+nothing held equal. Criterion 1 (no hostname, IP, URL scheme, `//`-path, CSS selector,
+XPath or credential anywhere in the serialized artifact) is one error-level finding code,
+`FORBIDDEN_CONTENT`, in `validate()`, run over every string leaf of the serialized tree with
+the kind in `message` and the leaf path in `where`; `save`, `load` and the registry's
+approval gate all inherit it from that one place, and `save` gates on that family only so a
+draft carrying `RISK_UNCLASSIFIED` can still be persisted and registered. It had first been
+built as a runtime check inside `save` alone, which the whole-phase review defeated with a
+hand-edited file that `load` returned clean and the registry then approved by id. A test
+scan pinned to a fixture is a second line, never the rule: it covers a field only if the
+fixture populates it. `inputs`/`outputs` keys are constrained at the model to
+`^[a-z][a-z0-9_]*$`, so the one surface a scan of values cannot see is closed at parse time.
+Moving the scan into the validator exposed that `CapabilityPolicy.allowed_origins` — an
+axis the plan invented when it expanded §4.4's seventh condition — could never pass it: an
+origin is a hostname. The field is removed rather than exempted. §6.1 puts the allowlist in
+configuration, never the artifact, and §4.2 decision 4 says an artifact carrying an origin is
+tenant-locked by construction; a per-capability policy narrows paths and actions only, and a
+capability that must be confined to a subset of a deployment's origins says so on the
+deployment side. Criterion 1 therefore has exactly one deliberate exception, `inputs[].pattern`.
+**Cost accepted:** `validate()` carries a text scan beside its structural checks, the
+detectors have documented blind spots (IPv6 literals, two-label bare hosts, `//` mid-word)
+and documented false positives (an id under a TLD-shaped suffix, `.NET`, `Foo::Bar`), and a
+legitimate value that trips one is narrowed at the field — never met by softening the check.
+Phase 7's compiler normalises parameter names the model proposes.
+
+## D29 — The resolved overlay is the tenant variant, and the tool schema is a contract
+`resolve(base, overlay)` sets `app.variant` to `overlay.targets`: a resolved base-plus-
+overlay IS the tenant variant in §4.1's own vocabulary, and leaving it as `base` would have a
+tenant-specific artifact claim to be the base once the store keys by `(id, version)`. The
+lineage survives in the overlay's `base_id`/`base_version`. `export_tool_schema` formats and
+does not validate — the three real gates (findings, `verified`, registry `status`) belong to
+whoever serves the tool, and phase 9 owns enforcing them. It exports `sensitive` and
+`redact` as inert extension keys: the calling agent sources the sensitive value and decides
+what to do with it before our log writer is ever in the path, and a flag only our side can
+see protects only our side. Its leak test asserts on keys and structure, not a stringified
+blob — an input named `locator_hint` must not fail a guard that a `locator` key four levels
+deep must.
+**Cost accepted:** a consumer wanting the lineage reads the overlay, not the variant; a
+mechanic smuggled into a value rather than a key would pass the structural leak test, which
+is why it is paired with the top-level key set being exactly the contract's.
+
+## D30 — The registry gate resolves the artifact itself and enforces §6.4
+`write_registry_entry` resolves the artifact for `(id, version)` before it gates: a passed
+artifact must match the key; otherwise the file is parsed from disk; identity is checked on
+both paths, because a byte-copy of `v1.yaml` under another id had registered and approved
+as that id. With nothing resolved, `approved` is refused (the store cannot approve what it
+does not hold) and `draft` writes. A draft never depends on load-time validation passing —
+draft is precisely the state for an artifact not yet fit for approval, and a fresh discovery
+run's `RISK_UNCLASSIFIED` file must be registrable — while an approval always does.
+`requires_human_approval` defaults to `True` and becomes un-clearable wherever the store
+cannot prove it clearable: `False` is refused on any artifact carrying an `irreversible`
+step, and refused when no artifact can be resolved at all. A silent rewrite to `True` would
+hide the caller's disagreement; a flag that is always true carries no information, which is
+why it is enforced rather than merely defaulted. `save` writes atomically through a sibling
+temp file and `os.replace`, so a crash cannot leave a truncated file the immutability check
+then refuses to overwrite forever; the registry is written through the same atomic helper
+and re-validated through `RegistryEntry` on every write, so it can never hold a file
+`read_registry` refuses.
+Findings seen on either resolution path are logged, so approval-by-id is as observable as
+`load`.
+**Cost accepted:** an approved entry cannot be registered ahead of its file; the `artifact`
+parameter is an optimisation for callers already holding it, never a way past the gate;
+files land mode 0600 from the temp-file write, which phase 9's console — the first
+cross-process reader — must widen consciously if it runs as another user.
