@@ -72,6 +72,18 @@ class Surface(Protocol):
         """Captures a scrubbed evidence frame (screenshot plus raw snapshot YAML)."""
         ...
 
+    def pending_dialog(self) -> str | None:
+        """The bare message of a currently pending native dialog, or `None` if none is
+        pending.
+
+        Additive (E6): the replay engine's settle loop polls this ahead of `observe()` on
+        every iteration, since a pending dialog blocks the page and would otherwise never
+        show up in an accessibility-tree snapshot. Returns just the dialog's own message --
+        not a longer explanatory sentence -- so a caller can match it against a `Matcher`'s
+        `name`/`name_match` directly.
+        """
+        ...
+
     def act_on_index(self, generation: int, index: int, action: str) -> ActionResult:
         """The discovery-time entry point (spec §3.1): acts on a node named by index from a
         previously returned Observation, rather than a caller-built Locator.

@@ -89,24 +89,36 @@ def _text_of(node: Node) -> str | None:
     return node.name if node.name else node.value
 
 
-def _matches_locator(node: Node, loc: Locator) -> bool:
-    """Whether `node` satisfies `loc`'s own match criteria (role/name), ignoring scope.
+def matches(node: Node, *, strategy: Strategy, role: str | None, name: str | None,
+            name_match: NameMatch) -> bool:
+    """Whether `node` satisfies these match criteria (role/name), ignoring scope.
 
-    `role_name` locators always carry a role (the model enforces it), so the role check
-    always applies for them. `text` locators deliberately carry `role=None` (D10: the
-    target application carries no ARIA roles for the outcome/recovery text they match), so
-    the role check is skipped rather than failing on a role that was never set. `ax_path`
-    locators may or may not carry a role, so the same "skip if None" rule covers both.
+    `role_name` criteria always carry a role (the model enforces it on a `Locator`), so the
+    role check always applies for them. `text` criteria deliberately carry `role=None` (D10:
+    the target application carries no ARIA roles for the outcome/recovery text they match),
+    so the role check is skipped rather than failing on a role that was never set. `ax_path`
+    criteria may or may not carry a role, so the same "skip if None" rule covers both.
 
-    `text`-strategy locators match against `_text_of` (name, falling back to value) rather
+    `text`-strategy criteria match against `_text_of` (name, falling back to value) rather
     than `node.name` alone: a `text` locator synthesized from an unnamed node's `value`
     (phase 1's pinned unnamed-input hostile case) must be able to match that same node
     again, and `node.name` would never equal that value.
     """
-    if loc.role is not None and node.role != loc.role:
+    if role is not None and node.role != role:
         return False
-    candidate = _text_of(node) if loc.strategy == "text" else node.name
-    return _name_matches(candidate, loc.name, loc.name_match)
+    candidate = _text_of(node) if strategy == "text" else node.name
+    return _name_matches(candidate, name, name_match)
+
+
+def _matches_locator(node: Node, loc: Locator) -> bool:
+    """Whether `node` satisfies `loc`'s own match criteria (role/name), ignoring scope.
+
+    Delegates to `matches`, extracted from this function's former body so that
+    `cua.replay.settle` (which must act only through the `Surface` protocol, never a
+    `Locator`, to check a bare `Matcher`) can share the exact same predicate.
+    """
+    return matches(node, strategy=loc.strategy, role=loc.role, name=loc.name,
+                   name_match=loc.name_match)
 
 
 def _contained_in(node: Node, scope: Locator, nodes: list[Node]) -> bool:
