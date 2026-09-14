@@ -55,3 +55,9 @@ def test_the_protected_name_rule_has_exactly_one_implementation() -> None:
     assert not hasattr(snapshot, "_is_protected")
     assert snapshot.is_protected_name is models.is_protected_name
     assert validate.is_protected_name is models.is_protected_name
+
+
+def test_the_failure_kind_vocabulary_has_exactly_one_implementation() -> None:
+    from cua.artifact import models
+    from cua.replay import result
+    assert result.FailureKind is models.FailureKind

@@ -777,3 +777,12 @@ def test_approval_by_id_logs_the_findings_the_gate_saw(tmp_path, caplog) -> None
     with caplog.at_level(logging.WARNING, logger="cua.artifact.store"):
         write_registry_entry(tmp_path, "corebank.probe", 1, RegistryEntry(status="approved"))
     assert any("ALLOWLIST_NOT_CHECKED" in record.getMessage() for record in caplog.records)
+
+
+def test_a_fail_clause_with_no_code_saves_but_refuses_to_load(tmp_path) -> None:
+    a = base(steps=[Step(id="s1", action="click", locator=loc("x"), risk="safe",
+                         expects=[Expect(when=Matcher(role="heading", name="x"),
+                                        outcome="fail", source="observed")])])
+    save(a, tmp_path)  # FAIL_CODE_NOT_A_FAILURE_KIND is not in CRITERION_1_CODES
+    with pytest.raises(ValueError):
+        load(a.id, a.version, tmp_path)

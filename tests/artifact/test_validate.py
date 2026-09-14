@@ -12,7 +12,9 @@ from pydantic import ValidationError
 from cua.artifact.models import (
     Artifact,
     CapabilityPolicy,
+    Expect,
     InputSpec,
+    Matcher,
     OutputSpec,
     Step,
 )
@@ -493,3 +495,31 @@ def test_a_cyclic_locator_says_the_content_scan_did_not_run() -> None:
     found = validate(a)
     assert any(f.code == "FORBIDDEN_CONTENT_NOT_CHECKED" and f.level == "note" for f in found)
     assert any(f.code == "LOCATOR_FALLBACK_CYCLE" and f.level == "error" for f in found)
+
+
+def test_a_fail_clause_with_no_code_is_an_error() -> None:
+    a = base(steps=[Step(id="s1", action="click", locator=loc("x"), risk="safe",
+                         expects=[Expect(when=Matcher(role="heading", name="x"),
+                                        outcome="fail", source="observed")])])
+    assert "FAIL_CODE_NOT_A_FAILURE_KIND" in codes(a)
+
+
+def test_a_fail_clause_with_an_unknown_code_is_an_error() -> None:
+    a = base(steps=[Step(id="s1", action="click", locator=loc("x"), risk="safe",
+                         expects=[Expect(when=Matcher(role="heading", name="x"), outcome="fail",
+                                        code="NOT_A_REAL_KIND", source="observed")])])
+    assert "FAIL_CODE_NOT_A_FAILURE_KIND" in codes(a)
+
+
+def test_a_fail_clause_naming_a_real_failure_kind_is_accepted() -> None:
+    a = base(steps=[Step(id="s1", action="click", locator=loc("x"), risk="safe",
+                         expects=[Expect(when=Matcher(role="heading", name="x"), outcome="fail",
+                                        code="SESSION_LOST", source="observed")])])
+    assert "FAIL_CODE_NOT_A_FAILURE_KIND" not in codes(a)
+
+
+def test_a_business_clause_with_no_code_is_an_error() -> None:
+    a = base(steps=[Step(id="s1", action="click", locator=loc("x"), risk="safe",
+                         expects=[Expect(when=Matcher(role="heading", name="x"),
+                                        outcome="business", source="observed")])])
+    assert "BUSINESS_CODE_MISSING" in codes(a)

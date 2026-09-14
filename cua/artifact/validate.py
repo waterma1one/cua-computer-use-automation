@@ -37,11 +37,19 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cua.artifact.models import Artifact, CapabilityPolicy, FromInput, FromStep, LiteralValue, Step
+from cua.artifact.models import (
+    Artifact,
+    CapabilityPolicy,
+    FailureKind,
+    FromInput,
+    FromStep,
+    LiteralValue,
+    Step,
+)
 from cua.surface.models import ActionKind, Locator, is_protected_name
 
 FindingLevel = Literal["error", "warning", "note"]
@@ -195,7 +203,7 @@ def _where(index: int, step: Step) -> str:
 
 
 def _step_findings(artifact: Artifact) -> list[Finding]:
-    """Per-step checks: input wiring, `into` binding, literals, ordinals, risk."""
+    """Per-step checks: input wiring, `into` binding, literals, ordinals, risk, expect codes."""
     findings: list[Finding] = []
     for index, step in enumerate(artifact.steps):
         where = _where(index, step)
@@ -267,6 +275,29 @@ def _step_findings(artifact: Artifact) -> list[Finding]:
                     f"must not be replayable or approvable"
                 ),
             ))
+
+        # E4'/E17: a `fail` clause's `code` names the failure kind it declares, and a
+        # `business` clause's `code` names the caller-facing business outcome. Neither
+        # vocabulary is enforced at the model -- `Expect.code` is a plain `str | None` so
+        # `business` and `fail` can share the one field -- so this is where an artifact
+        # that names no failure kind, or an unknown one, is refused before replay.
+        for expect in step.expects:
+            if expect.outcome == "fail" and expect.code not in get_args(FailureKind):
+                findings.append(Finding(
+                    level="error", code="FAIL_CODE_NOT_A_FAILURE_KIND", where=where,
+                    message=(
+                        f"step {step.id} has a `fail` expect whose code "
+                        f"{expect.code!r} is not one of the declared FailureKind values"
+                    ),
+                ))
+            if expect.outcome == "business" and expect.code is None:
+                findings.append(Finding(
+                    level="error", code="BUSINESS_CODE_MISSING", where=where,
+                    message=(
+                        f"step {step.id} has a `business` expect with no code; a "
+                        f"business outcome must name the code the caller receives"
+                    ),
+                ))
     return findings
 
 
