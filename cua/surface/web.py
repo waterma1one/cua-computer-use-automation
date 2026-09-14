@@ -348,6 +348,14 @@ class WebSurface:
             snapshot_yaml=scrub_protected_values(raw),
         )
 
+    def pending_dialog(self) -> str | None:
+        # E6/E20: the bare `dialog.message`, not `_dialog_reason()`'s longer sentence -- a
+        # caller (the replay engine's settle loop) matches this against a `Matcher`'s
+        # `name`/`name_match`, and `_dialog_reason()`'s wrapping text would never match a
+        # `Recovery.detect` authored against the dialog's own wording.
+        dialog = self._pending_dialog
+        return dialog.message if dialog is not None else None
+
     # ---- resolution ---------------------------------------------------------
 
     def _frame_for(self, surface_path: list[SurfaceSegment]) -> Frame | None:

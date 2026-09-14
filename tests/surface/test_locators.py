@@ -1,4 +1,4 @@
-from cua.surface.locators import resolve_against, synthesize
+from cua.surface.locators import _matches_locator, matches, resolve_against, synthesize
 from cua.surface.models import Locator, Node, NodeState, SurfaceSegment
 
 PATH = [SurfaceSegment(kind="window", name="main"), SurfaceSegment(kind="frame", name="content")]
@@ -322,3 +322,18 @@ def test_a_self_referencing_fallback_terminates() -> None:
                   rationale="primary", confidence="high")
     loc.fallbacks = [loc]
     assert resolve_against(loc, []).kind == "not_found"
+
+
+def test_matches_ignores_role_for_a_text_strategy_check() -> None:
+    # A value-only node -- this file's own `node(i, role, name, depth, **state)` helper has
+    # no way to set `.value`, so this one test builds the Node directly.
+    n = Node(index=0, role="cell", name=None, value="No member found", state=NodeState(),
+             surface_path=PATH)
+    assert matches(n, strategy="text", role=None, name="No member found", name_match="contains")
+
+
+def test_matches_is_what_matches_locator_now_delegates_to() -> None:
+    n = node(0, "button", "Search")
+    loc = Locator(role="button", name="Search", surface_path=PATH, rationale="x", confidence="high")
+    assert matches(n, strategy=loc.strategy, role=loc.role, name=loc.name,
+                  name_match=loc.name_match) == _matches_locator(n, loc)
