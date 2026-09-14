@@ -780,9 +780,14 @@ def test_approval_by_id_logs_the_findings_the_gate_saw(tmp_path, caplog) -> None
 
 
 def test_a_fail_clause_with_no_code_saves_but_refuses_to_load(tmp_path) -> None:
+    # The second step produces the declared `balance` output so OUTPUT_NEVER_PRODUCED
+    # cannot also fire -- FAIL_CODE_NOT_A_FAILURE_KIND must be the only error-level
+    # finding, or this test would pass even with that check disabled.
     a = base(steps=[Step(id="s1", action="click", locator=loc("x"), risk="safe",
                          expects=[Expect(when=Matcher(role="heading", name="x"),
-                                        outcome="fail", source="observed")])])
+                                        outcome="fail", source="observed")]),
+                    Step(id="s2", action="read", locator=loc("y"), extract="text",
+                         into="balance", risk="safe")])
     save(a, tmp_path)  # FAIL_CODE_NOT_A_FAILURE_KIND is not in CRITERION_1_CODES
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="FAIL_CODE_NOT_A_FAILURE_KIND"):
         load(a.id, a.version, tmp_path)

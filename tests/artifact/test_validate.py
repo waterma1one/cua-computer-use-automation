@@ -523,3 +523,10 @@ def test_a_business_clause_with_no_code_is_an_error() -> None:
                          expects=[Expect(when=Matcher(role="heading", name="x"),
                                         outcome="business", source="observed")])])
     assert "BUSINESS_CODE_MISSING" in codes(a)
+
+
+def test_a_business_clause_with_an_empty_code_is_an_error() -> None:
+    a = base(steps=[Step(id="s1", action="click", locator=loc("x"), risk="safe",
+                         expects=[Expect(when=Matcher(role="heading", name="x"),
+                                        outcome="business", code="", source="observed")])])
+    assert "BUSINESS_CODE_MISSING" in codes(a)
