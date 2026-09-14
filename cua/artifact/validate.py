@@ -64,6 +64,11 @@ CRITERION_1_CODES: frozenset[str] = frozenset({
     "LITERAL_WITHOUT_LOCATOR",
 })
 
+# E4': the closed set a `fail` expect's `code` must name. Hoisted rather than computed inline
+# on every step/expect so the per-step loop below does one membership test against a constant,
+# not a fresh `get_args` call per expect.
+_FAILURE_KINDS: frozenset[str] = frozenset(get_args(FailureKind))
+
 
 class Finding(BaseModel):
     """One thing the validator has to say about an artifact.
@@ -282,7 +287,7 @@ def _step_findings(artifact: Artifact) -> list[Finding]:
         # `business` and `fail` can share the one field -- so this is where an artifact
         # that names no failure kind, or an unknown one, is refused before replay.
         for expect in step.expects:
-            if expect.outcome == "fail" and expect.code not in get_args(FailureKind):
+            if expect.outcome == "fail" and expect.code not in _FAILURE_KINDS:
                 findings.append(Finding(
                     level="error", code="FAIL_CODE_NOT_A_FAILURE_KIND", where=where,
                     message=(
@@ -290,7 +295,7 @@ def _step_findings(artifact: Artifact) -> list[Finding]:
                         f"{expect.code!r} is not one of the declared FailureKind values"
                     ),
                 ))
-            if expect.outcome == "business" and expect.code is None:
+            if expect.outcome == "business" and not expect.code:
                 findings.append(Finding(
                     level="error", code="BUSINESS_CODE_MISSING", where=where,
                     message=(
