@@ -285,14 +285,18 @@ class CapabilityPolicy(BaseModel):
     """A per-capability deployment allowlist.
 
     E4: declared here; Task 2 is what enforces it (load-time validation narrows rather
-    than widens a tenant overlay's deployment allowlist, S4.4). All three narrow an
+    than widens a tenant overlay's deployment allowlist, S4.4). Both narrow an
     otherwise-unconstrained deployment, so "not stated" means "not narrowed", not
     "narrowed to nothing" -- hence `None`, not an empty list, as each field's default.
+
+    Two narrowing axes, paths and actions, not three: origin is deliberately absent,
+    because §6.1 keeps the allowlist "configuration, never the artifact" and §4.2
+    decision 4 rejects storing a host in the artifact at all, so narrowing on origin --
+    which needs a hostname to compare against -- cannot be expressed here (E25).
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    allowed_origins: list[str] | None = None
     allowed_paths: list[str] | None = None
     allowed_actions: list[ActionKind] | None = None
 
