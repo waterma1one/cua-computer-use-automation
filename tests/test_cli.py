@@ -7,7 +7,7 @@ from cua.artifact.models import Expect, InputSpec, Matcher, Step, Target
 from cua.artifact.store import save
 from cua.cli import app
 from cua.replay.result import Success
-from tests.artifact.factories import base
+from tests.artifact.factories import base, loc
 
 runner = CliRunner()
 
@@ -115,6 +115,112 @@ def test_invalid_input_is_refused_before_a_browser_is_launched(tmp_path, monkeyp
         "--root", str(tmp_path), "--base-url", "http://127.0.0.1:1",
         "--evidence-root", str(tmp_path / "evidence_out"),
         "--input", "member_id=not-five-digits", "--mode", "embedded",
+    ])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["kind"] == "INVALID_INPUT"
+
+
+def test_a_missing_artifact_is_a_clean_cli_error(tmp_path, monkeypatch) -> None:
+    # Fix round 2, item 1: `load()` raising `FileNotFoundError` used to be an uncaught
+    # traceback with empty stdout -- caught and reported on stderr instead, exit 2, well
+    # before any browser is launched.
+    import cua.cli as cli_module
+
+    def _must_not_launch(base_url: str):
+        raise AssertionError("a browser was launched despite a missing artifact")
+
+    monkeypatch.setattr(cli_module, "launch_page", _must_not_launch)
+    result = runner.invoke(app, [
+        "replay", "corebank.probe", "1",
+        "--root", str(tmp_path), "--base-url", "http://127.0.0.1:1",
+        "--evidence-root", str(tmp_path / "evidence_out"),
+    ])
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr != ""
+
+
+def test_an_artifact_that_fails_to_load_is_a_clean_cli_error(tmp_path, monkeypatch) -> None:
+    # Fix round 2, item 1: an artifact that saves cleanly (FAIL_CODE_NOT_A_FAILURE_KIND is
+    # not in CRITERION_1_CODES) but refuses to load (it is an error-level finding) used to
+    # raise `ValueError` straight through the CLI -- same fixture shape as
+    # tests/artifact/test_store.py::test_a_fail_clause_with_no_code_saves_but_refuses_to_load.
+    import cua.cli as cli_module
+
+    artifact = base(steps=[
+        Step(id="s1", action="click", locator=loc("x"), risk="safe",
+             expects=[Expect(when=Matcher(role="heading", name="x"),
+                             outcome="fail", source="observed")]),
+        Step(id="s2", action="read", locator=loc("y"), extract="text",
+             into="balance", risk="safe"),
+    ])
+    save(artifact, tmp_path)
+
+    def _must_not_launch(base_url: str):
+        raise AssertionError("a browser was launched despite a load-time refusal")
+
+    monkeypatch.setattr(cli_module, "launch_page", _must_not_launch)
+    result = runner.invoke(app, [
+        "replay", artifact.id, str(artifact.version),
+        "--root", str(tmp_path), "--base-url", "http://127.0.0.1:1",
+        "--evidence-root", str(tmp_path / "evidence_out"),
+    ])
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "FAIL_CODE_NOT_A_FAILURE_KIND" in result.stderr
+
+
+def test_an_uncoercible_integer_input_is_invalid_input_not_a_traceback(
+    tmp_path, monkeypatch
+) -> None:
+    # Fix round 2, item 2: `int(value)` for a `type: integer` input used to be an uncaught
+    # traceback on a bad `--input`. member_id stays declared so the fixture's own steps
+    # (which draw from it via `from_input`) still pass load-time validation; `count` is the
+    # integer input this test actually exercises.
+    import cua.cli as cli_module
+
+    artifact = base(inputs={
+        "member_id": InputSpec(type="string", required=True),
+        "count": InputSpec(type="integer", required=True),
+    })
+    save(artifact, tmp_path)
+
+    def _must_not_launch(base_url: str):
+        raise AssertionError("a browser was launched despite an uncoercible input")
+
+    monkeypatch.setattr(cli_module, "launch_page", _must_not_launch)
+    result = runner.invoke(app, [
+        "replay", artifact.id, str(artifact.version),
+        "--root", str(tmp_path), "--base-url", "http://127.0.0.1:1",
+        "--evidence-root", str(tmp_path / "evidence_out"),
+        "--input", "count=abc", "--mode", "embedded",
+    ])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["kind"] == "INVALID_INPUT"
+
+
+def test_a_malformed_input_pair_without_an_equals_sign_is_invalid_input(
+    tmp_path, monkeypatch
+) -> None:
+    # Fix round 2, item 3: `pair.partition("=")` on a `--input` with no `=` used to
+    # silently produce key="member_id", value="", which passes an unpatterned input and
+    # reaches the browser -- E22's failure via a malformed flag rather than a bad value.
+    import cua.cli as cli_module
+
+    artifact = base()
+    save(artifact, tmp_path)
+
+    def _must_not_launch(base_url: str):
+        raise AssertionError("a browser was launched despite a malformed --input pair")
+
+    monkeypatch.setattr(cli_module, "launch_page", _must_not_launch)
+    result = runner.invoke(app, [
+        "replay", artifact.id, str(artifact.version),
+        "--root", str(tmp_path), "--base-url", "http://127.0.0.1:1",
+        "--evidence-root", str(tmp_path / "evidence_out"),
+        "--input", "member_id", "--mode", "embedded",
     ])
     assert result.exit_code != 0
     payload = json.loads(result.stdout)

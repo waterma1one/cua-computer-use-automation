@@ -12,7 +12,7 @@ so a test can substitute it and have the replacement actually take effect.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import NoReturn, cast
 
 import typer
 
@@ -21,7 +21,7 @@ from cua.artifact.store import load
 from cua.observability.evidence import EvidenceWriter
 from cua.replay.engine import replay as run_replay
 from cua.replay.engine import validate_inputs
-from cua.replay.result import Failure, Mode
+from cua.replay.result import Failure, Mode, mint_run_id
 from cua.surface.web import WebSurface, launch_page
 
 app = typer.Typer()
@@ -40,24 +40,58 @@ def _root() -> None:
     """
 
 
-def _parse_inputs(pairs: list[str], input_specs: dict[str, InputSpec]) -> dict[str, object]:
+def _print_failure_and_exit(failure: Failure) -> NoReturn:
+    """Prints one `Failure` as JSON and exits 1 -- the shared shape for every boundary
+    problem caught before `EvidenceWriter` is constructed or `launch_page` is called
+    (E22): a malformed `--input` pair, an input that fails to coerce to its declared
+    type, and an input that fails `validate_inputs`'s own checks all end here, so there
+    is one printed shape and one exit code for "the input was bad" rather than three.
+    """
+    typer.echo(failure.model_dump_json())
+    raise typer.Exit(code=1)
+
+
+def _parse_inputs(
+    pairs: list[str], input_specs: dict[str, InputSpec]
+) -> dict[str, object] | Failure:
     """Parses repeated `KEY=VALUE` pairs into a `dict[str, str]`, then coerces any value
     whose declared `InputSpec.type == "integer"` to `int` (E20).
 
     Every value arriving from the command line is a string; `validate_inputs` checks
     Python types directly, so an artifact declaring an integer input would otherwise be
     refused a value it should accept.
+
+    Returns an `INVALID_INPUT` `Failure` (never raises) for either kind of malformation
+    that only exists at the command-line-string layer, before `validate_inputs` ever
+    sees a Python value: a `--input` with no `KEY=VALUE` separator (or an empty key,
+    e.g. `--input =5`), and a declared `type: integer` value that does not parse as one
+    (e.g. `--input count=abc`).
     """
     raw: dict[str, str] = {}
     for pair in pairs:
-        key, _, value = pair.partition("=")
+        key, sep, value = pair.partition("=")
+        if sep == "" or key == "":
+            return Failure(
+                kind="INVALID_INPUT", step_id=None,
+                expected="every --input is KEY=VALUE",
+                observed=f"--input {pair!r} has no KEY=VALUE separator",
+                evidence_ref=f"evidence/{mint_run_id()}",
+            )
         raw[key] = value
 
     coerced: dict[str, object] = {}
     for key, value in raw.items():
         spec = input_specs.get(key)
         if spec is not None and spec.type == "integer":
-            coerced[key] = int(value)
+            try:
+                coerced[key] = int(value)
+            except ValueError:
+                return Failure(
+                    kind="INVALID_INPUT", step_id=None,
+                    expected=f"input {key!r} is an integer",
+                    observed=f"input {key!r} was {value!r}",
+                    evidence_ref=f"evidence/{mint_run_id()}",
+                )
         else:
             coerced[key] = value
     return coerced
@@ -93,14 +127,27 @@ def replay(
         raise typer.Exit(code=1)
 
     artifact: Artifact
-    artifact, _findings = load(artifact_id, version, root)
-    inputs = _parse_inputs(input_pairs, artifact.inputs)
+    try:
+        artifact, _findings = load(artifact_id, version, root)
+    except (FileNotFoundError, ValueError) as exc:
+        # A missing artifact or a load-time refusal (error-level findings,
+        # FORBIDDEN_CONTENT, an id/version mismatch) is not a business outcome and not
+        # an input problem -- `load`'s own message already names the finding codes, so
+        # it is printed as-is rather than wrapped. Exit 2, distinct from a `Failure`'s 1,
+        # to tell "the artifact could not even be loaded" apart from "it loaded and the
+        # replay failed".
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    parsed_inputs = _parse_inputs(input_pairs, artifact.inputs)
+    if isinstance(parsed_inputs, Failure):
+        _print_failure_and_exit(parsed_inputs)
+    inputs = parsed_inputs
 
     input_failure = validate_inputs(artifact, inputs)
     if input_failure is not None:
         # E22: refused before `EvidenceWriter` is constructed or `launch_page` is called.
-        typer.echo(input_failure.model_dump_json())
-        raise typer.Exit(code=1)
+        _print_failure_and_exit(input_failure)
 
     writer = EvidenceWriter(evidence_root)
     # E16: both artifacts of the run's identity are on disk before a page ever opens.
