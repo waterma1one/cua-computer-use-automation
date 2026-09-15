@@ -7,7 +7,9 @@ validated output or raises `ParseError` when a value cannot be parsed.
 
 from __future__ import annotations
 
+import re
 from datetime import date
+from decimal import Decimal
 from typing import Literal
 
 from cua.surface.models import Node
@@ -17,8 +19,6 @@ __all__ = ["ParseError", "extract"]
 
 class ParseError(ValueError):
     """Raised when a value cannot be parsed into the requested format."""
-
-    pass
 
 
 def _raw_text(
@@ -42,10 +42,11 @@ def _raw_text(
 
 
 def _parse_money(text: str) -> str:
-    """Parse a money string and return canonical form with exactly two decimals.
+    r"""Parse a money string and return canonical form with exactly two decimals.
 
     Strips $, commas, and surrounding whitespace. Rejects anything not shaped
-    like a plain decimal. Returns a string with exactly two decimal places.
+    like a plain decimal (matches -?\d+(\.\d{1,2})?). Returns a string with
+    exactly two decimal places. Negatives are allowed (overdrawn balances).
     """
     # Strip dollar sign and whitespace
     cleaned = text.strip().lstrip("$").strip()
@@ -53,13 +54,16 @@ def _parse_money(text: str) -> str:
     # Remove commas
     cleaned = cleaned.replace(",", "")
 
-    # Try to parse as a decimal and validate format
+    # Validate format: optional minus, digits, optional dot and 1-2 decimals
+    if not re.fullmatch(r"-?\d+(\.\d{1,2})?", cleaned):
+        raise ParseError(f"cannot parse '{text}' as money")
+
+    # Use Decimal for precise formatting without float rounding issues
     try:
-        # Use float to validate, but check that it's a valid decimal format
-        value = float(cleaned)
-        # Format with exactly 2 decimal places
-        return f"{value:.2f}"
-    except ValueError as err:
+        decimal_value = Decimal(cleaned)
+        # Format to exactly 2 decimal places
+        return str(decimal_value.quantize(Decimal("0.01")))
+    except Exception as err:
         raise ParseError(f"cannot parse '{text}' as money") from err
 
 

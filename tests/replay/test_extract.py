@@ -32,6 +32,44 @@ def test_a_non_numeric_money_value_raises_parse_error() -> None:
         extract(node(value="please try again"), "value", "money")
 
 
+def test_money_rejects_european_formatted_balance() -> None:
+    with pytest.raises(ParseError):
+        extract(node(value="1.234,56"), "value", "money")
+
+
+def test_money_rejects_scientific_notation() -> None:
+    with pytest.raises(ParseError):
+        extract(node(value="1e3"), "value", "money")
+
+
+def test_money_rejects_nan() -> None:
+    with pytest.raises(ParseError):
+        extract(node(value="nan"), "value", "money")
+
+
+def test_money_rejects_underscores() -> None:
+    with pytest.raises(ParseError):
+        extract(node(value="1_000.50"), "value", "money")
+
+
+def test_money_rejects_more_than_two_decimals() -> None:
+    with pytest.raises(ParseError):
+        extract(node(value="12.345"), "value", "money")
+
+
+def test_money_accepts_negative_values() -> None:
+    assert extract(node(value="-12.50"), "value", "money") == "-12.50"
+
+
+def test_money_formats_integers_with_two_decimals() -> None:
+    assert extract(node(value="1,234"), "value", "money") == "1234.00"
+
+
+def test_money_raises_parse_error_on_none_value() -> None:
+    with pytest.raises(ParseError):
+        extract(node(value=None), "value", "money")
+
+
 def test_int_parses_a_plain_integer_string() -> None:
     assert extract(node(value="42"), "value", "int") == 42
 
