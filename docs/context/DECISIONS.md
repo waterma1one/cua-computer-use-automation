@@ -608,3 +608,125 @@ Findings seen on either resolution path are logged, so approval-by-id is as obse
 parameter is an optimisation for callers already holding it, never a way past the gate;
 files land mode 0600 from the temp-file write, which phase 9's console — the first
 cross-process reader — must widen consciously if it runs as another user.
+
+## D31 — The result contract is closed, and a declared failure names its kind
+`FailureKind` is the thirteen values §5.2 lists — not the eleven the contract card counted —
+declared as contract vocabulary in `cua/artifact/models.py` beside `Outcome`, and imported by
+`cua/replay/result.py` rather than redeclared (an identity test pins the one home). A `fail`
+expect's `code` names the `FailureKind` it declares; `validate()` refuses a `fail` clause with a
+missing or unknown code (`FAIL_CODE_NOT_A_FAILURE_KIND`) and a `business` clause with no code
+(`BUSINESS_CODE_MISSING`), so `load` never hands the engine an artifact whose declared outcomes
+it cannot express. The first draft collapsed a matched `fail` clause into `NO_BRANCH_MATCHED` —
+the opposite of what that kind means — and asked a reader to disambiguate by message text; the
+project had refused that shape three times already. `Mode` is `embedded | supervised`; only
+`embedded` is implemented, and `supervised` raises rather than silently behaving like `embedded`.
+`ReplayResult = Success | BusinessOutcome | Failure`, a plain union; `BusinessOutcome` is a
+value, never an exception; `Failure.expected`/`observed` are non-empty at the model.
+**Cost accepted:** an author wanting a bespoke failure name picks the nearest of thirteen;
+phase 6 must replace the `supervised` raise with real behaviour rather than extend a stub.
+
+## D32 — The settle loop is the only place replay waits, and it waits by polling a declared timeout
+`settle(surface, step, settle_spec, recovery, *, clock)` polls under an injected `Clock`, so a
+full eight-second declared timeout runs to completion in bounded virtual time under test. Per
+poll: the pending native dialog first (§5.5 — dialogs never appear in the tree, so they are
+matched by text against `Recovery.detect`), then recovery rules over the observation, then the
+step's `expects` in declared order; the first matching clause wins even when its outcome is
+absorbed (`retry`, or a node-text `dismiss`), because a skipped absorbed clause would be a
+semantic no-op and declaring `retry` before `continue` is exactly the "spinner still up" guard
+§5.1's ordering rule provides. A matched `retry` keeps polling against the same deadline — §5.3
+rules a retry budget out. Every absorbed iteration, including the one that just dismissed a
+dialog, passes through the deadline check and the poll sleep: the first draft looped
+"immediately" after a dismiss and the reviewer measured 2.37 million dismisses in three seconds
+with virtual time at zero. Empty `expects` returns `Continue` without polling. `ok=False` from
+the surface with a dialog pending falls through to the loop; without one it is
+`PRECONDITION_FAILED`. The surface gained `pending_dialog()` (the bare message) and
+`locators.py` gained public `matches`/`name_matches`/`text_of` so the loop has one matching
+rule, not a copy.
+**Cost accepted:** one poll interval of latency after each dismissed dialog; a page-level
+keystroke with no locator is unreplayable by construction.
+
+## D33 — `replay()` returns exactly one of three shapes; nothing escapes
+Every `SurfaceError` — from `resolve`, `act`, the loop's `observe`/`pending_dialog`, or the
+failure helper's own capture — becomes `SESSION_LOST` (or a frame-less `Failure` of the
+original kind); the first draft's `SESSION_LOST` path itself raised on a dead surface. A
+`from_step` naming a step that bound nothing is `PRECONDITION_FAILED`; a `from_input` naming an
+absent input is `INVALID_INPUT` before any browser exists; a declared output unbound when the
+steps finish is `OUTPUT_VALIDATION_FAILED` (§5.4's "never a silently returned null" in its
+second form — the first draft returned `Success {}`); a `navigate` with no target is
+`PRECONDITION_FAILED`, never an empty URL. `from_step` resolves by the producing step's id — the
+artifact's vocabulary in §4.1 and §4.4's graph — not by `into` name. `success.checkpoint` is
+settled after the last step; unmatched, the replay is `NO_BRANCH_MATCHED` with `expected`
+naming the checkpoint. The engine re-checks at its gate what `load` already refuses
+(`risk=None`, bad expect codes) as `POLICY_BLOCKED`, for a caller that bypassed the store; and
+every kind the engine can produce has a producer test. The rules the engine shares with the
+validator — the failure-kind set, the expect-code check, the deny-first path check — live in
+one place each (`FAILURE_KINDS`, `expect_code_problem`, `DeploymentAllowlist.permits_path`).
+**Cost accepted:** two phase-3 files grew public names for phase 4's use; a raise out of the
+engine is the one shape phase 6's session service cannot render, so none is permitted.
+
+## D34 — Irreversible steps are gated precisely where §5.6 says
+An artifact carrying an `irreversible` step is refused (`POLICY_BLOCKED`) without both
+`confirm_irreversible=True` and an `idempotency_key`. The seen-set is keyed by
+`(artifact.id, artifact.version, key)`, and the key is burned immediately before the
+irreversible step's own `act` — nothing earlier can be a duplicate risk, so a replay that failed
+on a prior locator may be retried under the same key while one that reached the act may not.
+Tracking is in-memory and process-local: building durable retention now would duplicate phase
+9's store or invent a second one, and §6.4 already names the human approval gate as the real
+control. The allowlist check this phase ships is static — a `navigate` step's declared
+`target.path` against the deployment's deny-then-allow prefixes, before the navigation is
+attempted (proven against the mock app's mutating `/account/close` GET) — because live
+enforcement of app-initiated redirects is Playwright-side machinery that is phase 5's.
+**Cost accepted:** a restart forgets every prior invocation; a mid-session redirect to a denied
+origin is not caught until phase 5.
+
+## D35 — Failure evidence reaches disk, scrubbed, from structured events only
+`cua/observability/` writes §10's layout — `evidence/<run_id>/{run.json, artifact.yaml,
+result.json, trace.jsonl, screenshots/, snapshots/}` — and never attaches a `logging.Handler`:
+every trace line is an explicit `event(...)` with structured fields, so the verbatim
+`FORBIDDEN_CONTENT` text the store logs can never reach `/evidence/` by construction. A frame
+is captured only for a failure that arose during or after a surface interaction; pre-act gate
+failures carry an `evidence_ref` and no frame (§5.4: no session created), and a pending native
+dialog skips the screenshot with an event saying why. Snapshots are re-scrubbed on write and
+the written file is asserted clean — phase 2's half-discharged §3.7.2 property. `run.json` masks
+inputs whose `InputSpec.sensitive` is true with `[REDACTED]`, the same marker and the same
+accepted trade-off as the snapshot scrub. A sensitive input's value never enters a `Failure`:
+the two sites that compose `expected`/`observed` from an input — the engine's `validate_inputs`
+and the CLI's pair parser — write `[REDACTED]` in its place, so `result.json` and the CLI's
+stdout need no masking pass that could not know what is sensitive anyway. The whole-phase review
+reproduced the leak end to end (`"observed":"input 'member_id' was 'SECRET1'"`) in a seam no
+task's fixtures covered: none paired a sensitive input with a failing validation. `run_id` is `run-YYYYMMDDHHMMSS-xxxx`, a shape pinned
+by saving an artifact that carries it, so the criterion-1 scan can never refuse a run's own
+provenance. `artifact.yaml` is written through `store.dump_yaml`, one dump for both files.
+**Cost accepted:** a future event type embedding free text must scrub it explicitly — there is
+no blanket net; evidence files are not written atomically, unlike the artifact store.
+
+## D36 — The base URL is configuration, and the CLI validates before it launches
+The base URL is a surface construction parameter — `launch_page(base_url)` opens the one page
+with Playwright's `base_url` — never a `replay()` argument, so the engine passes `target.path`
+and holds no host (§4.2 decision 4, D19). The CLI orders: `--mode` checked against `Mode`'s two
+literals before any I/O (a bare string had let `--mode bogus` run unattended); `load` (a refusal
+is one stderr line and exit 2, never a traceback); the evidence writer constructed and `run.json`
+written — so a refused invocation still leaves a record under the `evidence_ref` it prints;
+`--input` pairs parsed and integer-typed inputs coerced, with a malformed pair or a failed
+coercion an `INVALID_INPUT` result; `validate_inputs` — the same public function the engine calls
+first — strictly before a browser launches (§5.4 forbids a session for invalid input, not a
+record of the refusal); `artifact.yaml` before the page opens; `result.json` after. `--evidence-root` defaults to `.` so the layout is `evidence/<run_id>/` at
+the repository root, RULES.md's deliverable. A no-op Typer callback makes `replay` a subcommand
+later phases attach siblings to. Phase 2's browser fixture became module-scoped: Playwright
+allows one synchronous driver per thread, and the CLI test is the one place the real second
+launch is exercised.
+**Cost accepted:** one Chromium launch per test module that uses the fixture; login for the
+mock app is the artifact's job, not the command's.
+
+## D37 — Integration tests claim only what they can pin
+Eight live tests drive the phase-1 application through every injected fault. Before any
+locator was finalised, the member, expired and statement frames and the print-statement link's
+accessible name were captured into the live-snapshot record — a fixture claim the cited capture
+does not support is phase 3's M4 mistake in a new coat, and every provisional fixture then
+matched. The slow-fault test claims end-to-end tolerance only: Playwright's `click` waits for an
+initiated navigation by documented default, so no live test on the mock app's server-side delay
+can prove the poll loop waited — that proof is the `FakeClock` suite's. The popup test pins
+`NO_BRANCH_MATCHED` against a clause that is a real substring of the statement page, so
+following the popup would flip the assertion; popups are not followed until a later phase adds
+multi-window tracking to the surface.
+**Cost accepted:** one integration path's timing is covered only by unit tests of the loop.
