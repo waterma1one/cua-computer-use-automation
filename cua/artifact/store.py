@@ -206,6 +206,26 @@ def _write_atomically(path: Path, text: str) -> None:
         raise
 
 
+def dump_yaml(artifact: Artifact) -> str:
+    """Renders `artifact` to the exact YAML text `save` writes to disk.
+
+    `mode="json"` (so `datetime`, and every nested Pydantic model, becomes plain
+    YAML-representable data), `exclude_none=True` (ruling E24, M5: a `None`-valued
+    optional is omitted, as §4.1's worked example omits it, rather than written as
+    `pattern: null`), and `sort_keys=False`, so the text reads in the field order §4.1's
+    shape declares -- a human reviews this file, and `schema_version` before `id` before
+    `version` is the order the spec itself writes them in, which alphabetical sorting
+    would scramble.
+
+    Factored out of `save` so any other writer of an artifact's YAML representation --
+    `cua.observability.EvidenceWriter.write_artifact` copies `artifacts/<id>/v<version>.yaml`
+    verbatim into a run's evidence directory -- shares this one implementation rather than
+    growing a second copy of the same dump logic that can drift from it.
+    """
+    data: dict[str, Any] = artifact.model_dump(mode="json", exclude_none=True)
+    return yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+
+
 def save(artifact: Artifact, root: Path) -> Path:
     """Writes `artifact` to `artifacts/<id>/v<version>.yaml` under `root`, immutably.
 
@@ -242,8 +262,7 @@ def save(artifact: Artifact, root: Path) -> Path:
             f"content acceptance criterion 1 forbids: "
             + "; ".join(f"{f.code}: {f.message}" for f in violations)
         )
-    data: dict[str, Any] = artifact.model_dump(mode="json", exclude_none=True)
-    _write_atomically(path, yaml.safe_dump(data, sort_keys=False, default_flow_style=False))
+    _write_atomically(path, dump_yaml(artifact))
     return path
 
 
