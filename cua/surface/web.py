@@ -14,10 +14,12 @@ system that silently clicks the wrong thing.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
-from playwright.sync_api import Dialog, Frame, Page
+from playwright.sync_api import Dialog, Frame, Page, sync_playwright
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator as PlaywrightLocator
 
@@ -44,7 +46,7 @@ from cua.surface.snapshot import parse_aria_snapshot, scrub_protected_values
 # Re-exporting it from this, the one Playwright-importing module, would invite exactly the
 # import it exists to avoid -- so it is imported here (raised by `act_on_index`) but not
 # re-exported.
-__all__ = ["ObservationBudget", "WebSurface"]
+__all__ = ["ObservationBudget", "WebSurface", "launch_page"]
 
 # Also fix: a real Observation's generation is always >= 1 (spec §3.1: `observe()`
 # increments before returning). This sentinel is what `capture()` reports before the first
@@ -589,3 +591,30 @@ def _typed_as_a_surface(page: Page) -> Surface:
     `tests/surface/test_web_surface.py`.
     """
     return WebSurface(page)
+
+
+@contextmanager
+def launch_page(base_url: str) -> Iterator[Page]:
+    """Launches Chromium, opens one page against `base_url`, and tears both down on exit.
+
+    E13: `base_url` is passed to `browser.new_page(base_url=...)` -- Playwright's own
+    per-page base for relative navigation -- rather than baked into a first `page.goto`
+    call, so a caller (`cua.cli`'s `replay` command) can drive an artifact whose recorded
+    `Target.path` is host-relative (E2) against whichever instance's base URL it was given.
+
+    This factory is the one place `cli.py` reaches into this module by name (`from
+    cua.surface.web import launch_page`) rather than through a qualified `web.launch_page
+    (...)` call, specifically so a test can `monkeypatch.setattr(cli_module, "launch_page",
+    ...)` and have the replacement actually take effect (E22) -- `cli.py` itself still
+    never names the driver package directly, because this is the only module that does.
+    """
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page(base_url=base_url)
+            try:
+                yield page
+            finally:
+                page.close()
+        finally:
+            browser.close()
