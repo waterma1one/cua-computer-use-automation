@@ -119,6 +119,9 @@ def test_invalid_input_is_refused_before_a_browser_is_launched(tmp_path, monkeyp
     assert result.exit_code != 0
     payload = json.loads(result.stdout)
     assert payload["kind"] == "INVALID_INPUT"
+    # E33 reversed E16's "writer after validate": the refusal now leaves a record under
+    # the evidence_ref it printed, while E22's "no browser" above is unchanged.
+    assert (tmp_path / "evidence_out" / payload["evidence_ref"] / "result.json").exists()
 
 
 def test_a_missing_artifact_is_a_clean_cli_error(tmp_path, monkeypatch) -> None:
@@ -225,3 +228,229 @@ def test_a_malformed_input_pair_without_an_equals_sign_is_invalid_input(
     assert result.exit_code != 0
     payload = json.loads(result.stdout)
     assert payload["kind"] == "INVALID_INPUT"
+
+
+# Final fix wave, C1 / E31: a sensitive input's value leaks nowhere -- not stdout, not any
+# file under the evidence directory.
+
+def _every_file_under(root) -> dict[str, str]:
+    return {str(p.relative_to(root)): p.read_text() for p in root.rglob("*") if p.is_file()}
+
+
+def test_a_sensitive_inputs_value_reaches_neither_stdout_nor_the_evidence_dir(
+    tmp_path, monkeypatch
+) -> None:
+    # The whole-phase reviewer's construction: a `sensitive: true` member_id failing its
+    # pattern used to print `"observed":"input 'member_id' was 'SECRET1'"` to stdout and
+    # into result.json.
+    import cua.cli as cli_module
+
+    artifact = base(inputs={"member_id": InputSpec(
+        type="string", pattern="^[0-9]{5}$", required=True, sensitive=True,
+    )})
+    save(artifact, tmp_path)
+    evidence_root = tmp_path / "evidence_out"
+
+    def _must_not_launch(base_url: str):
+        raise AssertionError("a browser was launched despite invalid input")
+
+    monkeypatch.setattr(cli_module, "launch_page", _must_not_launch)
+    result = runner.invoke(app, [
+        "replay", artifact.id, str(artifact.version),
+        "--root", str(tmp_path), "--base-url", "http://127.0.0.1:1",
+        "--evidence-root", str(evidence_root),
+        "--input", "member_id=SECRET1", "--mode", "embedded",
+    ])
+    assert result.exit_code == 1
+    assert "SECRET1" not in result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["kind"] == "INVALID_INPUT"
+
+    written = _every_file_under(evidence_root)
+    assert any(name.endswith("run.json") for name in written), sorted(written)
+    assert any(name.endswith("result.json") for name in written), sorted(written)
+    for name, text in written.items():
+        assert "SECRET1" not in text, name
+    run_json = next(text for name, text in written.items() if name.endswith("run.json"))
+    assert json.loads(run_json)["inputs"]["member_id"] == "[REDACTED]"
+
+
+def test_a_sensitive_uncoercible_integer_never_reaches_stdout(tmp_path, monkeypatch) -> None:
+    # The CLI's own construction site (`_coerce_inputs`), not only the engine's.
+    import cua.cli as cli_module
+
+    artifact = base(inputs={
+        "member_id": InputSpec(type="string", required=True),
+        "pin": InputSpec(type="integer", required=True, sensitive=True),
+    })
+    save(artifact, tmp_path)
+
+    def _must_not_launch(base_url: str):
+        raise AssertionError("a browser was launched despite an uncoercible input")
+
+    monkeypatch.setattr(cli_module, "launch_page", _must_not_launch)
+    result = runner.invoke(app, [
+        "replay", artifact.id, str(artifact.version),
+        "--root", str(tmp_path), "--base-url", "http://127.0.0.1:1",
+        "--evidence-root", str(tmp_path / "evidence_out"),
+        "--input", "member_id=12345", "--input", "pin=SECRETPIN", "--mode", "embedded",
+    ])
+    assert result.exit_code == 1
+    assert "SECRETPIN" not in result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["kind"] == "INVALID_INPUT"
+    assert "[REDACTED]" in payload["observed"]
+    for name, text in _every_file_under(tmp_path / "evidence_out").items():
+        assert "SECRETPIN" not in text, name
+
+
+# Final fix wave, I1 / E32: --mode is validated against Mode's literals before any I/O.
+
+def test_an_unknown_mode_is_refused_before_the_artifact_is_even_loaded(
+    tmp_path, monkeypatch
+) -> None:
+    # `--mode bogus` used to sail past both `== "supervised"` checks into an unattended
+    # embedded replay.
+    import cua.cli as cli_module
+
+    artifact = base()
+    save(artifact, tmp_path)
+
+    def _must_not_load(*_args: object, **_kwargs: object):
+        raise AssertionError("the artifact was loaded despite an unknown --mode")
+
+    def _must_not_launch(base_url: str):
+        raise AssertionError("a browser was launched despite an unknown --mode")
+
+    monkeypatch.setattr(cli_module, "load", _must_not_load)
+    monkeypatch.setattr(cli_module, "launch_page", _must_not_launch)
+    result = runner.invoke(app, [
+        "replay", artifact.id, str(artifact.version),
+        "--root", str(tmp_path), "--base-url", "http://127.0.0.1:1",
+        "--evidence-root", str(tmp_path / "evidence_out"),
+        "--input", "member_id=12345", "--mode", "bogus",
+    ])
+    # Same shape and same exit code as the `supervised` refusal.
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr.strip() != ""
+    assert result.stderr.count("\n") == 1
+    assert not (tmp_path / "evidence_out").exists()
+
+
+# Final fix wave, I2 / E33: a pre-browser refusal still leaves an evidence record under
+# the evidence_ref it prints.
+
+def test_a_pre_browser_refusal_leaves_run_and_result_json_under_the_printed_ref(
+    tmp_path, monkeypatch
+) -> None:
+    import cua.cli as cli_module
+
+    artifact = base(
+        inputs={"member_id": InputSpec(type="string", pattern="^[0-9]{5}$", required=True)},
+    )
+    save(artifact, tmp_path)
+    evidence_root = tmp_path / "evidence_out"
+
+    def _must_not_launch(base_url: str):
+        raise AssertionError("a browser was launched despite invalid input")
+
+    monkeypatch.setattr(cli_module, "launch_page", _must_not_launch)
+    result = runner.invoke(app, [
+        "replay", artifact.id, str(artifact.version),
+        "--root", str(tmp_path), "--base-url", "http://127.0.0.1:1",
+        "--evidence-root", str(evidence_root),
+        "--input", "member_id=not-five-digits", "--mode", "embedded",
+    ])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["kind"] == "INVALID_INPUT"
+    run_dir = evidence_root / payload["evidence_ref"]
+    assert run_dir.is_dir(), payload["evidence_ref"]
+    assert json.loads((run_dir / "run.json").read_text())["inputs"] == {
+        "member_id": "not-five-digits"
+    }
+    assert json.loads((run_dir / "result.json").read_text()) == payload
+    # E21: no browser, no frame -- and no artifact copy for a run that executed nothing.
+    assert not (run_dir / "screenshots").exists()
+    assert not (run_dir / "snapshots").exists()
+    assert not (run_dir / "artifact.yaml").exists()
+
+
+def test_the_writer_is_constructed_before_validate_inputs_and_launch_after(
+    tmp_path, monkeypatch
+) -> None:
+    # The NEW order: EvidenceWriter -> write_run -> validate_inputs -> launch_page. E22's
+    # "validate strictly before launch_page" is unchanged; E16's "writer after validate"
+    # is reversed (E33).
+    import cua.cli as cli_module
+
+    artifact = base()
+    save(artifact, tmp_path)
+    calls: list[str] = []
+
+    real_writer = cli_module.EvidenceWriter
+
+    class _RecordingWriter(real_writer):
+        def __init__(self, root) -> None:
+            calls.append("writer")
+            super().__init__(root)
+
+        def write_run(self, **kwargs) -> None:
+            calls.append("write_run")
+            super().write_run(**kwargs)
+
+    def _recording_validate(artifact, inputs):
+        calls.append("validate_inputs")
+        return None
+
+    class _FakePage:
+        def on(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    @contextmanager
+    def _fake_launch_page(base_url: str):
+        calls.append("launch_page")
+        yield _FakePage()
+
+    def _fake_replay(artifact, inputs, surface, mode, *, evidence=None, **_kwargs):
+        return Success(outputs={}, steps_run=[], evidence_ref=evidence.evidence_ref())
+
+    monkeypatch.setattr(cli_module, "EvidenceWriter", _RecordingWriter)
+    monkeypatch.setattr(cli_module, "validate_inputs", _recording_validate)
+    monkeypatch.setattr(cli_module, "launch_page", _fake_launch_page)
+    monkeypatch.setattr(cli_module, "run_replay", _fake_replay)
+    result = runner.invoke(app, [
+        "replay", artifact.id, str(artifact.version),
+        "--root", str(tmp_path), "--base-url", "http://127.0.0.1:1",
+        "--evidence-root", str(tmp_path / "evidence_out"),
+        "--input", "member_id=12345", "--mode", "embedded",
+    ])
+    assert result.exit_code == 0, result.stdout
+    assert calls == ["writer", "write_run", "validate_inputs", "launch_page"]
+
+
+def test_an_undeclared_input_is_invalid_input_not_a_traceback(tmp_path, monkeypatch) -> None:
+    # `write_run` now raises KeyError on an input with no InputSpec (E31), so the CLI must
+    # refuse an undeclared `--input` before it ever reaches the writer.
+    import cua.cli as cli_module
+
+    artifact = base()
+    save(artifact, tmp_path)
+
+    def _must_not_launch(base_url: str):
+        raise AssertionError("a browser was launched despite an undeclared input")
+
+    monkeypatch.setattr(cli_module, "launch_page", _must_not_launch)
+    result = runner.invoke(app, [
+        "replay", artifact.id, str(artifact.version),
+        "--root", str(tmp_path), "--base-url", "http://127.0.0.1:1",
+        "--evidence-root", str(tmp_path / "evidence_out"),
+        "--input", "member_id=12345", "--input", "extra=1", "--mode", "embedded",
+    ])
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["kind"] == "INVALID_INPUT"
+    assert "extra" in payload["observed"]
+    run_dir = tmp_path / "evidence_out" / payload["evidence_ref"]
+    assert (run_dir / "result.json").exists()

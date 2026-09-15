@@ -84,3 +84,17 @@ def test_a_forbidden_content_log_line_never_reaches_the_trace(tmp_path, caplog) 
     writer.event(step_id="s1", action="fill")
     trace_path = tmp_path / "run_root" / "evidence" / writer.run_id / "trace.jsonl"
     assert "leaked.example" not in trace_path.read_text()
+
+
+def test_write_run_refuses_an_input_with_no_spec_rather_than_guessing(tmp_path) -> None:
+    # Final fix wave, ledger minor 10 / E31: an input that no `InputSpec` describes cannot
+    # be known to be non-sensitive, so `write_run` raises rather than defaulting it to
+    # plain text. The caller (the CLI) refuses undeclared inputs before ever reaching here.
+    import pytest
+
+    writer = EvidenceWriter(tmp_path)
+    with pytest.raises(KeyError):
+        writer.write_run(goal="log in", capability="corebank.probe",
+                         inputs={"password": "hunter2"},
+                         input_specs={}, policy_mode="sandbox")
+    assert not (tmp_path / "evidence" / writer.run_id / "run.json").exists()
