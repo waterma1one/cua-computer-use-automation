@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 FORBIDDEN = ("playwright", "selenium")
-PURE_PACKAGES = ("artifact", "replay", "policy", "catalog")
+PURE_PACKAGES = ("artifact", "replay", "policy", "catalog", "observability")
 
 
 def test_only_surface_may_import_a_browser_driver() -> None:
