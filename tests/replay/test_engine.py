@@ -15,7 +15,7 @@ from cua.artifact.models import (
     Target,
 )
 from cua.artifact.validate import DeploymentAllowlist
-from cua.replay.engine import replay
+from cua.replay.engine import replay, validate_inputs
 from cua.replay.result import BusinessOutcome, Failure
 from cua.replay.result import Success as ReplaySuccess
 from cua.surface.base import SurfaceError
@@ -610,3 +610,55 @@ def test_a_navigate_target_outside_every_allowed_prefix_is_allowlist_violation()
     result = replay(artifact, {"member_id": "12345"}, PoisonSurface(), "embedded",
                     deployment=deployment)
     assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
+
+
+# Final fix wave, C1 / E31: a sensitive input's value never enters an INVALID_INPUT Failure.
+
+def test_a_sensitive_inputs_value_never_enters_a_pattern_mismatch_failure() -> None:
+    artifact = _artifact(steps=[
+        Step(id="s1", action="fill", locator=loc("Member ID"),
+             value={"from_input": "member_id"}, risk="safe"),
+    ])
+    artifact.inputs["member_id"] = InputSpec(
+        type="string", pattern="^[0-9]{5}$", required=True, sensitive=True,
+    )
+    failure = validate_inputs(artifact, {"member_id": "SECRET1"})
+    assert failure is not None and failure.kind == "INVALID_INPUT"
+    assert "SECRET1" not in failure.expected
+    assert "SECRET1" not in failure.observed
+    assert "[REDACTED]" in failure.observed
+    # The input's name and the pattern are not the value and may stay.
+    assert "member_id" in failure.observed
+    assert "^[0-9]{5}$" in failure.expected
+
+
+def test_a_sensitive_inputs_value_never_enters_a_type_mismatch_failure() -> None:
+    artifact = _artifact(steps=[
+        Step(id="s1", action="fill", locator=loc("Member ID"),
+             value={"from_input": "member_id"}, risk="safe"),
+    ])
+    artifact.inputs["member_id"] = InputSpec(type="string", required=True, sensitive=True)
+    artifact.inputs["pin"] = InputSpec(type="integer", required=True, sensitive=True)
+
+    string_failure = validate_inputs(artifact, {"member_id": 424242, "pin": 1234})
+    assert string_failure is not None and string_failure.kind == "INVALID_INPUT"
+    assert "424242" not in string_failure.observed
+    assert "[REDACTED]" in string_failure.observed
+
+    integer_failure = validate_inputs(artifact, {"member_id": "12345", "pin": "SECRETPIN"})
+    assert integer_failure is not None and integer_failure.kind == "INVALID_INPUT"
+    assert "SECRETPIN" not in integer_failure.observed
+    assert "[REDACTED]" in integer_failure.observed
+
+
+def test_a_non_sensitive_inputs_value_still_appears_in_the_failure() -> None:
+    # The redaction is driven by the declared flag alone (S4.2 decision 6), so an input
+    # not declared sensitive keeps the diagnosable message it always had.
+    artifact = _artifact(steps=[
+        Step(id="s1", action="fill", locator=loc("Member ID"),
+             value={"from_input": "member_id"}, risk="safe"),
+    ])
+    failure = validate_inputs(artifact, {"member_id": "not-five-digits"})
+    assert failure is not None and failure.kind == "INVALID_INPUT"
+    assert "not-five-digits" in failure.observed
+    assert "[REDACTED]" not in failure.observed
