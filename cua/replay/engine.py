@@ -40,6 +40,7 @@ from cua.artifact.models import (
     Expect,
     FailureKind,
     FromInput,
+    InputSpec,
     LiteralValue,
     Matcher,
     Step,
@@ -128,6 +129,15 @@ class _NullEvidenceSink:
         return f"evidence/{self.run_id}"
 
 
+_REDACTION_MARKER = "[REDACTED]"
+
+
+def _shown(value: object, spec: InputSpec) -> str:
+    """How an input's value is rendered into a `Failure` (E31): `repr(value)` for an
+    ordinary input, the literal `[REDACTED]` for one declared `sensitive`."""
+    return _REDACTION_MARKER if spec.sensitive else repr(value)
+
+
 def validate_inputs(artifact: Artifact, inputs: dict[str, object]) -> Failure | None:
     """E10/E22: checks `inputs` against `artifact.inputs` and returns an `INVALID_INPUT`
     `Failure`, or `None` if every declared input is satisfied.
@@ -141,6 +151,13 @@ def validate_inputs(artifact: Artifact, inputs: dict[str, object]) -> Failure | 
     values are checked here; any other declared type passes through unvalidated. A
     `"string"` input additionally checks `InputSpec.pattern`, when declared, as a full-
     string regular expression match. `required` is enforced for every declared type.
+
+    E31: when the input's `InputSpec.sensitive` is `True`, the value itself never enters
+    `expected` or `observed` -- `[REDACTED]` stands in for it. The input's name, its
+    declared pattern and the Python type name of what arrived are not the value and
+    stay, so the failure is still diagnosable. The rule lives here, at the construction
+    site, because nothing downstream (`write_result`, a CLI echo) knows which input a
+    finished `Failure`'s text came from.
     """
     sink = _NullEvidenceSink()
     for name, spec in artifact.inputs.items():
@@ -160,14 +177,15 @@ def validate_inputs(artifact: Artifact, inputs: dict[str, object]) -> Failure | 
                 return Failure(
                     kind="INVALID_INPUT", step_id=None,
                     expected=f"input {name!r} is a string",
-                    observed=f"input {name!r} was {value!r} ({type(value).__name__})",
+                    observed=(f"input {name!r} was {_shown(value, spec)} "
+                              f"({type(value).__name__})"),
                     evidence_ref=sink.evidence_ref(),
                 )
             if spec.pattern is not None and re.fullmatch(spec.pattern, value) is None:
                 return Failure(
                     kind="INVALID_INPUT", step_id=None,
                     expected=f"input {name!r} matches pattern {spec.pattern!r}",
-                    observed=f"input {name!r} was {value!r}",
+                    observed=f"input {name!r} was {_shown(value, spec)}",
                     evidence_ref=sink.evidence_ref(),
                 )
         elif spec.type == "integer":
@@ -175,7 +193,8 @@ def validate_inputs(artifact: Artifact, inputs: dict[str, object]) -> Failure | 
                 return Failure(
                     kind="INVALID_INPUT", step_id=None,
                     expected=f"input {name!r} is an integer",
-                    observed=f"input {name!r} was {value!r} ({type(value).__name__})",
+                    observed=(f"input {name!r} was {_shown(value, spec)} "
+                              f"({type(value).__name__})"),
                     evidence_ref=sink.evidence_ref(),
                 )
         # Any other declared `type` is not validated here -- the stated limit above.
