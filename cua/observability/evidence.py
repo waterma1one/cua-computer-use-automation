@@ -81,10 +81,16 @@ class EvidenceWriter:
         `InputSpec.sensitive` is `True` -- the same accepted global-substitution
         trade-off `scrub_protected_values` documents for snapshot YAML applies here too
         (this package's own docstring carries the note in full).
+
+        Every key of `inputs` must have an entry in `input_specs`: an input no spec
+        describes cannot be known to be non-sensitive, so it raises `KeyError` rather
+        than being written in plain text by default (E31, ledger minor 10). The caller
+        refuses undeclared inputs before reaching here (`cua.cli` does so as
+        `INVALID_INPUT`). Nothing is written when the check fails: the comprehension
+        runs to completion before `run.json` is opened.
         """
         masked_inputs: dict[str, object] = {
-            name: _REDACTION_MARKER if input_specs.get(name, InputSpec(type="string")).sensitive
-            else value
+            name: _REDACTION_MARKER if input_specs[name].sensitive else value
             for name, value in inputs.items()
         }
         data = {
