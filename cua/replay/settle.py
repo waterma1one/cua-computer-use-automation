@@ -15,9 +15,9 @@ import time
 from dataclasses import dataclass
 from typing import Protocol, cast, runtime_checkable
 
-from cua.artifact.models import Expect, FailureKind, Matcher, Recovery, Settle, Step
+from cua.artifact.models import Expect, FailureKind, Recovery, Settle, Step
 from cua.surface.base import Surface
-from cua.surface.locators import matches
+from cua.surface.locators import matches, name_matches, text_of
 from cua.surface.models import Action, Observation
 
 __all__ = [
@@ -113,31 +113,19 @@ class DialogUnhandled:
 BranchOutcome = Continue | Business | Fail | Escalate | TimedOut | DialogUnhandled
 
 
-def _dialog_matches(message: str, detect: Matcher) -> bool:
-    """Whether a bare dialog message satisfies a `Matcher`, by `name`/`name_match` only.
-
-    A dialog message is a plain string, not a `Node` -- it carries no role and no
-    strategy-shaped structure -- so it cannot go through `cua.surface.locators.matches`
-    directly. `role`/`strategy` on the detect rule are simply ignored for this check.
-    """
-    if detect.name is None:
-        return False
-    if detect.name_match == "exact":
-        return message == detect.name
-    if detect.name_match == "contains":
-        return detect.name in message
-    return message.startswith(detect.name)  # "prefix"
-
-
 def _handle_dialog(
     surface: Surface, message: str, recovery: list[Recovery]
 ) -> Escalate | DialogUnhandled | None:
-    """Checks `message` against every recovery rule in order. `None` means a `dismiss` rule
-    matched and the dialog was dismissed -- the caller should loop immediately without
-    sleeping or checking the deadline.
+    """Checks `message` against every recovery rule in order, by `name`/`name_match` only --
+    a dialog message is a plain string, not a `Node`, so it goes through `name_matches`
+    directly rather than the `Node`-shaped `matches` (`role`/`strategy` on the detect rule
+    are simply ignored for this check). `None` means a `dismiss` rule matched and the
+    dialog was dismissed; the caller must still respect `settle_spec`'s deadline for this
+    (E26) rather than looping on it unboundedly.
     """
     for rule in recovery:
-        if not _dialog_matches(message, rule.detect):
+        detect = rule.detect
+        if not name_matches(message, detect.name, detect.name_match):
             continue
         if rule.handle == "dismiss":
             surface.act(Action(kind="dismiss_dialog"))
@@ -180,11 +168,14 @@ def _matching_expect(
             continue
         if expect.outcome == "continue":
             return Continue()
+        text = text_of(matched[0]) or ""
         if expect.outcome == "business":
-            text = matched[0].name if matched[0].name else (matched[0].value or "")
             return Business(code=expect.code, message=text)
         if expect.outcome == "fail":
-            text = matched[0].name if matched[0].name else (matched[0].value or "")
+            # Safe: Task 1's load-time validation (FAIL_CODE_NOT_A_FAILURE_KIND) already
+            # refuses to load any artifact with a `fail` expect whose `code` is not a valid
+            # `FailureKind`, and settle()'s callers in this plan never hand it an
+            # unvalidated artifact -- so this is a cast, not a `type: ignore`.
             return Fail(matched_text=text, code=cast(FailureKind, expect.code))
         # expect.outcome == "retry": absorbed -- stop searching, keep polling.
         return None
@@ -203,8 +194,17 @@ def settle(
     observed nodes; then, only if `step.expects` is non-empty, `step.expects` in declared
     order. A step with no `expects` at all completes on its very first poll -- there is
     nothing declared to wait for, so polling to timeout would be pure waste.
+
+    E26: a dismissed dialog does not loop immediately. A dialog that keeps reappearing
+    (a broken page, or a `dismiss` rule matching something that is never actually cleared)
+    must still respect `settle_spec.timeout_ms` rather than dismissing without bound, so a
+    dismiss falls through to the same deadline check and poll sleep as any other absorbed
+    iteration below, instead of restarting the loop before either runs.
     """
     deadline = clock.monotonic_ms() + settle_spec.timeout_ms
+    # No observation exists yet if every poll finds a dialog pending; this placeholder
+    # means `TimedOut` can always be constructed even if `observe()` is never reached.
+    observation = Observation(generation=0, nodes=[], truncated=False)
 
     while True:
         message = surface.pending_dialog()
@@ -212,20 +212,21 @@ def settle(
             dialog_outcome = _handle_dialog(surface, message, recovery)
             if dialog_outcome is not None:
                 return dialog_outcome
-            continue  # a dismiss rule fired -- loop immediately, no sleep, no deadline check
+            # A dismiss rule fired -- fall through to the deadline check and sleep below
+            # (E26) rather than looping back to the top immediately.
+        else:
+            observation = surface.observe()
 
-        observation = surface.observe()
+            recovery_outcome = _matching_recovery(observation, recovery)
+            if recovery_outcome is not None:
+                return recovery_outcome
 
-        recovery_outcome = _matching_recovery(observation, recovery)
-        if recovery_outcome is not None:
-            return recovery_outcome
+            if not step.expects:
+                return Continue()
 
-        if not step.expects:
-            return Continue()
-
-        expect_outcome = _matching_expect(observation, step.expects)
-        if expect_outcome is not None:
-            return expect_outcome
+            expect_outcome = _matching_expect(observation, step.expects)
+            if expect_outcome is not None:
+                return expect_outcome
 
         if clock.monotonic_ms() >= deadline:
             return TimedOut(observation=observation)
