@@ -4,30 +4,36 @@ acting on the target application only through the `Surface` protocol (D19).
 
 No Playwright, no Selenium, no DOM concept, no CSS selector or XPath anywhere in this
 module -- `tests/test_architecture.py` greps `cua/replay/` for exactly that, and this
-module additionally never imports `cua.observability` (phase 5's package, which does not
-exist yet): `EvidenceSink` below is a local `Protocol` so this module can be written,
-tested and reviewed independently of how a run's evidence is actually persisted.
+module additionally never imports `cua.observability`: `EvidenceSink` below is a local
+`Protocol` so this module can be written, tested and reviewed independently of how a
+run's evidence is actually persisted.
 
 Every wait comes from the injected `Clock` (default `cua.replay.settle.SYSTEM_CLOCK`),
 never a fixed `sleep` -- `settle()` already enforces this for the per-step poll loop, and
 this module never sleeps on its own.
 
-Control-flow rulings this module implements, restated briefly (the task brief carries the
-full reasoning): E9 (irreversible/idempotency gate), E10/E22 (`validate_inputs` as its own
-public function), E14 (an `ok=False` action result with a pending dialog falls through to
-`settle()`; without one it is `PRECONDITION_FAILED`), E17 (a `fail`/`business` expect with
-a malformed code is refused before the surface is ever touched), E18 (the artifact's
-`success.checkpoint` is itself settled, as a synthetic step, after the last real step),
-E21 (a frame is captured only for a failure that arises during or after a surface
-interaction -- every pre-loop gate and every pre-act refusal passes `capture=False` and
-never calls a `Surface` method at all).
+Control-flow rulings this module implements, restated briefly (the task brief and the
+fix-round rulings carry the full reasoning): E9/E27 (an irreversible step needs both
+`confirm_irreversible` and an `idempotency_key`; the key is burned immediately before
+that step's own `act`, scoped to the artifact's `(id, version)`), E10/E22
+(`validate_inputs` as its own public function), E14 (an `ok=False` action result with a
+pending dialog falls through to `settle()`; without one it is `PRECONDITION_FAILED`), E17
+(a `fail`/`business` expect with a malformed code is refused before the surface is ever
+touched), E18 (the artifact's `success.checkpoint` is itself settled, as a synthetic step,
+after the last real step), E21 (a frame is captured only for a failure that arises during
+or after a surface interaction -- every pre-loop gate and every pre-act refusal passes
+`capture=False` and never calls a `Surface` method at all), E28 (`replay()` returns
+exactly one of the three result shapes; every `SurfaceError`, wherever it arises, is a
+`SESSION_LOST`, and `_fail` itself is safe on a dead surface), E29 (the failure-kind
+vocabulary, the expect-code check and the path allowlist rule each have one home in
+`cua.artifact`; this module calls them rather than carrying copies).
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Protocol, get_args, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from cua.artifact.models import (
     Artifact,
@@ -37,9 +43,8 @@ from cua.artifact.models import (
     LiteralValue,
     Matcher,
     Step,
-    StepValue,
 )
-from cua.artifact.validate import DeploymentAllowlist
+from cua.artifact.validate import DeploymentAllowlist, expect_code_problem
 from cua.replay.extract import ParseError, extract
 from cua.replay.result import BusinessOutcome, Failure, Mode, ReplayResult, Success, mint_run_id
 from cua.replay.settle import (
@@ -58,18 +63,22 @@ from cua.surface.models import Action, EvidenceFrame, Locator, Node, Observation
 
 __all__ = ["EvidenceSink", "replay", "validate_inputs"]
 
-# E4'/E17: the closed set a `fail` expect's `code` must name. `load()` (via
-# `cua.artifact.validate`) already refuses to persist an artifact carrying a bad one, but
-# this module must not trust that every artifact it is handed went through `load()` --
-# a hand-built or hand-edited artifact reaching `replay()` directly is exactly the case
-# this pre-loop scan exists for.
-_FAILURE_KINDS: frozenset[str] = frozenset(get_args(FailureKind))
+# E27: an irreversible step, once actually attempted under a given idempotency key, must
+# not be attempted again under the same key for the same capability -- in-memory, for the
+# lifetime of this process. Keyed by `(artifact.id, artifact.version, key)` so two
+# unrelated capabilities reusing one key string never collide. Phase 9's console or a
+# durable store is a later phase's job; this is the minimal control that keeps a duplicate
+# "post" from ever reaching the surface twice.
+_IdempotencyScope = tuple[str, int, str]
+_used_idempotency_keys: set[_IdempotencyScope] = set()
 
-# E9: an irreversible step, once actually attempted under a given idempotency key, must
-# not be attempted again under the same key -- in-memory, for the lifetime of this
-# process. Phase 9's console or a durable store is a later phase's job; this is the
-# minimal control that keeps a duplicate "post" from ever reaching the surface twice.
-_used_idempotency_keys: set[str] = set()
+
+def _reset_idempotency_keys() -> None:
+    """Test seam (E27): empties the process-lifetime seen-set so one test's burned key can
+    never refuse another test's replay. `tests/replay/conftest.py` calls it around every
+    test; production code never does.
+    """
+    _used_idempotency_keys.clear()
 
 
 @runtime_checkable
@@ -170,6 +179,19 @@ def validate_inputs(artifact: Artifact, inputs: dict[str, object]) -> Failure | 
                     evidence_ref=sink.evidence_ref(),
                 )
         # Any other declared `type` is not validated here -- the stated limit above.
+
+    # E28: a step that reads an input which is not in `inputs` -- undeclared, or declared
+    # optional and simply not supplied -- is refused here, pre-browser, rather than raising
+    # a `KeyError` out of the step loop after the surface has been touched.
+    for step in artifact.steps:
+        if isinstance(step.value, FromInput) and step.value.from_input not in inputs:
+            name = step.value.from_input
+            return Failure(
+                kind="INVALID_INPUT", step_id=step.id,
+                expected=f"input {name!r}, which step {step.id!r} reads, is provided",
+                observed=f"input {name!r} was not provided",
+                evidence_ref=sink.evidence_ref(),
+            )
     return None
 
 
@@ -183,23 +205,25 @@ def _fail(
     this failure's step". When `True`, `surface.pending_dialog()` is checked first -- a
     pending native dialog blocks a screenshot, so that case is recorded as a skipped
     capture (`sink.event(...)`) rather than silently producing no frame with no
-    explanation. Otherwise `surface.capture()` is attempted, swallowing `SurfaceError`
-    (a failed capture must never hide the `Failure` it was trying to illustrate). When
-    `capture` is `False`, `surface` is never touched at all -- what every
-    `PoisonSurface`-based test in this task's suite relies on.
+    explanation. Otherwise `surface.capture()` is attempted. When `capture` is `False`,
+    `surface` is never touched at all -- what every `PoisonSurface`-based test in this
+    task's suite relies on.
+
+    E28: safe on a dead surface. Both calls sit inside the one `try`, so a
+    `pending_dialog()` or `capture()` that raises `SurfaceError` records why no frame
+    exists and still returns the `Failure` of the original kind -- a failed capture must
+    never hide the failure it was trying to illustrate, and must never escape `replay()`.
     """
     if capture:
-        message = surface.pending_dialog()
-        if message is not None:
-            sink.event(step_id=step_id, kind="capture_skipped",
-                       reason="a native dialog is pending")
-        else:
-            try:
-                frame = surface.capture()
-            except SurfaceError:
-                pass
+        try:
+            message = surface.pending_dialog()
+            if message is not None:
+                sink.event(step_id=step_id, kind="capture_skipped",
+                           reason="a native dialog is pending")
             else:
-                sink.frame(frame, step_id or "input")
+                sink.frame(surface.capture(), step_id or "input")
+        except SurfaceError as exc:
+            sink.event(step_id=step_id, kind="capture_failed", reason=str(exc))
     return Failure(kind=kind, step_id=step_id, expected=expected, observed=observed,
                     evidence_ref=sink.evidence_ref())
 
@@ -215,6 +239,17 @@ def _describe_expects(expects: list[Expect]) -> str:
     return "one of: " + "; ".join(f"{e.outcome} on {_describe_matcher(e.when)}" for e in expects)
 
 
+def _describe_continues(expects: list[Expect], checkpoint: Matcher) -> str:
+    """What a step *should* have settled on, for a matched `fail` clause's `expected`: its
+    `continue` clauses, or the artifact's success checkpoint when it declares none. Naming
+    the failure condition that matched there would restate `observed`.
+    """
+    continues = [e for e in expects if e.outcome == "continue"]
+    if not continues:
+        return f"the success checkpoint {_describe_matcher(checkpoint)}"
+    return "one of: " + "; ".join(f"continue on {_describe_matcher(e.when)}" for e in continues)
+
+
 def _describe_observation(observation: Observation) -> str:
     if not observation.nodes:
         return "no nodes were observed before the timeout"
@@ -227,42 +262,228 @@ def _describe_locator(locator: Locator) -> str:
     return f"a unique control matching {locator.strategy} {role}name={locator.name!r}"
 
 
-def _permits_path(path: str, prefixes: list[str]) -> bool:
-    return any(path.startswith(prefix) for prefix in prefixes)
+@dataclass
+class _Run:
+    """Everything one `replay()` call threads through its steps: the fixed inputs, the
+    surface and sink, the deadline, and the bindings steps accumulate.
 
-
-def _denied_navigation_reason(path: str, deployment: DeploymentAllowlist) -> str | None:
-    """E8: the static, declared-target half of the navigation allowlist -- mirrors
-    `cua.artifact.validate._narrowing_findings`'s deny-first, prefix-matched logic. Live
-    enforcement (redirects, a page that navigates itself) is phase 5's; this only catches
-    an artifact whose own declared `target.path` the deployment does not permit.
+    `values` is keyed by `Step.into` (declared outputs and underscore-prefixed locals);
+    `bound_by_step` holds the same extracted values keyed by the producing step's `id`,
+    which is what a `from_step` reference names (`cua.artifact.validate._from_step_findings`
+    resolves the reference graph by step id, and the engine must agree with it).
     """
-    if _permits_path(path, deployment.denied_paths):
-        return f"path {path!r} matches a denied prefix on the deployment allowlist"
-    if not _permits_path(path, deployment.allowed_paths):
-        return f"path {path!r} does not match any allowed prefix on the deployment allowlist"
+
+    artifact: Artifact
+    inputs: dict[str, object]
+    surface: Surface
+    sink: EvidenceSink
+    clock: Clock
+    deadline: int
+    deployment: DeploymentAllowlist | None
+    idempotency_key: str | None
+    values: dict[str, object] = field(default_factory=dict)
+    bound_by_step: dict[str, object] = field(default_factory=dict)
+    steps_run: list[str] = field(default_factory=list)
+
+    def fail(
+        self, kind: FailureKind, step_id: str | None, expected: str, observed: str, *,
+        capture: bool,
+    ) -> Failure:
+        return _fail(kind, step_id, expected, observed,
+                     surface=self.surface, sink=self.sink, capture=capture)
+
+
+def _policy_gate(
+    artifact: Artifact, confirm_irreversible: bool, idempotency_key: str | None,
+    sink: EvidenceSink,
+) -> Failure | None:
+    """The pre-loop refusals that need no surface (E17, E9/E27), every one `POLICY_BLOCKED`
+    and constructed directly rather than through `_fail` -- nothing has touched the surface
+    yet, so there is nothing to capture.
+
+    E17: `load()` already refuses to persist an artifact whose `fail` expect names an
+    unknown code or whose `business` expect names none, but this module must not trust
+    that every artifact it is handed went through `load()`. `expect_code_problem` is the
+    validator's own check (E29), not a copy of it.
+
+    E27: an irreversible step requires both `confirm_irreversible` and an
+    `idempotency_key`, and a key already burned for this `(id, version)` is refused here,
+    before the browser is touched. The burn itself happens in `_run_step`, immediately
+    before that step's own `act`.
+    """
+    for step in artifact.steps:
+        for expect in step.expects:
+            problem = expect_code_problem(expect)
+            if problem is not None:
+                return Failure(
+                    kind="POLICY_BLOCKED", step_id=step.id,
+                    expected="every fail expect names a FailureKind and every business "
+                             "expect names a code",
+                    observed=(
+                        f"step {step.id!r} has a {expect.outcome} expect with code "
+                        f"{expect.code!r} ({problem})"
+                    ),
+                    evidence_ref=sink.evidence_ref(),
+                )
+
+    irreversible = next((s for s in artifact.steps if s.risk == "irreversible"), None)
+    if irreversible is None:
+        return None
+    if not confirm_irreversible:
+        return Failure(
+            kind="POLICY_BLOCKED", step_id=irreversible.id,
+            expected="an irreversible step requires confirm_irreversible=True",
+            observed=(
+                f"step {irreversible.id!r} is irreversible and confirm_irreversible was not set"
+            ),
+            evidence_ref=sink.evidence_ref(),
+        )
+    if idempotency_key is None:
+        return Failure(
+            kind="POLICY_BLOCKED", step_id=irreversible.id,
+            expected="an irreversible step requires an idempotency_key",
+            observed=f"step {irreversible.id!r} is irreversible and no idempotency_key was given",
+            evidence_ref=sink.evidence_ref(),
+        )
+    if (artifact.id, artifact.version, idempotency_key) in _used_idempotency_keys:
+        return Failure(
+            kind="POLICY_BLOCKED", step_id=irreversible.id,
+            expected="idempotency_key names an operation not already attempted",
+            observed=(
+                f"idempotency_key {idempotency_key!r} was already used to attempt "
+                f"{artifact.id!r} v{artifact.version}"
+            ),
+            evidence_ref=sink.evidence_ref(),
+        )
     return None
 
 
-def _resolve_step_value(
-    value: StepValue | None, inputs: dict[str, object], values: dict[str, object],
-) -> str | None:
-    """Resolves one step's `value` (a `FromInput`/`LiteralValue`/`FromStep`) to the plain
-    string an `Action` carries. `values` holds every prior step's `into` binding,
-    including underscore-prefixed locals.
+def _step_value(run: _Run, step: Step) -> str | None | Failure:
+    """Resolves `step.value` to the plain string an `Action` carries -- `None` when the
+    step carries no value -- or the `Failure` that refuses it. Total: never raises.
+
+    E28: a `from_step` naming a step that bound nothing is `PRECONDITION_FAILED` with a
+    frame (the surface was just asked to resolve this step's locator). A `from_input`
+    naming an absent input was already refused pre-browser by `validate_inputs`; the
+    re-check here only keeps this function total should a caller skip that gate.
     """
+    value = step.value
     if value is None:
         return None
-    if isinstance(value, FromInput):
-        return str(inputs[value.from_input])
     if isinstance(value, LiteralValue):
         return value.literal
-    return str(values[value.from_step])  # FromStep: the only StepValue arm left
+    if isinstance(value, FromInput):
+        if value.from_input not in run.inputs:
+            return run.fail(
+                "INVALID_INPUT", step.id,
+                f"input {value.from_input!r}, which step {step.id!r} reads, is provided",
+                f"input {value.from_input!r} was not provided", capture=True,
+            )
+        return str(run.inputs[value.from_input])
+    if value.from_step not in run.bound_by_step:  # FromStep: the only StepValue arm left
+        return run.fail(
+            "PRECONDITION_FAILED", step.id,
+            f"step {value.from_step!r} binds a value before step {step.id!r} reads it",
+            f"step {value.from_step!r} bound nothing", capture=True,
+        )
+    return str(run.bound_by_step[value.from_step])
+
+
+def _prepare_action(run: _Run, step: Step) -> tuple[Action, Node | None] | Failure:
+    """Turns one step into the `Action` to perform, resolving its locator and value first,
+    or returns the `Failure` that stops it before anything is performed.
+
+    `navigate` (E8/E29): the declared `target.path` is checked against the deployment's
+    `permits_path` before `act` is ever called -- `capture=False`, since the navigation
+    this check exists to prevent has, by construction, not happened. A `navigate` with no
+    target is `PRECONDITION_FAILED`, never an `Action` carrying an empty path (E28). Live
+    enforcement (redirects, a page that navigates itself) is phase 5's.
+
+    Every other action: `resolve` first, translating `NotFound`/`Ambiguous`/
+    `PreconditionFailed` directly (`capture=True` -- the surface was just asked), then the
+    value. Returns the resolved `Node` alongside the action so extraction reads from it.
+    """
+    if step.action == "navigate":
+        if step.target is None:
+            return run.fail(
+                "PRECONDITION_FAILED", step.id, "a navigate step declares a target path",
+                f"step {step.id!r} is a navigate with no target", capture=False,
+            )
+        path = step.target.path
+        if run.deployment is not None and not run.deployment.permits_path(path):
+            return run.fail(
+                "ALLOWLIST_VIOLATION", step.id,
+                "the navigate target is permitted by the deployment allowlist",
+                (
+                    f"path {path!r} is not permitted by the deployment allowlist "
+                    "(deny prefixes are evaluated first and win)"
+                ),
+                capture=False,
+            )
+        return Action(kind="navigate", locator=None, value=path), None
+
+    resolved_node: Node | None = None
+    if step.locator is not None:
+        try:
+            resolution = run.surface.resolve(step.locator)
+        except SurfaceError as exc:
+            return run.fail(
+                "SESSION_LOST", step.id, "the surface resolves the locator without error",
+                str(exc), capture=True,
+            )
+        if resolution.kind == "not_found":
+            return run.fail(
+                "LOCATOR_NOT_FOUND", step.id, _describe_locator(step.locator),
+                resolution.reason, capture=True,
+            )
+        if resolution.kind == "ambiguous":
+            return run.fail(
+                "AMBIGUOUS_LOCATOR", step.id,
+                _describe_locator(step.locator) + " to resolve to exactly one control",
+                f"{resolution.count} controls matched", capture=True,
+            )
+        if resolution.kind == "precondition_failed":
+            return run.fail(
+                "PRECONDITION_FAILED", step.id, f"the control is {resolution.which}",
+                f"the control failed the {resolution.which} precondition", capture=True,
+            )
+        resolved_node = resolution.node
+
+    value = _step_value(run, step)
+    if isinstance(value, Failure):
+        return value
+    return Action(kind=step.action, locator=step.locator, value=value), resolved_node
+
+
+def _extract_binding(run: _Run, step: Step, resolved_node: Node | None) -> Failure | None:
+    """Reads the step's declared extraction off the resolved node and binds it under the
+    step's `id` (for `from_step`) and its `into` (for outputs and locals). A `ParseError` is
+    `OUTPUT_VALIDATION_FAILED` -- a value that does not parse is never bound as `None`.
+
+    A step that declares an extraction but resolved no node (no locator) binds nothing;
+    the unbound-output check at the end of `replay()` reports that (E28) rather than this
+    step guessing at what it should have read.
+    """
+    wants_extraction = (
+        step.into is not None or step.extract is not None or step.parse is not None
+    )
+    if not wants_extraction or resolved_node is None:
+        return None
+    try:
+        extracted = extract(resolved_node, step.extract or "text", step.parse)
+    except ParseError as exc:
+        return run.fail(
+            "OUTPUT_VALIDATION_FAILED", step.id, f"a value parseable as {step.parse or 'text'}",
+            str(exc), capture=True,
+        )
+    run.bound_by_step[step.id] = extracted
+    if step.into is not None:
+        run.values[step.into] = extracted
+    return None
 
 
 def _translate_outcome(
-    outcome: BranchOutcome, step_id: str | None, expected_description: str, *,
-    surface: Surface, sink: EvidenceSink,
+    run: _Run, outcome: BranchOutcome, step_id: str | None, expects: list[Expect],
 ) -> ReplayResult | None:
     """Translates one `settle()` result into the `ReplayResult` the caller (a step, or the
     post-loop checkpoint settle of E18) should return -- or `None` for `Continue`, meaning
@@ -276,38 +497,132 @@ def _translate_outcome(
     if isinstance(outcome, Continue):
         return None
     if isinstance(outcome, Business):
-        assert step_id is not None, "a business outcome only arises from a step's own expects"
-        assert outcome.code is not None, "E17's pre-loop gate guarantees a business code"
+        # E17/E28: `_policy_gate` refused every business expect without a code before the
+        # loop began, and only a real step's own expects can produce `Business` (the
+        # checkpoint step declares a single `continue`). Reaching here otherwise is an
+        # invariant violation, checked explicitly rather than with `assert`.
+        if step_id is None or outcome.code is None:
+            raise RuntimeError(
+                "a business outcome arose without a step id or code; the pre-loop "
+                "expect-code gate did not run"
+            )
         return BusinessOutcome(code=outcome.code, step_id=step_id, message=outcome.message,
-                                evidence_ref=sink.evidence_ref())
+                                evidence_ref=run.sink.evidence_ref())
     if isinstance(outcome, Fail):
-        return _fail(
-            outcome.code, step_id, expected_description,
+        return run.fail(
+            outcome.code, step_id,
+            _describe_continues(expects, run.artifact.success.checkpoint),
             outcome.matched_text or "the matched fail condition carried no observable text",
-            surface=surface, sink=sink, capture=True,
+            capture=True,
         )
     if isinstance(outcome, Escalate):
-        return _fail(
+        return run.fail(
             "ESCALATION_UNAVAILABLE", step_id,
             "the triggering condition resolves without a human",
             (
                 f"recovery rule {outcome.recovery_name!r} requires escalation, which an "
                 "embedded replay cannot provide"
             ),
-            surface=surface, sink=sink, capture=True,
+            capture=True,
         )
     if isinstance(outcome, DialogUnhandled):
-        return _fail(
+        return run.fail(
             "UNHANDLED_DIALOG", step_id, "a recovery rule handles the pending dialog",
-            f"an unhandled dialog appeared: {outcome.message!r}",
-            surface=surface, sink=sink, capture=True,
+            f"an unhandled dialog appeared: {outcome.message!r}", capture=True,
         )
     # The only BranchOutcome variant left is TimedOut.
-    return _fail(
-        "NO_BRANCH_MATCHED", step_id, expected_description,
-        _describe_observation(outcome.observation),
-        surface=surface, sink=sink, capture=True,
+    return run.fail(
+        "NO_BRANCH_MATCHED", step_id, _describe_expects(expects),
+        _describe_observation(outcome.observation), capture=True,
     )
+
+
+def _settle_step(run: _Run, step: Step, step_id: str | None) -> ReplayResult | None:
+    """Settles one step (a real one, or the E18 checkpoint step with `step_id=None`) and
+    translates the outcome; a `SurfaceError` raised from inside the poll loop is
+    `SESSION_LOST` (E28).
+    """
+    try:
+        outcome = settle(run.surface, step, run.artifact.settle, run.artifact.recovery,
+                         clock=run.clock)
+    except SurfaceError as exc:
+        return run.fail(
+            "SESSION_LOST", step_id, "the surface stays observable while the step settles",
+            str(exc), capture=True,
+        )
+    return _translate_outcome(run, outcome, step_id, step.expects)
+
+
+def _run_step(run: _Run, step: Step) -> ReplayResult | None:
+    """Runs one step end to end: gates, action, extraction, settle. Returns the
+    `ReplayResult` that ends the replay, or `None` to proceed to the next step.
+
+    Gates in order: `risk is None` (`POLICY_BLOCKED`, `capture=False`); the deadline, `>=`
+    not `>` (E25) -- `capture=False` while no step has yet completed, since nothing has
+    touched the surface, `capture=True` once one has. Then `_prepare_action`; then, for an
+    irreversible step, the idempotency key is burned (E27) immediately before `act` --
+    nothing before this point can be a duplicate risk, so a replay that failed earlier may
+    be retried under the same key, while one that reached this line may not, whatever
+    happens next. `act` raising is `SESSION_LOST`; `ok=False` with a pending dialog falls
+    through to `settle()` (E14) and without one is `PRECONDITION_FAILED`.
+    """
+    if step.risk is None:
+        return run.fail(
+            "POLICY_BLOCKED", step.id, "every replayed step carries a risk classification",
+            f"step {step.id!r} has risk=None", capture=False,
+        )
+    if run.clock.monotonic_ms() >= run.deadline:
+        budget = run.artifact.max_duration_ms
+        return run.fail(
+            "DURATION_EXCEEDED", step.id, f"the replay completes within {budget}ms",
+            f"the {budget}ms deadline was reached before step {step.id!r} began",
+            capture=bool(run.steps_run),
+        )
+
+    prepared = _prepare_action(run, step)
+    if isinstance(prepared, Failure):
+        return prepared
+    action, resolved_node = prepared
+
+    if step.risk == "irreversible" and run.idempotency_key is not None:
+        _used_idempotency_keys.add(
+            (run.artifact.id, run.artifact.version, run.idempotency_key)
+        )
+
+    try:
+        result = run.surface.act(action)
+    except SurfaceError as exc:
+        return run.fail(
+            "SESSION_LOST", step.id, "the surface completes the action without error",
+            str(exc), capture=True,
+        )
+
+    if not result.ok:
+        try:
+            dialog_message = run.surface.pending_dialog()
+        except SurfaceError as exc:
+            return run.fail(
+                "SESSION_LOST", step.id, "the surface reports its dialog state",
+                str(exc), capture=True,
+            )
+        if dialog_message is None:
+            return run.fail(
+                "PRECONDITION_FAILED", step.id, "the action completes successfully",
+                result.read_value or f"the {step.action} action did not complete", capture=True,
+            )
+        # E14: a pending dialog reaches the recovery machinery through settle() below,
+        # instead of being reported here as a precondition failure.
+
+    extraction_failure = _extract_binding(run, step, resolved_node)
+    if extraction_failure is not None:
+        return extraction_failure
+
+    settled = _settle_step(run, step, step.id)
+    if settled is not None:
+        return settled
+
+    run.steps_run.append(step.id)
+    return None
 
 
 def replay(
@@ -318,13 +633,14 @@ def replay(
 ) -> ReplayResult:
     """Replays `artifact` against `surface` with `inputs`, returning exactly one
     `Success | BusinessOutcome | Failure` and never raising for a business-meaningful
-    outcome. `mode="supervised"` raises `NotImplementedError` -- this phase implements
-    unattended (`"embedded"`) replay only.
+    outcome (E28). `mode="supervised"` raises `NotImplementedError` -- this phase
+    implements unattended (`"embedded"`) replay only.
 
-    Gate order, all before the step loop starts and all `capture=False` (E21) because none
-    of them has touched `surface` yet: `validate_inputs` (E22); a scan of every step's
-    `expects` for a `fail` clause naming an unknown code or a `business` clause naming none
-    (E17); the irreversible/idempotency gate (E9).
+    Gate order, all before the step loop starts and all without touching `surface` (E21):
+    `validate_inputs` (E22, re-stamped with this run's `evidence_ref`); `_policy_gate`
+    (E17's expect-code scan, then E9/E27's irreversible/idempotency gate). Then
+    `_run_step` per step, the E18 checkpoint settle, and the E28 unbound-output check
+    before `Success`.
     """
     if mode == "supervised":
         raise NotImplementedError("supervised mode is not yet implemented")
@@ -335,168 +651,41 @@ def replay(
 
     input_failure = validate_inputs(artifact, inputs)
     if input_failure is not None:
-        return input_failure
+        return input_failure.model_copy(update={"evidence_ref": sink.evidence_ref()})
 
-    for scanned in artifact.steps:
-        for expect in scanned.expects:
-            if expect.outcome == "fail" and expect.code not in _FAILURE_KINDS:
-                return Failure(
-                    kind="POLICY_BLOCKED", step_id=scanned.id,
-                    expected="a fail expect names a valid FailureKind",
-                    observed=(
-                        f"step {scanned.id!r} has a fail expect with code {expect.code!r}"
-                    ),
-                    evidence_ref=sink.evidence_ref(),
-                )
-            if expect.outcome == "business" and not expect.code:
-                return Failure(
-                    kind="POLICY_BLOCKED", step_id=scanned.id,
-                    expected="a business expect names a code",
-                    observed=f"step {scanned.id!r} has a business expect with no code",
-                    evidence_ref=sink.evidence_ref(),
-                )
+    blocked = _policy_gate(artifact, confirm_irreversible, idempotency_key, sink)
+    if blocked is not None:
+        return blocked
 
-    first_irreversible = next(
-        (s for s in artifact.steps if s.risk == "irreversible"), None,
+    run = _Run(
+        artifact=artifact, inputs=inputs, surface=surface, sink=sink, clock=active_clock,
+        deadline=deadline, deployment=deployment, idempotency_key=idempotency_key,
     )
-    if first_irreversible is not None:
-        if not confirm_irreversible:
-            return Failure(
-                kind="POLICY_BLOCKED", step_id=first_irreversible.id,
-                expected="an irreversible step requires confirm_irreversible=True",
-                observed=(
-                    f"step {first_irreversible.id!r} is irreversible and "
-                    "confirm_irreversible was not set"
-                ),
-                evidence_ref=sink.evidence_ref(),
-            )
-        if idempotency_key is not None:
-            if idempotency_key in _used_idempotency_keys:
-                return Failure(
-                    kind="POLICY_BLOCKED", step_id=first_irreversible.id,
-                    expected="idempotency_key names an operation not already performed",
-                    observed=f"idempotency_key {idempotency_key!r} has already been used",
-                    evidence_ref=sink.evidence_ref(),
-                )
-            _used_idempotency_keys.add(idempotency_key)
-
-    values: dict[str, object] = {}
-    steps_run: list[str] = []
-
     for step in artifact.steps:
-        if step.risk is None:
-            return _fail(
-                "POLICY_BLOCKED", step.id,
-                "every replayed step carries a risk classification",
-                f"step {step.id!r} has risk=None",
-                surface=surface, sink=sink, capture=False,
-            )
-
-        if active_clock.monotonic_ms() >= deadline:
-            return _fail(
-                "DURATION_EXCEEDED", step.id,
-                f"the replay completes within {artifact.max_duration_ms}ms",
-                (
-                    f"the {artifact.max_duration_ms}ms deadline was reached before step "
-                    f"{step.id!r} began"
-                ),
-                surface=surface, sink=sink, capture=bool(steps_run),
-            )
-
-        resolved_node: Node | None = None
-
-        if step.action == "navigate":
-            path = step.target.path if step.target is not None else ""
-            if deployment is not None:
-                reason = _denied_navigation_reason(path, deployment)
-                if reason is not None:
-                    return _fail(
-                        "ALLOWLIST_VIOLATION", step.id,
-                        "the navigate target is permitted by the deployment allowlist",
-                        reason, surface=surface, sink=sink, capture=False,
-                    )
-            action = Action(kind="navigate", locator=None, value=path)
-        else:
-            if step.locator is not None:
-                resolution = surface.resolve(step.locator)
-                if resolution.kind == "not_found":
-                    return _fail(
-                        "LOCATOR_NOT_FOUND", step.id, _describe_locator(step.locator),
-                        resolution.reason, surface=surface, sink=sink, capture=True,
-                    )
-                if resolution.kind == "ambiguous":
-                    return _fail(
-                        "AMBIGUOUS_LOCATOR", step.id,
-                        _describe_locator(step.locator) + " to resolve to exactly one control",
-                        f"{resolution.count} controls matched",
-                        surface=surface, sink=sink, capture=True,
-                    )
-                if resolution.kind == "precondition_failed":
-                    return _fail(
-                        "PRECONDITION_FAILED", step.id, f"the control is {resolution.which}",
-                        f"the control failed the {resolution.which} precondition",
-                        surface=surface, sink=sink, capture=True,
-                    )
-                resolved_node = resolution.node
-            value = _resolve_step_value(step.value, inputs, values)
-            action = Action(kind=step.action, locator=step.locator, value=value)
-
-        try:
-            result = surface.act(action)
-        except SurfaceError as exc:
-            return _fail(
-                "SESSION_LOST", step.id, "the surface completes the action without error",
-                str(exc), surface=surface, sink=sink, capture=True,
-            )
-
-        if not result.ok:
-            dialog_message = surface.pending_dialog()
-            if dialog_message is None:
-                return _fail(
-                    "PRECONDITION_FAILED", step.id, "the action completes successfully",
-                    result.read_value or f"the {step.action} action did not complete",
-                    surface=surface, sink=sink, capture=True,
-                )
-            # E14: a pending dialog reaches the recovery machinery through settle() below,
-            # instead of being reported here as a precondition failure.
-
-        wants_extraction = (
-            step.into is not None or step.extract is not None or step.parse is not None
-        )
-        if wants_extraction and resolved_node is not None:
-            try:
-                extracted = extract(resolved_node, step.extract or "text", step.parse)
-            except ParseError as exc:
-                return _fail(
-                    "OUTPUT_VALIDATION_FAILED", step.id,
-                    f"a value parseable as {step.parse or 'text'}",
-                    str(exc), surface=surface, sink=sink, capture=True,
-                )
-            if step.into is not None:
-                values[step.into] = extracted
-
-        outcome = settle(surface, step, artifact.settle, artifact.recovery, clock=active_clock)
-        branch_result = _translate_outcome(
-            outcome, step.id, _describe_expects(step.expects), surface=surface, sink=sink,
-        )
-        if branch_result is not None:
-            return branch_result
-
-        steps_run.append(step.id)
+        ended = _run_step(run, step)
+        if ended is not None:
+            return ended
 
     # E18: the artifact's own success checkpoint is settled as a synthetic single-clause
     # step, after the last real step -- not assumed from the last step's own `continue`.
-    checkpoint_expect = Expect(when=artifact.success.checkpoint, outcome="continue",
-                                source="observed")
-    checkpoint_step = Step(id="_checkpoint", action="wait_for", expects=[checkpoint_expect],
-                            risk="safe")
-    outcome = settle(surface, checkpoint_step, artifact.settle, artifact.recovery,
-                      clock=active_clock)
-    branch_result = _translate_outcome(
-        outcome, None, _describe_expects(checkpoint_step.expects), surface=surface, sink=sink,
+    checkpoint_step = Step(
+        id="_checkpoint", action="wait_for", risk="safe",
+        expects=[Expect(when=artifact.success.checkpoint, outcome="continue",
+                        source="observed")],
     )
-    if branch_result is not None:
-        return branch_result
+    ended = _settle_step(run, checkpoint_step, None)
+    if ended is not None:
+        return ended
 
-    outputs = {key: value for key, value in values.items() if not key.startswith("_")}
-    return Success(outputs=outputs, steps_run=steps_run, evidence_ref=sink.evidence_ref())
+    # E28: criterion 7 in its second form -- a declared output no step bound is a failure,
+    # never a `Success` carrying `{}` where the caller was promised a value.
+    missing = [name for name in artifact.outputs if name not in run.values]
+    if missing:
+        return run.fail(
+            "OUTPUT_VALIDATION_FAILED", None,
+            f"every declared output is bound by a step: {sorted(artifact.outputs)}",
+            f"no step bound {missing}", capture=True,
+        )
+
+    outputs = {key: value for key, value in run.values.items() if not key.startswith("_")}
+    return Success(outputs=outputs, steps_run=run.steps_run, evidence_ref=sink.evidence_ref())

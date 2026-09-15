@@ -1,3 +1,5 @@
+import pytest
+
 from cua.artifact.models import (
     App,
     Artifact,
@@ -274,12 +276,24 @@ def test_an_irreversible_step_without_confirmation_is_policy_blocked() -> None:
     assert isinstance(result, Failure) and result.kind == "POLICY_BLOCKED"
 
 
-def test_a_repeated_idempotency_key_is_refused_on_the_second_call() -> None:
+def _irreversible_artifact(*leading: Step) -> Artifact:
+    """A capability whose last step is an irreversible "Post". It binds no output, so it
+    declares none -- with E28's unbound-output check, `_artifact`'s default `balance`
+    output would otherwise turn every clean run below into OUTPUT_VALIDATION_FAILED.
+    """
     artifact = _artifact(steps=[
+        *leading,
         Step(id="s1", action="click", locator=loc("Post"), risk="irreversible",
              expects=[Expect(when=Matcher(role="heading", name_match="contains", name="Member "),
                              outcome="continue", source="observed")]),
     ])
+    artifact.outputs = {}
+    return artifact
+
+
+
+def test_a_repeated_idempotency_key_is_refused_on_the_second_call() -> None:
+    artifact = _irreversible_artifact()
     surface = FakeSurface(frames=[[node("button", name="Post"),
                                   node("heading", name="Member 12345")]])
     first = replay(artifact, {"member_id": "12345"}, surface, "embedded",
@@ -323,6 +337,276 @@ def test_a_navigate_target_denied_by_the_deployment_is_allowlist_violation() -> 
         Step(id="s1", action="navigate", target=Target(path="/account/close"), risk="safe"),
     ])
     deployment = DeploymentAllowlist(allowed_paths=["/"], denied_paths=["/account/close"])
+    result = replay(artifact, {"member_id": "12345"}, PoisonSurface(), "embedded",
+                    deployment=deployment)
+    assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
+
+
+# --- Fix round 1 -------------------------------------------------------------------------
+
+
+class DeadSurface(FakeSurface):
+    """A surface whose every post-resolution method raises: the browser is gone. `resolve`
+    still works so a step reaches `act` -- the point is what `_fail` does afterwards.
+    """
+
+    def act(self, action):
+        raise SurfaceError("the page crashed")
+
+    def pending_dialog(self):
+        raise SurfaceError("the page is gone")
+
+    def capture(self):
+        raise SurfaceError("the page is gone")
+
+
+class ResolveRaisesSurface(FakeSurface):
+    def resolve(self, locator):
+        raise SurfaceError("the frame detached during resolve")
+
+
+class ObserveRaisesSurface(FakeSurface):
+    """`resolve` and `act` work; the first `observe()` -- settle()'s -- raises."""
+
+    def observe(self):
+        raise SurfaceError("the context closed during settle")
+
+
+class RecordingSurface(FakeSurface):
+    def __init__(self, frames) -> None:
+        super().__init__(frames=frames)
+        self.actions: list = []
+
+    def act(self, action):
+        self.actions.append(action)
+        return super().act(action)
+
+
+def _member_frame(*extra: object) -> list[list]:
+    return [[node("button", name="Post"), node("button", name="Search"),
+             node("heading", name="Member 12345"), *extra]]
+
+
+# Finding 1 / E28: `_fail` is safe on a dead surface.
+
+def test_a_dead_surface_yields_session_lost_and_never_raises_out_of_replay() -> None:
+    artifact = _artifact(steps=[Step(id="s1", action="click", locator=loc("Search"), risk="safe")])
+    sink = FakeEvidenceSink()
+    result = replay(artifact, {"member_id": "12345"}, DeadSurface(frames=_member_frame()),
+                    "embedded", clock=FakeClock(), evidence=sink)
+    assert isinstance(result, Failure) and result.kind == "SESSION_LOST"
+    assert sink.frames == []
+
+
+# Finding 7 / E28: every SurfaceError, wherever it arises, becomes SESSION_LOST.
+
+def test_a_surface_error_from_resolve_is_session_lost() -> None:
+    artifact = _artifact(steps=[Step(id="s1", action="click", locator=loc("Search"), risk="safe")])
+    result = replay(artifact, {"member_id": "12345"}, ResolveRaisesSurface(frames=_member_frame()),
+                    "embedded", clock=FakeClock())
+    assert isinstance(result, Failure) and result.kind == "SESSION_LOST"
+
+
+def test_a_surface_error_from_settle_is_session_lost() -> None:
+    artifact = _artifact(steps=[Step(id="s1", action="click", locator=loc("Search"), risk="safe")])
+    result = replay(artifact, {"member_id": "12345"}, ObserveRaisesSurface(frames=_member_frame()),
+                    "embedded", clock=FakeClock())
+    assert isinstance(result, Failure) and result.kind == "SESSION_LOST"
+
+
+# Finding 2 / E27: the idempotency key is required, scoped, and burned at the act.
+
+def test_an_irreversible_step_without_an_idempotency_key_is_policy_blocked() -> None:
+    artifact = _irreversible_artifact()
+    result = replay(artifact, {"member_id": "12345"}, PoisonSurface(), "embedded",
+                    confirm_irreversible=True)
+    assert isinstance(result, Failure) and result.kind == "POLICY_BLOCKED"
+    assert "idempotency_key" in result.expected
+
+
+def test_the_same_key_is_accepted_for_a_different_artifact_id_or_version() -> None:
+    first = replay(_irreversible_artifact(), {"member_id": "12345"},
+                   FakeSurface(frames=_member_frame()), "embedded",
+                   confirm_irreversible=True, idempotency_key="k-1", clock=FakeClock())
+    assert isinstance(first, ReplaySuccess)
+
+    other_version = _irreversible_artifact()
+    other_version.version = 2
+    second = replay(other_version, {"member_id": "12345"}, FakeSurface(frames=_member_frame()),
+                    "embedded", confirm_irreversible=True, idempotency_key="k-1",
+                    clock=FakeClock())
+    assert isinstance(second, ReplaySuccess)
+
+    other_id = _irreversible_artifact()
+    other_id.id = "corebank.other"
+    third = replay(other_id, {"member_id": "12345"}, FakeSurface(frames=_member_frame()),
+                   "embedded", confirm_irreversible=True, idempotency_key="k-1",
+                   clock=FakeClock())
+    assert isinstance(third, ReplaySuccess)
+
+
+def test_a_replay_that_fails_before_the_irreversible_act_does_not_burn_the_key() -> None:
+    artifact = _irreversible_artifact(
+        Step(id="s0", action="click", locator=loc("Search"), risk="safe"),
+    )
+    # "Search" is absent: s0 fails with LOCATOR_NOT_FOUND before s1 ever acts.
+    first = replay(artifact, {"member_id": "12345"},
+                   FakeSurface(frames=[[node("button", name="Post")]]), "embedded",
+                   confirm_irreversible=True, idempotency_key="k-retry", clock=FakeClock())
+    assert isinstance(first, Failure) and first.kind == "LOCATOR_NOT_FOUND"
+
+    retry = replay(artifact, {"member_id": "12345"}, FakeSurface(frames=_member_frame()),
+                   "embedded", confirm_irreversible=True, idempotency_key="k-retry",
+                   clock=FakeClock())
+    assert isinstance(retry, ReplaySuccess)
+
+
+def test_a_replay_that_reaches_the_irreversible_act_burns_the_key_even_if_it_fails() -> None:
+    artifact = _irreversible_artifact()
+    first = replay(artifact, {"member_id": "12345"},
+                   FakeSurface(frames=_member_frame(), raise_on_act=SurfaceError("crashed")),
+                   "embedded", confirm_irreversible=True, idempotency_key="k-burn",
+                   clock=FakeClock())
+    assert isinstance(first, Failure) and first.kind == "SESSION_LOST"
+
+    retry = replay(artifact, {"member_id": "12345"}, PoisonSurface(), "embedded",
+                   confirm_irreversible=True, idempotency_key="k-burn", clock=FakeClock())
+    assert isinstance(retry, Failure) and retry.kind == "POLICY_BLOCKED"
+
+
+# Finding 3 / E28: a declared output left unbound is OUTPUT_VALIDATION_FAILED, never `{}`.
+
+def test_a_declared_output_that_no_step_binds_is_output_validation_failed() -> None:
+    artifact = _artifact(steps=[
+        Step(id="s1", action="read", into="balance", risk="safe",
+             expects=[Expect(when=Matcher(role="heading", name_match="contains", name="Member "),
+                             outcome="continue", source="observed")]),
+    ])
+    sink = FakeEvidenceSink()
+    result = replay(artifact, {"member_id": "12345"}, FakeSurface(frames=_member_frame()),
+                    "embedded", clock=FakeClock(), evidence=sink)
+    assert isinstance(result, Failure)
+    assert result.kind == "OUTPUT_VALIDATION_FAILED"
+    assert result.step_id is None
+    assert "balance" in result.observed
+    assert len(sink.frames) == 1
+
+
+# Finding 4 / E28: `_resolve_step_value` never raises.
+
+@pytest.mark.parametrize("declared_optional", [False, True])
+def test_a_from_input_naming_an_absent_input_is_invalid_input_before_the_surface(
+    declared_optional: bool,
+) -> None:
+    artifact = _artifact(steps=[
+        Step(id="s1", action="fill", locator=loc("Member ID"),
+             value={"from_input": "note"}, risk="safe"),
+    ])
+    if declared_optional:
+        artifact.inputs["note"] = InputSpec(type="string", required=False)
+    result = replay(artifact, {"member_id": "12345"}, PoisonSurface(), "embedded")
+    assert isinstance(result, Failure) and result.kind == "INVALID_INPUT"
+    assert result.step_id == "s1"
+    assert "note" in result.observed
+
+
+def test_a_from_step_naming_a_step_that_bound_nothing_is_precondition_failed() -> None:
+    artifact = _artifact(steps=[
+        Step(id="s1", action="click", locator=loc("Search"), risk="safe"),
+        Step(id="s2", action="fill", locator=loc("Member ID"),
+             value={"from_step": "s1"}, risk="safe"),
+    ])
+    sink = FakeEvidenceSink()
+    result = replay(artifact, {"member_id": "12345"},
+                    FakeSurface(frames=_member_frame(node("button", name="Member ID"))),
+                    "embedded", clock=FakeClock(), evidence=sink)
+    assert isinstance(result, Failure) and result.kind == "PRECONDITION_FAILED"
+    assert result.step_id == "s2"
+    assert len(sink.frames) == 1
+
+
+def test_a_from_step_is_resolved_by_the_producing_step_id() -> None:
+    artifact = _artifact(steps=[
+        Step(id="s1", action="read", locator=loc("Savings"), extract="value", parse="money",
+             into="balance", risk="safe"),
+        Step(id="s2", action="fill", locator=loc("Member ID"),
+             value={"from_step": "s1"}, risk="safe"),
+    ])
+    surface = RecordingSurface(frames=_member_frame(
+        node("button", name="Savings", value="4,218.60"), node("button", name="Member ID"),
+    ))
+    result = replay(artifact, {"member_id": "12345"}, surface, "embedded", clock=FakeClock())
+    assert isinstance(result, ReplaySuccess)
+    assert [a.value for a in surface.actions if a.kind == "fill"] == ["4218.60"]
+
+
+# Minor 6: an INVALID_INPUT from validate_inputs carries the replay's own evidence_ref.
+
+def test_an_invalid_input_failure_carries_the_replays_evidence_ref() -> None:
+    artifact = _artifact(steps=[
+        Step(id="s1", action="fill", locator=loc("Member ID"),
+             value={"from_input": "member_id"}, risk="safe"),
+    ])
+    sink = FakeEvidenceSink()
+    result = replay(artifact, {"member_id": "bad"}, PoisonSurface(), "embedded", evidence=sink)
+    assert isinstance(result, Failure) and result.kind == "INVALID_INPUT"
+    assert result.evidence_ref == sink.evidence_ref()
+
+
+# Minor 8: a matched fail clause's `expected` names what should have happened instead.
+
+def test_a_matched_fail_clause_expected_names_the_continue_clauses() -> None:
+    artifact = _artifact(steps=[
+        Step(id="s1", action="click", locator=loc("Search"), risk="safe",
+             expects=[
+                 Expect(when=Matcher(role="heading", name_match="contains", name="Ready"),
+                        outcome="continue", source="observed"),
+                 Expect(when=Matcher(strategy="text", name_match="contains",
+                                     name="Session Expired"),
+                        outcome="fail", code="SESSION_LOST", source="observed"),
+             ]),
+    ])
+    surface = FakeSurface(frames=[[node("button", name="Search"),
+                                  node("text", value="Session Expired")]])
+    result = replay(artifact, {"member_id": "12345"}, surface, "embedded", clock=FakeClock())
+    assert isinstance(result, Failure) and result.kind == "SESSION_LOST"
+    assert "Ready" in result.expected
+    assert "Session Expired" not in result.expected
+    assert "Session Expired" in result.observed
+
+
+def test_a_matched_fail_clause_with_no_continue_clause_names_the_checkpoint() -> None:
+    artifact = _artifact(steps=[
+        Step(id="s1", action="click", locator=loc("Search"), risk="safe",
+             expects=[Expect(when=Matcher(strategy="text", name_match="contains",
+                                         name="Session Expired"),
+                             outcome="fail", code="SESSION_LOST", source="observed")]),
+    ])
+    surface = FakeSurface(frames=[[node("button", name="Search"),
+                                  node("text", value="Session Expired")]])
+    result = replay(artifact, {"member_id": "12345"}, surface, "embedded", clock=FakeClock())
+    assert isinstance(result, Failure) and result.kind == "SESSION_LOST"
+    assert "Member " in result.expected
+    assert "Session Expired" not in result.expected
+
+
+# Minor 10: a navigate with no target is PRECONDITION_FAILED, never `Action(value="")`.
+
+def test_a_navigate_with_no_target_is_precondition_failed_before_the_surface() -> None:
+    artifact = _artifact(steps=[Step(id="s1", action="navigate", risk="safe")])
+    result = replay(artifact, {"member_id": "12345"}, PoisonSurface(), "embedded",
+                    clock=FakeClock())
+    assert isinstance(result, Failure) and result.kind == "PRECONDITION_FAILED"
+    assert result.step_id == "s1"
+
+
+# E29: the engine's navigate gate is `DeploymentAllowlist.permits_path`.
+
+def test_a_navigate_target_outside_every_allowed_prefix_is_allowlist_violation() -> None:
+    artifact = _artifact(steps=[
+        Step(id="s1", action="navigate", target=Target(path="/admin"), risk="safe"),
+    ])
+    deployment = DeploymentAllowlist(allowed_paths=["/teller/"])
     result = replay(artifact, {"member_id": "12345"}, PoisonSurface(), "embedded",
                     deployment=deployment)
     assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"

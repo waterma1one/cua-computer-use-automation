@@ -58,6 +58,21 @@ def test_the_protected_name_rule_has_exactly_one_implementation() -> None:
 
 
 def test_the_failure_kind_vocabulary_has_exactly_one_implementation() -> None:
-    from cua.artifact import models
-    from cua.replay import result
+    """E4'/E29: one vocabulary, one membership set, one expect-code check, one path rule.
+
+    `cua.artifact.validate` and `cua.replay.engine` each once carried a private
+    `_FAILURE_KINDS = frozenset(get_args(FailureKind))` and a private `_permits_path`, with
+    nothing holding the copies equal. The identity assertions are the load-bearing ones:
+    `is` says each module still resolves the rule to the one shared object, which is what
+    fails if either grows its own again.
+    """
+    from cua.artifact import models, validate
+    from cua.replay import engine, result
+
     assert result.FailureKind is models.FailureKind
+    assert validate.FAILURE_KINDS is models.FAILURE_KINDS
+    assert engine.expect_code_problem is validate.expect_code_problem
+    for module in (validate, engine):
+        assert not hasattr(module, "_FAILURE_KINDS")
+        assert not hasattr(module, "_permits_path")
+        assert not hasattr(module, "_denied_navigation_reason")

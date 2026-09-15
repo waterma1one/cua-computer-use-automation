@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
+import pytest
+
+from cua.replay.engine import _reset_idempotency_keys
 from cua.surface.base import Surface
 from cua.surface.locators import resolve_against
 from cua.surface.models import (
@@ -88,3 +92,14 @@ class FakeClock:
     def sleep_ms(self, ms: int) -> None:
         self.sleep_calls.append(ms)
         self._now_ms += ms
+
+
+@pytest.fixture(autouse=True)
+def _fresh_idempotency_keys() -> Iterator[None]:
+    """E27: the engine's seen-set of burned idempotency keys is process-lifetime state. Every
+    test starts from an empty set so a key one test burns can never refuse another test's
+    replay, whatever order the tests run in.
+    """
+    _reset_idempotency_keys()
+    yield
+    _reset_idempotency_keys()
