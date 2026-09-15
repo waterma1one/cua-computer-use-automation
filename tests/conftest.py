@@ -30,8 +30,14 @@ def live_mockapp():
     thread.join(timeout=5)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def browser():
+    # E30: module-scoped, not session-scoped -- the driver closes at the end of
+    # `tests/surface/test_web_surface.py` rather than staying open for the rest of the
+    # session, which is what let a second, independent `sync_playwright()` session
+    # (`cua.surface.web.launch_page`, exercised for real by `tests/test_cli.py`) collide
+    # with this one: Playwright's sync API allows only one open driver connection per OS
+    # thread at a time.
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as pw:
@@ -40,7 +46,7 @@ def browser():
         b.close()
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def browser_page(browser):
     page = browser.new_page()
     yield page
