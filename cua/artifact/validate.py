@@ -37,14 +37,15 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from typing import Any, Literal, get_args
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from cua.artifact.models import (
+    FAILURE_KINDS,
     Artifact,
     CapabilityPolicy,
-    FailureKind,
+    Expect,
     FromInput,
     FromStep,
     LiteralValue,
@@ -64,10 +65,25 @@ CRITERION_1_CODES: frozenset[str] = frozenset({
     "LITERAL_WITHOUT_LOCATOR",
 })
 
-# E4': the closed set a `fail` expect's `code` must name. Hoisted rather than computed inline
-# on every step/expect so the per-step loop below does one membership test against a constant,
-# not a fresh `get_args` call per expect.
-_FAILURE_KINDS: frozenset[str] = frozenset(get_args(FailureKind))
+def expect_code_problem(expect: Expect) -> str | None:
+    """What, if anything, is wrong with `expect.code` for its own `outcome` -- or `None`.
+
+    E29/D28: the one implementation of "is this expect's code well-formed", shared by this
+    module's per-step loop (`_step_findings`, below) and `cua.replay.engine`'s pre-loop scan
+    over an artifact that may have bypassed `load()` entirely. Two modules used to carry
+    byte-identical copies of this same two-branch check; a drift between them is exactly the
+    defect class E29 exists to close.
+
+    Returns the finding code (`"FAIL_CODE_NOT_A_FAILURE_KIND"` or
+    `"BUSINESS_CODE_MISSING"`) rather than a bool, since the caller needs the code either
+    way -- `validate.py` to build a `Finding`, `engine.py` to build a `POLICY_BLOCKED`
+    message.
+    """
+    if expect.outcome == "fail" and expect.code not in FAILURE_KINDS:
+        return "FAIL_CODE_NOT_A_FAILURE_KIND"
+    if expect.outcome == "business" and not expect.code:
+        return "BUSINESS_CODE_MISSING"
+    return None
 
 
 class Finding(BaseModel):
@@ -113,6 +129,20 @@ class DeploymentAllowlist(BaseModel):
     allowed_paths: list[str] = Field(default_factory=list)
     denied_paths: list[str] = Field(default_factory=list)
     allowed_actions: list[ActionKind] = Field(default_factory=list)
+
+    def permits_path(self, path: str) -> bool:
+        """Whether `path` is permitted by this deployment: deny-first, prefix-matched.
+
+        E29/D28: the one implementation of "is this single path permitted by this
+        deployment", a method on the type itself so phase 5 -- which must extend this
+        class rather than introduce a second allowlist shape -- inherits the check along
+        with the data. `_narrowing_findings` (below) and `cua.replay.engine`'s navigate
+        gate both call this instead of each carrying their own copy of the deny-then-allow
+        prefix walk.
+        """
+        if any(path.startswith(prefix) for prefix in self.denied_paths):
+            return False
+        return any(path.startswith(prefix) for prefix in self.allowed_paths)
 
 
 # The credential-name rule itself lives in `cua.surface.models.is_protected_name` (E6): one
@@ -281,13 +311,16 @@ def _step_findings(artifact: Artifact) -> list[Finding]:
                 ),
             ))
 
-        # E4'/E17: a `fail` clause's `code` names the failure kind it declares, and a
+        # E4'/E17/E29: a `fail` clause's `code` names the failure kind it declares, and a
         # `business` clause's `code` names the caller-facing business outcome. Neither
         # vocabulary is enforced at the model -- `Expect.code` is a plain `str | None` so
         # `business` and `fail` can share the one field -- so this is where an artifact
         # that names no failure kind, or an unknown one, is refused before replay.
+        # `expect_code_problem` is the one implementation of this check, shared with
+        # `cua.replay.engine`'s pre-loop scan.
         for expect in step.expects:
-            if expect.outcome == "fail" and expect.code not in _FAILURE_KINDS:
+            problem = expect_code_problem(expect)
+            if problem == "FAIL_CODE_NOT_A_FAILURE_KIND":
                 findings.append(Finding(
                     level="error", code="FAIL_CODE_NOT_A_FAILURE_KIND", where=where,
                     message=(
@@ -295,7 +328,7 @@ def _step_findings(artifact: Artifact) -> list[Finding]:
                         f"{expect.code!r} is not one of the declared FailureKind values"
                     ),
                 ))
-            if expect.outcome == "business" and not expect.code:
+            elif problem == "BUSINESS_CODE_MISSING":
                 findings.append(Finding(
                     level="error", code="BUSINESS_CODE_MISSING", where=where,
                     message=(
@@ -634,10 +667,6 @@ def _from_step_findings(artifact: Artifact) -> list[Finding]:
     return findings
 
 
-def _permits_path(path: str, prefixes: list[str]) -> bool:
-    return any(path.startswith(prefix) for prefix in prefixes)
-
-
 def _narrowing_findings(
     policy: CapabilityPolicy | None, deployment: DeploymentAllowlist
 ) -> list[Finding]:
@@ -670,7 +699,13 @@ def _narrowing_findings(
 
     findings: list[Finding] = []
     for path in policy.allowed_paths or []:
-        if _permits_path(path, deployment.denied_paths):
+        # E29: `deployment.permits_path` is the one implementation of the deny-first prefix
+        # rule and the only thing that decides. The deny prefixes are consulted again below
+        # solely to choose which of the two messages explains a refusal -- that lookup
+        # cannot change the verdict.
+        if deployment.permits_path(path):
+            continue
+        if any(path.startswith(prefix) for prefix in deployment.denied_paths):
             findings.append(Finding(
                 level="error", code="POLICY_WIDENS_ALLOWLIST", where="policy.allowed_paths",
                 message=(
@@ -678,7 +713,7 @@ def _narrowing_findings(
                     f"denies; deny rules are evaluated first and win"
                 ),
             ))
-        elif not _permits_path(path, deployment.allowed_paths):
+        else:
             findings.append(Finding(
                 level="error", code="POLICY_WIDENS_ALLOWLIST", where="policy.allowed_paths",
                 message=(

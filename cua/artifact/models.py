@@ -22,7 +22,7 @@ why neither field exists on `Artifact` here.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
@@ -131,6 +131,13 @@ FailureKind = Literal[
     "UNHANDLED_DIALOG", "POLICY_BLOCKED", "ESCALATION_TIMEOUT", "ESCALATION_UNAVAILABLE",
     "SESSION_LOST", "DURATION_EXCEEDED",
 ]
+
+# E29/D28: the closed set as a runtime frozenset, hoisted once here rather than computed by
+# every caller that needs a membership test. `cua.artifact.validate` and `cua.replay.engine`
+# both import this exact object (never their own `get_args(FailureKind)` copy) so a `fail`
+# expect's code is checked against one implementation of "what counts as a FailureKind" --
+# `tests/test_architecture.py` pins the identity on both sides.
+FAILURE_KINDS: frozenset[str] = frozenset(get_args(FailureKind))
 
 ExpectSource = Literal["observed", "proposed", "authored"]
 
