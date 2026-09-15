@@ -68,7 +68,12 @@ def _position_of(node: Node, nodes: list[Node]) -> int:
     raise ValueError("node is not a member of the given node list")
 
 
-def _name_matches(candidate: str | None, name: str | None, name_match: NameMatch) -> bool:
+def name_matches(candidate: str | None, name: str | None, name_match: NameMatch) -> bool:
+    """Whether `candidate` (a node's accessible name, value, or a bare dialog message)
+    satisfies `name` under `name_match`. Promoted alongside `matches` (E15) so
+    `cua.replay.settle` can check a plain string -- a dialog message, which is not a
+    `Node` -- against the same predicate a `Node`-based match uses, without duplicating it.
+    """
     if name is None:
         return candidate is None
     if candidate is None:
@@ -80,7 +85,7 @@ def _name_matches(candidate: str | None, name: str | None, name_match: NameMatch
     return candidate.startswith(name)  # "prefix"
 
 
-def _text_of(node: Node) -> str | None:
+def text_of(node: Node) -> str | None:
     """The text a `text`-strategy locator matches against: the accessible name when there
     is one, otherwise the node's literal value. `synthesize` only ever builds a `text`
     locator from `node.value` when `node.name` is already falsy (see `synthesize`), so this
@@ -99,15 +104,15 @@ def matches(node: Node, *, strategy: Strategy, role: str | None, name: str | Non
     so the role check is skipped rather than failing on a role that was never set. `ax_path`
     criteria may or may not carry a role, so the same "skip if None" rule covers both.
 
-    `text`-strategy criteria match against `_text_of` (name, falling back to value) rather
+    `text`-strategy criteria match against `text_of` (name, falling back to value) rather
     than `node.name` alone: a `text` locator synthesized from an unnamed node's `value`
     (phase 1's pinned unnamed-input hostile case) must be able to match that same node
     again, and `node.name` would never equal that value.
     """
     if role is not None and node.role != role:
         return False
-    candidate = _text_of(node) if strategy == "text" else node.name
-    return _name_matches(candidate, name, name_match)
+    candidate = text_of(node) if strategy == "text" else node.name
+    return name_matches(candidate, name, name_match)
 
 
 def _matches_locator(node: Node, loc: Locator) -> bool:
@@ -148,9 +153,9 @@ def _synthesize_matching(
         rationale="_",
         confidence="high",
     )
-    matches = [n for n in candidates if _matches_locator(n, base)]
+    hits = [n for n in candidates if _matches_locator(n, base)]
 
-    if len(matches) == 1:
+    if len(hits) == 1:
         return base.model_copy(update={
             "rationale": f"{identity} is unique on this surface.",
         })
@@ -170,25 +175,25 @@ def _synthesize_matching(
             rationale=f"the enclosing {ancestor.role} named '{ancestor.name}'.",
             confidence="high",
         )
-        scoped_matches = [n for n in matches if _contained_in(n, scope, candidates)]
+        scoped_matches = [n for n in hits if _contained_in(n, scope, candidates)]
         if len(scoped_matches) == 1:
             return base.model_copy(update={
                 "scope": scope,
                 "confidence": "medium",
                 "rationale": (
-                    f"{identity} is ambiguous alone ({len(matches)} matches); scoping to "
+                    f"{identity} is ambiguous alone ({len(hits)} matches); scoping to "
                     f"the enclosing {ancestor.role} \"{ancestor.name}\" makes it unique."
                 ),
             })
         # This ancestor does not disambiguate (every match shares it, or several
         # candidates carry the same ancestor name) -- try the next ancestor out.
 
-    ordinal = _position_of(node, matches)
+    ordinal = _position_of(node, hits)
     return base.model_copy(update={
         "ordinal": ordinal,
         "confidence": "low",
         "rationale": (
-            f"{identity} matches {len(matches)} controls and no enclosing ancestor "
+            f"{identity} matches {len(hits)} controls and no enclosing ancestor "
             f"disambiguates them; using its ordinal position ({ordinal}) among the matches. "
             "This should be reviewed -- ordinal locators are fragile against reordering."
         ),
@@ -252,23 +257,23 @@ def _resolve_direct(loc: Locator, nodes: list[Node]) -> Resolution:
     fallback list twice.
     """
     candidates = [n for n in nodes if n.surface_path == loc.surface_path]
-    matches = [n for n in candidates if _matches_locator(n, loc)]
+    hits = [n for n in candidates if _matches_locator(n, loc)]
 
     if loc.scope is not None:
-        matches = [n for n in matches if _contained_in(n, loc.scope, candidates)]
+        hits = [n for n in hits if _contained_in(n, loc.scope, candidates)]
 
     if loc.ordinal is not None:
-        matches = matches[loc.ordinal : loc.ordinal + 1]
+        hits = hits[loc.ordinal : loc.ordinal + 1]
 
-    if len(matches) == 1:
-        node = matches[0]
+    if len(hits) == 1:
+        node = hits[0]
         which = _failed_precondition(node, loc.require)
         if which is not None:
             return PreconditionFailed(which=which)
         return Unique(node=node)
 
-    if matches:
-        return Ambiguous(count=len(matches))
+    if hits:
+        return Ambiguous(count=len(hits))
 
     return NotFound(
         reason=(

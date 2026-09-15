@@ -170,7 +170,7 @@ def _is_relevant(node: Node) -> bool:
 
 def _text_of(node: Node) -> str | None:
     """The text a `text`-role node is identified by when mapping it to a live handle:
-    mirrors `cua.surface.locators._text_of` (name, falling back to value), because a
+    mirrors `cua.surface.locators.text_of` (name, falling back to value), because a
     `text`-strategy locator's resolved node is matched against exactly that text.
     """
     return node.name if node.name else node.value
