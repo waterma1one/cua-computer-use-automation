@@ -18,6 +18,15 @@ def test_only_surface_may_import_a_browser_driver() -> None:
                 assert f"from {name}" not in text, f"{path} imports {name}"
 
 
+def test_the_cli_does_not_import_playwright_directly() -> None:
+    path = Path("cua/cli.py")
+    if not path.exists():
+        pytest.skip("phase 4 has not landed yet")
+    text = path.read_text().lower()
+    assert "import playwright" not in text
+    assert "from playwright" not in text
+
+
 def test_the_boundary_check_can_actually_detect_an_import() -> None:
     # Without this, the test above passes vacuously until the pure packages exist, and a test
     # that cannot fail is not a test. Once phase 2 lands, this asserts the detector works by
