@@ -654,6 +654,11 @@ def test_the_cli_hands_the_engine_the_narrowed_allowlist_the_registry_status_and
     assert seen["routed"] == "**/*"
     assert seen["guard"]("http://127.0.0.1:1/member/1") is None
     assert seen["guard"]("http://127.0.0.1:1/account/close") is not None
+    # The discriminating case. The policy file allows `/` and denies `/account/close`, so
+    # the two assertions above hold whether or not the artifact's own policy narrowed
+    # anything. `/statement/1` sits inside the file's `/` and outside the narrowed
+    # `/member/`, so only a guard built on the *narrowed* allowlist refuses it.
+    assert seen["guard"]("http://127.0.0.1:1/statement/1") is not None
 
 
 def test_an_approved_registry_entry_reaches_the_engine_as_approved(tmp_path, monkeypatch) -> None:

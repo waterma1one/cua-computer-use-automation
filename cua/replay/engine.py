@@ -152,6 +152,30 @@ def _shown(value: object, spec: InputSpec) -> str:
     return _REDACTION_MARKER if spec.sensitive else repr(value)
 
 
+def _mask_sensitive_inputs(run: _Run, text: str) -> str:
+    """`text` with every `sensitive` input's literal value replaced by `[REDACTED]`.
+
+    E31 covers text this module *composes*, where the value and its `InputSpec` are in
+    hand (`_shown`). This covers text this module *receives* -- a surface's violation
+    reason, built around a URL whose query string may carry whatever was typed into a GET
+    form. Only a declared value can be recognised, so the check is a plain substring
+    replace over the declared sensitive values.
+
+    The same trade-off `cua.surface.snapshot.scrub_protected_values` states: a global
+    textual replace cannot tell the credential from unrelated text that happens to contain
+    it, so an ordinary word colliding with a short password is masked too. A visibly
+    redacted sentence is the acceptable half of that; a credential written to evidence is
+    not. An empty value matches everywhere and is skipped.
+    """
+    for name, spec in run.artifact.inputs.items():
+        if not spec.sensitive or name not in run.inputs:
+            continue
+        value = str(run.inputs[name])
+        if value and value in text:
+            text = text.replace(value, _REDACTION_MARKER)
+    return text
+
+
 def validate_inputs(artifact: Artifact, inputs: dict[str, object]) -> Failure | None:
     """E10/E22: checks `inputs` against `artifact.inputs` and returns an `INVALID_INPUT`
     `Failure`, or `None` if every declared input is satisfied.
@@ -278,6 +302,13 @@ def _violation(run: _Run, step_id: str | None) -> Failure | None:
     the caller skips this call rather than asking again -- re-reading a sticky violation
     would only duplicate the `allowlist_violation` event and the captured frame that the
     first read already produced.
+
+    E31, extended: the reason is a sentence the surface composed around a URL, and a URL
+    carries a query string. A sensitive input filled into a GET form is therefore in the
+    reason verbatim, and nothing downstream can recover it -- the evidence redaction pass
+    matches PII *shapes*, and a password has no shape. So the values of this artifact's
+    `sensitive` inputs are masked here, at the one place that still knows which string was
+    a credential, before the reason reaches either the trace event or the `Failure`.
     """
     try:
         reason = run.surface.allowlist_violation()
@@ -285,6 +316,7 @@ def _violation(run: _Run, step_id: str | None) -> Failure | None:
         return None
     if reason is None:
         return None
+    reason = _mask_sensitive_inputs(run, reason)
     run.sink.event(kind="allowlist_violation", step_id=step_id, reason=reason)
     return run.fail(
         "ALLOWLIST_VIOLATION", step_id,
@@ -491,6 +523,11 @@ def _prepare_action(run: _Run, step: Step) -> tuple[Action, Node | None] | Failu
     Every other action: `resolve` first, translating `NotFound`/`Ambiguous`/
     `PreconditionFailed` directly (`capture=True` -- the surface was just asked), then the
     value. Returns the resolved `Node` alongside the action so extraction reads from it.
+
+    E3 applies to `resolve` exactly as it applies to `act` and to settle: `resolve` is a
+    blocking surface call, so a violation the surface recorded while it ran wins over
+    every one of the four resolution failures. A frozen page resolves nothing -- reporting
+    that as `LOCATOR_NOT_FOUND` would name the symptom and bury the cause.
     """
     if step.action == "navigate":
         if step.target is None:
@@ -500,14 +537,21 @@ def _prepare_action(run: _Run, step: Step) -> tuple[Action, Node | None] | Failu
             )
         path = step.target.path
         if run.deployment is not None and not run.deployment.permits_path(path):
+            # Minor 6: the same rule explained the same way at both layers. A denied path
+            # and a path nobody allowed are different refusals, and
+            # `cua.policy.allowlist.check_navigation` already says which is which for the
+            # live case; the static case must not invent a third sentence for it.
+            denied = run.deployment.denying_prefix(path)
+            if denied is not None:
+                observed = (f"path {path!r} is denied by prefix {denied!r} "
+                            "(deny rules are evaluated first and win)")
+            else:
+                observed = (f"path {path!r} is outside every allowed prefix "
+                            f"{run.deployment.allowed_paths!r}")
             return run.fail(
                 "ALLOWLIST_VIOLATION", step.id,
                 "the navigate target is permitted by the deployment allowlist",
-                (
-                    f"path {path!r} is not permitted by the deployment allowlist "
-                    "(deny prefixes are evaluated first and win)"
-                ),
-                capture=False,
+                observed, capture=False,
             )
         return Action(kind="navigate", locator=None, value=path), None
 
@@ -516,10 +560,20 @@ def _prepare_action(run: _Run, step: Step) -> tuple[Action, Node | None] | Failu
         try:
             resolution = run.surface.resolve(step.locator)
         except SurfaceError as exc:
+            violated = _violation(run, step.id)
+            if violated is not None:
+                return violated
             return run.fail(
                 "SESSION_LOST", step.id, "the surface resolves the locator without error",
                 str(exc), capture=True,
             )
+        if resolution.kind != "unique":
+            # Asked only on the failing branches: `_violation` records an event and a
+            # frame, so asking on the success path would either report a violation the
+            # post-`act` check is about to report anyway, or emit an event for nothing.
+            violated = _violation(run, step.id)
+            if violated is not None:
+                return violated
         if resolution.kind == "not_found":
             return run.fail(
                 "LOCATOR_NOT_FOUND", step.id, _describe_locator(step.locator),
@@ -634,7 +688,7 @@ def _translate_outcome(
         return run.fail(
             "ALLOWLIST_VIOLATION", step_id,
             "every navigation the application initiates stays inside the deployment allowlist",
-            outcome.reason, capture=True,
+            _mask_sensitive_inputs(run, outcome.reason), capture=True,
         )
     # The only BranchOutcome variant left is TimedOut.
     return run.fail(

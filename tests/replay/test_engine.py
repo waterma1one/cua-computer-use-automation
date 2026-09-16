@@ -16,6 +16,7 @@ from cua.artifact.models import (
     Target,
 )
 from cua.artifact.validate import DeploymentAllowlist
+from cua.policy.allowlist import check_navigation
 from cua.replay.engine import replay, validate_inputs
 from cua.replay.result import BusinessOutcome, Failure
 from cua.replay.result import Success as ReplaySuccess
@@ -929,3 +930,160 @@ def test_an_unhandled_dialog_is_recorded_as_well_as_routed() -> None:
     assert isinstance(result, Failure) and result.kind == "UNHANDLED_DIALOG"
     assert {"kind": "dialog", "step_id": "s1", "message": "Unexpected dialog",
             "handling": "unhandled"} in sink.events
+
+
+# --- Final review fix wave ------------------------------------------------------------------
+
+# Finding 2 / E3: `resolve` is a blocking surface call like `act` and settle, so a
+# violation recorded while it ran wins over any of its four failure translations.
+
+def test_a_violation_recorded_during_resolve_wins_over_locator_not_found() -> None:
+    class FreezingResolveSurface(FakeSurface):
+        def resolve(self, locator):
+            # The live case: the page navigated itself somewhere denied while the engine
+            # was reaching for a control, so the frozen page resolves nothing.
+            self.violation = "the application navigated to '/elsewhere', which is refused"
+            return super().resolve(locator)
+
+    artifact = _artifact(steps=[Step(id="s1", action="click", locator=loc("Search"),
+                                     risk="safe")])
+    sink = FakeEvidenceSink()
+    surface = FreezingResolveSurface(frames=[[node("heading", name="Member 12345")]])
+    result = replay(artifact, {"member_id": "12345"}, surface, "embedded", clock=FakeClock(),
+                    evidence=sink)
+    assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
+    assert result.step_id == "s1"
+    assert "/elsewhere" in result.observed
+    assert [name for _frame, name in sink.frames] == ["s1"]
+
+
+def test_a_violation_recorded_during_resolve_wins_over_ambiguous_locator() -> None:
+    class FreezingResolveSurface(FakeSurface):
+        def resolve(self, locator):
+            self.violation = "the application navigated to '/elsewhere', which is refused"
+            return super().resolve(locator)
+
+    artifact = _artifact(steps=[Step(id="s1", action="click", locator=loc("Search"),
+                                     risk="safe")])
+    surface = FreezingResolveSurface(frames=[[node("button", name="Search", index=0),
+                                              node("button", name="Search", index=1)]])
+    result = replay(artifact, {"member_id": "12345"}, surface, "embedded", clock=FakeClock())
+    assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
+
+
+def test_a_violation_recorded_when_resolve_raises_wins_over_session_lost() -> None:
+    class FreezingResolveSurface(FakeSurface):
+        def resolve(self, locator):
+            self.violation = "the application navigated to '/elsewhere', which is refused"
+            raise SurfaceError("the frame detached during resolve")
+
+    artifact = _artifact(steps=[Step(id="s1", action="click", locator=loc("Search"),
+                                     risk="safe")])
+    result = replay(artifact, {"member_id": "12345"},
+                    FreezingResolveSurface(frames=[[]]), "embedded", clock=FakeClock())
+    assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
+
+
+def test_a_clean_resolve_reports_no_violation_event_of_its_own() -> None:
+    # The violation check sits on the failing branches only: `_violation` records an event
+    # and a frame, so asking on the success path would double-report what the post-`act`
+    # check reports anyway.
+    class RedirectingSurface(FakeSurface):
+        def act(self, action):
+            self.violation = "the application navigated to '/elsewhere', which is refused"
+            return super().act(action)
+
+    artifact = _artifact(steps=[Step(id="s1", action="click", locator=loc("Search"),
+                                     risk="safe")])
+    sink = RecordingSink()
+    surface = RedirectingSurface(frames=[[node("button", name="Search")]])
+    result = replay(artifact, {"member_id": "12345"}, surface, "embedded", clock=FakeClock(),
+                    evidence=sink)
+    assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
+    assert len([e for e in sink.events if e["kind"] == "allowlist_violation"]) == 1
+    assert len(sink.frames) == 1
+
+
+# Finding 4: a sensitive input's value can reach a URL's query string through a GET form,
+# and from there into the surface's violation reason. The shape-based evidence redaction
+# cannot recognise a password, so the engine masks it where the declaration is still known.
+
+def test_a_sensitive_inputs_value_never_reaches_a_violation_failure_or_event() -> None:
+    class GetFormSurface(FakeSurface):
+        def act(self, action):
+            # What `cua.surface.web._display_url` renders for a GET form submission: the
+            # query string is kept, so whatever was typed is in the sentence verbatim.
+            self.violation = (
+                "the application navigated to "
+                "'http://127.0.0.1:8000/account/close?password=hunter2', which is refused "
+                "(path '/account/close' is denied by prefix '/account/close')"
+            )
+            return super().act(action)
+
+    artifact = _artifact(steps=[
+        Step(id="s1", action="fill", locator=loc("Password"), value={"from_input": "password"},
+             risk="safe"),
+    ])
+    artifact.outputs = {}
+    artifact.inputs = {"password": InputSpec(type="string", required=True, sensitive=True)}
+    sink = RecordingSink()
+    surface = GetFormSurface(frames=[[node("button", name="Password")]])
+    result = replay(artifact, {"password": "hunter2"}, surface, "embedded", clock=FakeClock(),
+                    evidence=sink)
+    assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
+    assert "hunter2" not in result.observed
+    assert "[REDACTED]" in result.observed
+    # The rest of the sentence survives: the refusal is still diagnosable.
+    assert "/account/close" in result.observed
+    for event in sink.events:
+        assert "hunter2" not in repr(event), event
+
+
+def test_an_ordinary_inputs_value_is_left_in_a_violation_reason() -> None:
+    # Masking is for declared credentials only; a member id in a URL is the diagnosis.
+    class RedirectingSurface(FakeSurface):
+        def act(self, action):
+            self.violation = "the application navigated to '/member/12345', which is refused"
+            return super().act(action)
+
+    artifact = _artifact(steps=[Step(id="s1", action="click", locator=loc("Search"),
+                                     risk="safe")])
+    surface = RedirectingSurface(frames=[[node("button", name="Search")]])
+    result = replay(artifact, {"member_id": "12345"}, surface, "embedded", clock=FakeClock())
+    assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
+    assert "/member/12345" in result.observed
+
+
+# Finding 1, at the seam that carried it: the engine hands `Step.target.path` whole --
+# query included -- to `permits_path`.
+
+def test_a_query_string_on_a_navigate_target_cannot_escape_a_deny_prefix() -> None:
+    artifact = _artifact(steps=[
+        Step(id="s1", action="navigate", target=Target(path="/account/close?x=/../../foo"),
+             risk="safe"),
+    ])
+    deployment = DeploymentAllowlist(allowed_paths=["/"], denied_paths=["/account/close"],
+                                     allowed_actions=["navigate"])
+    result = replay(artifact, {"member_id": "12345"}, PoisonSurface(), "embedded",
+                    deployment=deployment)
+    assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
+    assert "denied by prefix '/account/close'" in result.observed
+
+
+# Minor 6: one rule, one explanation. The static target gate and `check_navigation` say
+# the same sentence about the same refusal.
+
+def test_the_static_navigate_gate_explains_a_refusal_the_way_check_navigation_does() -> None:
+    deployment = DeploymentAllowlist(
+        allowed_origins=["http://127.0.0.1:8000"], allowed_paths=["/teller/"],
+        denied_paths=["/teller/admin/"], allowed_actions=["navigate"],
+    )
+    for path in ("/teller/admin/close", "/admin"):
+        artifact = _artifact(steps=[
+            Step(id="s1", action="navigate", target=Target(path=path), risk="safe"),
+        ])
+        result = replay(artifact, {"member_id": "12345"}, PoisonSurface(), "embedded",
+                        deployment=deployment)
+        assert isinstance(result, Failure)
+        assert result.observed == check_navigation(
+            f"http://127.0.0.1:8000{path}", deployment).reason
