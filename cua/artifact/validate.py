@@ -35,10 +35,11 @@ claimed.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from collections.abc import Iterator
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -110,11 +111,50 @@ class Finding(BaseModel):
     where: str | None = None
 
 
+_REPEATED_SLASHES = re.compile(r"/{2,}")
+
+
+def _normalise_path(path: str) -> str:
+    """The path as a routing layer would see it: percent-decoded, repeated slashes
+    collapsed, `.`/`..` segments resolved, leading slash kept. A deny prefix compared
+    against the raw text is bypassed by `//account/close` or `/%2Faccount/close`; deny
+    rules that are evaluated first must also be evaluated on what the server will route.
+
+    A query string glued to the path (`cua.replay.engine` passes `target.path` whole, e.g.
+    `/account/close?number=1`) is percent-decoded along with it -- harmless, since the
+    prefix comparison this feeds only cares about the leading segments, which a query
+    string never changes.
+    """
+    decoded = _REPEATED_SLASHES.sub("/", unquote(path))
+    normalised = posixpath.normpath(decoded) if decoded else "/"
+    if not normalised.startswith("/"):
+        normalised = "/" + normalised
+    if decoded.endswith("/") and not normalised.endswith("/"):
+        # keep a trailing slash: a prefix such as `/teller/` must still match `/teller/`
+        normalised += "/"
+    return normalised
+
+
 def _normalise_origin(origin: str) -> str:
-    parts = urlsplit(origin.strip().rstrip("/"))
-    if parts.scheme and parts.netloc:
-        return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+    normalised = origin_of(origin.strip().rstrip("/"))
+    if normalised is not None:
+        return normalised
     return origin.strip().rstrip("/").lower()
+
+
+def origin_of(url: str) -> str | None:
+    """The origin `scheme://host[:port]` of `url`, built from `hostname`/`port` alone --
+    never `netloc` -- so a userinfo component (`user:pw@host`) can never reach anything
+    derived from this, including an error message. `None` if `url` has no scheme or host.
+    `urlsplit` already lower-cases both `scheme` and `hostname`.
+    """
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.hostname:
+        return None
+    origin = f"{parts.scheme}://{parts.hostname}"
+    if parts.port is not None:
+        origin += f":{parts.port}"
+    return origin
 
 
 class DeploymentAllowlist(BaseModel):
@@ -141,7 +181,9 @@ class DeploymentAllowlist(BaseModel):
     allowed_actions: list[ActionKind] = Field(default_factory=list)
 
     def permits_path(self, path: str) -> bool:
-        """Whether `path` is permitted by this deployment: deny-first, prefix-matched.
+        """Whether `path` is permitted by this deployment: deny-first, prefix-matched, on
+        `path` normalised (`_normalise_path`) before either walk -- a deny prefix compared
+        against raw text is bypassed by `//account/close` or `/%2Faccount/close`.
 
         E29/D28: the one implementation of "is this single path permitted by this
         deployment", a method on the type itself so phase 5 -- which must extend this
@@ -150,6 +192,7 @@ class DeploymentAllowlist(BaseModel):
         gate both call this instead of each carrying their own copy of the deny-then-allow
         prefix walk.
         """
+        path = _normalise_path(path)
         if any(path.startswith(prefix) for prefix in self.denied_paths):
             return False
         return any(path.startswith(prefix) for prefix in self.allowed_paths)
@@ -161,9 +204,10 @@ class DeploymentAllowlist(BaseModel):
         return _normalise_origin(origin) in {_normalise_origin(o) for o in self.allowed_origins}
 
     def permits_url(self, url: str) -> bool:
-        """Whether a full URL is permitted: only `http`/`https` can be; the origin must be
-        listed; then `permits_path` on the URL's path (query excluded -- the deny prefix
-        `/account/close` must catch `/account/close?number=1`).
+        """Whether a full URL is permitted: only `http`/`https` can be; the origin --
+        credentials always dropped, `origin_of` -- must be listed; then `permits_path` on
+        the URL's path (query excluded -- the deny prefix `/account/close` must catch
+        `/account/close?number=1`).
 
         Phase 5 / E1: the one implementation of "is this live URL permitted", built on the
         one path rule. `cua.policy.allowlist.check_navigation` explains a refusal; this
@@ -172,7 +216,8 @@ class DeploymentAllowlist(BaseModel):
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https") or not parts.netloc:
             return False
-        if not self.permits_origin(f"{parts.scheme}://{parts.netloc}"):
+        origin = origin_of(url)
+        if origin is None or not self.permits_origin(origin):
             return False
         return self.permits_path(parts.path or "/")
 

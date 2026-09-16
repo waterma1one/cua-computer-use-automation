@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from cua.artifact.models import FailureKind, RegistryStatus, Risk
-from cua.artifact.validate import DeploymentAllowlist
+from cua.artifact.validate import DeploymentAllowlist, origin_of
 from cua.surface.base import NavigationGuard
 from cua.surface.models import ActionKind
 
@@ -42,7 +42,7 @@ def check_navigation(url: str, allowlist: DeploymentAllowlist) -> Decision:
     if allowlist.permits_url(url):
         return _PERMITTED
     parts = urlsplit(url)
-    origin = f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else url
+    origin = origin_of(url) or url
     if parts.scheme not in ("http", "https") or not allowlist.permits_origin(origin):
         reason = f"origin {origin!r} is not an allowed origin"
     else:
