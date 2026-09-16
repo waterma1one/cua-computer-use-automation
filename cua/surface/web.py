@@ -276,11 +276,16 @@ def _display_url(url: str) -> str:
     reads (evidence, `SurfaceError` messages) -- a credential embedded in the URL itself
     (`http://user:pw@host/...`) must never appear there. Standard library only: this is
     the surface's own rendering concern, not `cua.policy`'s (the guard it calls still
-    receives the original `url` and strips userinfo itself when it builds an origin)."""
+    receives the original `url` and strips userinfo itself when it builds an origin).
+
+    Cuts the netloc's own `...@` prefix (`rpartition` on `@`, keeping the tail) rather
+    than re-parsing it via `hostname`/`port` -- re-parsing drops an IPv6 host's brackets
+    and can raise `ValueError` on a malformed port before `route.abort` ever runs, which
+    would surface as an unhandled exception out of a Playwright event handler instead of
+    a denial.
+    """
     parts = urlsplit(url)
-    netloc = parts.hostname or ""
-    if parts.port is not None:
-        netloc = f"{netloc}:{parts.port}"
+    netloc = parts.netloc.rpartition("@")[2]
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
@@ -292,6 +297,11 @@ class WebSurface:
     first denial freezes the surface (`allowlist_violation()` becomes non-`None`; every
     later `act`/`act_on_index` raises `SurfaceError`). `None` (the default) leaves the
     surface unenforced, which is what phase-2/4 fixtures still construct.
+
+    Constructing two guarded `WebSurface`s on pages that share one browser context is not
+    supported: `page.context.route(...)` is registered per context, so the second
+    surface's handler replaces the first's rather than adding to it, and only the second
+    surface's guard is actually enforced. Each guarded surface needs its own context.
     """
 
     def __init__(
@@ -322,10 +332,15 @@ class WebSurface:
         # sees every navigation request the page itself initiates -- link, form, `goto`,
         # and a popup's first request (which a page-level route would miss) -- and aborts a
         # denied one before it leaves, so the mutating GET never reaches the server.
-        # `framenavigated` sees what interception cannot: a server redirect whose hop is
-        # followed inside the browser and lands on a denied URL. That request has already
-        # fired by the time it is visible; it is detected and the surface frozen, and the
-        # write-up states that as the cost. Every frame is checked, not only the main one.
+        # `is_navigation_request()` in `_on_route` means a subresource fetched by the page
+        # (a script, an image, an XHR/fetch) is never gated here -- only a request that
+        # would change what URL the frame is on. `framenavigated` sees what interception
+        # cannot: a server redirect whose hop is followed inside the browser and lands on a
+        # denied URL. That request has already fired by the time it is visible; it is
+        # detected and the surface frozen, and the write-up states that as the cost. Every
+        # frame on every page the context opens is checked (`_on_new_page` extends
+        # `framenavigated` to a popup, which is a separate `Page` on the same context) --
+        # not only the main frame of the one page this surface was constructed with.
         # `None` means unenforced (what phase-2/4 fixtures construct); the CLI always
         # supplies a guard.
         self._guard = navigation_guard
@@ -333,9 +348,17 @@ class WebSurface:
         if navigation_guard is not None:
             self.page.context.route("**/*", self._on_route)
             self.page.on("framenavigated", self._on_frame_navigated)
+            self.page.context.on("page", self._on_new_page)
 
     def _on_dialog(self, dialog: Dialog) -> None:
         self._pending_dialog = dialog
+
+    def _on_new_page(self, page: Page) -> None:
+        # A popup (`target=_blank`, `window.open`) is a page of the same context. Its first
+        # request is already intercepted at the context route, but a server redirect it
+        # follows is visible only to its own `framenavigated`, so the detection point is
+        # attached to every page the context opens, not only the one this surface drives.
+        page.on("framenavigated", self._on_frame_navigated)
 
     def _deny_reason(self, url: str) -> str | None:
         """The guard's verdict for `url`, or `None`. Only `http`/`https` URLs are checked
@@ -348,7 +371,7 @@ class WebSurface:
         try:
             return self._guard(url)
         except Exception as exc:  # fail closed on any guard failure, whatever it is
-            return f"the navigation guard failed on {url!r}: {exc}"
+            return f"the navigation guard failed on {_display_url(url)!r}: {exc}"
 
     def _freeze(self, reason: str) -> None:
         if self._violation is None:

@@ -16,6 +16,7 @@ a local live-snapshot capture file; the close control is
 `link "Close this account"` and its `/url` is `/account/close?number=000100045512-01`.
 """
 import contextlib
+from typing import Any, cast
 
 import pytest
 
@@ -123,7 +124,9 @@ def test_a_server_redirect_onto_a_denied_path_is_detected_and_freezes(page, live
     assert surface.act(Action(kind="fill", locator=member_id, value="12345")).ok
     assert surface.act(Action(kind="click", locator=search)).ok
     violation = surface.allowlist_violation()
-    assert violation is not None and "'/member/12345'" in violation
+    assert violation is not None
+    assert "the application navigated to" in violation and "'/member/12345'" in violation
+    assert page.url.endswith("/member/12345")  # the GET fired and committed -- E2's cost
     with pytest.raises(SurfaceError, match="frozen"):
         surface.act(Action(kind="click", locator=search))
 
@@ -139,6 +142,28 @@ def test_a_child_frame_navigation_is_checked_too(page, live_mockapp) -> None:
         surface.act(Action(kind="navigate", locator=None, value="/"))
     violation = surface.allowlist_violation()
     assert violation is not None and "'/nav'" in violation
+
+
+def test_a_popups_redirect_onto_a_denied_path_is_detected(page, live_mockapp) -> None:
+    # Interception never sees a redirect hop (probed), and a popup is not the page this
+    # surface drives; only a `framenavigated` listener on the popup itself can catch its
+    # 303 onto a denied path. The login cookie is shared by the context.
+    _login(page)
+    surface = WebSurface(page, ObservationBudget(max_nodes=200),
+                         navigation_guard=navigation_guard(
+                             _deployment(live_mockapp, denied_paths=["/member/"])))
+    with page.expect_popup() as opened:
+        page.evaluate("window.open('/search')")
+    popup = opened.value
+    popup.wait_for_load_state("networkidle")
+    assert surface.allowlist_violation() is None  # /search itself is permitted
+    popup.get_by_role("textbox", name="Member ID", exact=True).fill("12345")
+    popup.get_by_role("button", name="Search", exact=True).click()
+    popup.wait_for_load_state("networkidle")
+    violation = surface.allowlist_violation()
+    assert violation is not None
+    assert "the application navigated to" in violation and "'/member/12345'" in violation
+    popup.close()
 
 
 def test_a_guard_that_raises_denies_rather_than_permits(page, live_mockapp) -> None:
@@ -172,3 +197,47 @@ def test_a_violation_reason_never_carries_userinfo(page, live_mockapp) -> None:
     assert violation is not None
     assert "pw" not in violation
     assert "127.0.0.1:1" in violation
+
+
+def exploding(url: str) -> str | None:
+    raise RuntimeError("boom")
+
+
+def test_a_raising_guards_reason_never_carries_userinfo_either(page, live_mockapp) -> None:
+    # Important 1: the third URL-rendering site (`_deny_reason`'s own failure message)
+    # must strip userinfo too, not only the two `_freeze` call sites.
+    surface = WebSurface(page, navigation_guard=exploding)
+    with pytest.raises(SurfaceError):
+        surface.act(Action(kind="navigate", locator=None, value="http://user:pw@127.0.0.1:1/"))
+    violation = surface.allowlist_violation()
+    assert violation is not None
+    assert "pw" not in violation
+    assert "boom" in violation
+
+
+def test_display_url_keeps_ipv6_brackets() -> None:
+    from cua.surface.web import _display_url
+
+    assert _display_url("http://u:p@[::1]:8000/x") == "http://[::1]:8000/x"
+
+
+def test_freeze_is_first_wins() -> None:
+    # No browser needed: a minimal fake page satisfies only what `__init__` touches when
+    # a guard is supplied.
+    class _FakeContext:
+        def route(self, pattern: str, handler: object) -> None:
+            pass
+
+        def on(self, event: str, handler: object) -> None:
+            pass
+
+    class _FakePage:
+        context = _FakeContext()
+
+        def on(self, event: str, handler: object) -> None:
+            pass
+
+    surface = WebSurface(cast(Any, _FakePage()), navigation_guard=lambda url: "denied")
+    surface._freeze("first")
+    surface._freeze("second")
+    assert surface.allowlist_violation() == "first"

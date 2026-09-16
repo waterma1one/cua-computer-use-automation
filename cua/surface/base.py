@@ -114,7 +114,14 @@ class Surface(Protocol):
         `SurfaceError` (the session is frozen -- spec §6.1, criterion 2) while `observe`,
         `capture` and `pending_dialog` keep working so the failure can be evidenced.
 
-        Phase 5 / E3: the replay engine checks this after every `act` and after every
-        settle, ahead of any other interpretation of what the surface returned or raised.
+        Phase 5 / E3: the replay engine checks this after every `act`, after every step's
+        settle, and after the checkpoint settle -- three points, ahead of any other
+        interpretation of what the surface returned or raised.
+
+        A violation is guaranteed to be visible only after a subsequent blocking surface
+        call. A concrete surface's `fill`/`select` do not themselves wait for a navigation
+        an input triggers (e.g. an `onchange` handler that submits a form) -- Playwright's
+        own default for those actions -- so a hop like that may not be recorded until the
+        next `observe()` or `act()` actually blocks on it.
         """
         ...
