@@ -35,7 +35,10 @@ def test_write_run_masks_a_sensitive_input(tmp_path) -> None:
     assert data["inputs"]["password"] == "[REDACTED]"
 
 
-def test_write_result_serializes_the_replayresult_exactly(tmp_path) -> None:
+def test_write_result_writes_an_unshaped_unredacted_result_through_unchanged(tmp_path) -> None:
+    # Not "exactly": Task 1 made `write_result` mask `redact`-flagged outputs and pattern-
+    # filter everything it writes. This fixture's value is neither flagged nor PII-shaped,
+    # so it survives -- which is the property being pinned here.
     writer = EvidenceWriter(tmp_path)
     result = Success(outputs={"balance": "4218.60"}, steps_run=["s1", "s2"],
                      evidence_ref=writer.evidence_ref())
