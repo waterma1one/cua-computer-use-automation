@@ -54,6 +54,8 @@ class PoisonSurface:
         raise AssertionError("a page was created: act_on_index() was called")
     def pending_dialog(self):
         raise AssertionError("a page was created: pending_dialog() was called")
+    def allowlist_violation(self):
+        raise AssertionError("a page was created: allowlist_violation() was called")
 
 
 class FakeEvidenceSink:

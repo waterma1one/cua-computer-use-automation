@@ -106,3 +106,15 @@ class Surface(Protocol):
         importing `cua.surface.web` (the only module allowed to import Playwright).
         """
         ...
+
+    def allowlist_violation(self) -> str | None:
+        """The reason the deployment allowlist refused an application-initiated navigation
+        on this surface, or `None` if none has occurred. Sticky: the first violation is the
+        one reported for the life of the surface, and after it `act`/`act_on_index` raise
+        `SurfaceError` (the session is frozen -- spec §6.1, criterion 2) while `observe`,
+        `capture` and `pending_dialog` keep working so the failure can be evidenced.
+
+        Phase 5 / E3: the replay engine checks this after every `act` and after every
+        settle, ahead of any other interpretation of what the surface returned or raised.
+        """
+        ...

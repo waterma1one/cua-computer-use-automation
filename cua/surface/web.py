@@ -18,12 +18,13 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Literal, cast
+from urllib.parse import urlsplit, urlunsplit
 
-from playwright.sync_api import Dialog, Frame, Page, sync_playwright
+from playwright.sync_api import Dialog, Frame, Page, Route, sync_playwright
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator as PlaywrightLocator
 
-from cua.surface.base import StaleObservationError, Surface, SurfaceError
+from cua.surface.base import NavigationGuard, StaleObservationError, Surface, SurfaceError
 from cua.surface.locators import resolve_against, synthesize
 from cua.surface.models import (
     Action,
@@ -270,10 +271,33 @@ def _failed_live_precondition(
     return None
 
 
-class WebSurface:
-    """A `Surface` (see `cua/surface/base.py`) backed by one live Playwright `Page`."""
+def _display_url(url: str) -> str:
+    """`url` with any userinfo stripped from its netloc, for a violation reason a human
+    reads (evidence, `SurfaceError` messages) -- a credential embedded in the URL itself
+    (`http://user:pw@host/...`) must never appear there. Standard library only: this is
+    the surface's own rendering concern, not `cua.policy`'s (the guard it calls still
+    receives the original `url` and strips userinfo itself when it builds an origin)."""
+    parts = urlsplit(url)
+    netloc = parts.hostname or ""
+    if parts.port is not None:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
-    def __init__(self, page: Page, budget: ObservationBudget | None = None) -> None:
+
+class WebSurface:
+    """A `Surface` (see `cua/surface/base.py`) backed by one live Playwright `Page`.
+
+    `navigation_guard`, when given, enforces the deployment allowlist live (Phase 5 /
+    E2-E4): every application-initiated navigation, on every frame, is checked, and the
+    first denial freezes the surface (`allowlist_violation()` becomes non-`None`; every
+    later `act`/`act_on_index` raises `SurfaceError`). `None` (the default) leaves the
+    surface unenforced, which is what phase-2/4 fixtures still construct.
+    """
+
+    def __init__(
+        self, page: Page, budget: ObservationBudget | None = None, *,
+        navigation_guard: NavigationGuard | None = None,
+    ) -> None:
         self.page = page
         self.budget = budget or ObservationBudget()
         self._generation = _NEVER_OBSERVED
@@ -294,9 +318,68 @@ class WebSurface:
         # native dialogs, so one raised by the target app (e.g. the `dialog` fault) stays
         # open until `act()` is asked to dismiss it, rather than vanishing unnoticed.
         self.page.on("dialog", self._on_dialog)
+        # Phase 5 / E2-E4: live allowlist enforcement, two points. The context-level route
+        # sees every navigation request the page itself initiates -- link, form, `goto`,
+        # and a popup's first request (which a page-level route would miss) -- and aborts a
+        # denied one before it leaves, so the mutating GET never reaches the server.
+        # `framenavigated` sees what interception cannot: a server redirect whose hop is
+        # followed inside the browser and lands on a denied URL. That request has already
+        # fired by the time it is visible; it is detected and the surface frozen, and the
+        # write-up states that as the cost. Every frame is checked, not only the main one.
+        # `None` means unenforced (what phase-2/4 fixtures construct); the CLI always
+        # supplies a guard.
+        self._guard = navigation_guard
+        self._violation: str | None = None
+        if navigation_guard is not None:
+            self.page.context.route("**/*", self._on_route)
+            self.page.on("framenavigated", self._on_frame_navigated)
 
     def _on_dialog(self, dialog: Dialog) -> None:
         self._pending_dialog = dialog
+
+    def _deny_reason(self, url: str) -> str | None:
+        """The guard's verdict for `url`, or `None`. Only `http`/`https` URLs are checked
+        -- `about:blank` and the `chrome-error://` page an aborted navigation lands on are
+        not navigations to an origin. A guard that raises is a denial naming the error:
+        an enforcement point that fails open is not one.
+        """
+        if self._guard is None or not url.startswith(("http://", "https://")):
+            return None
+        try:
+            return self._guard(url)
+        except Exception as exc:  # fail closed on any guard failure, whatever it is
+            return f"the navigation guard failed on {url!r}: {exc}"
+
+    def _freeze(self, reason: str) -> None:
+        if self._violation is None:
+            self._violation = reason
+
+    def _on_route(self, route: Route) -> None:
+        request = route.request
+        if not request.is_navigation_request():
+            route.continue_()
+            return
+        reason = self._deny_reason(request.url)
+        if reason is None:
+            route.continue_()
+            return
+        self._freeze(f"navigation to {_display_url(request.url)!r} refused before the "
+                     f"request was sent: {reason}")
+        route.abort("blockedbyclient")
+
+    def _on_frame_navigated(self, frame: Frame) -> None:
+        reason = self._deny_reason(frame.url)
+        if reason is not None:
+            self._freeze(f"the application navigated to {_display_url(frame.url)!r}, "
+                         f"which is refused: {reason}")
+
+    def allowlist_violation(self) -> str | None:
+        return self._violation
+
+    def _refuse_if_frozen(self) -> None:
+        if self._violation is not None:
+            raise SurfaceError(f"the session is frozen after an allowlist violation: "
+                               f"{self._violation}")
 
     # ---- perception --------------------------------------------------------
 
@@ -461,6 +544,7 @@ class WebSurface:
         )
 
     def act(self, action: Action) -> ActionResult:
+        self._refuse_if_frozen()
         if action.kind == "navigate":
             if action.value is None:
                 return ActionResult(ok=False, action=action, read_value=None)
@@ -553,6 +637,7 @@ class WebSurface:
         defaulting to an empty or absent value, which would silently perform the wrong
         action (e.g. blank a field) while still reporting success.
         """
+        self._refuse_if_frozen()
         if generation != self._generation:
             raise StaleObservationError(
                 f"observation generation {generation} does not match the current "

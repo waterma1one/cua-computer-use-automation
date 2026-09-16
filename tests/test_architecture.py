@@ -113,3 +113,15 @@ def test_the_policy_vocabulary_has_exactly_one_home() -> None:
     # imports `validate`; the module graph stays acyclic only while the package init stays
     # empty. Pinned, not assumed.
     assert Path("cua/policy/__init__.py").read_text().strip() == ""
+
+
+def test_the_surface_never_imports_the_policy_package() -> None:
+    """E4: the surface is below policy in the dependency order and takes a bare callable.
+    A `cua.policy` import in `web.py` would invert that and pull the artifact layer into
+    the driver module. Import forms only: a comment naming the guard's builder is
+    documentation, not a dependency (controller ruling, Task 3)."""
+    for name in ("web.py", "base.py"):
+        text = Path("cua/surface") / name
+        source = text.read_text().lower()
+        assert "import cua.policy" not in source, f"{name} imports cua.policy"
+        assert "from cua.policy" not in source, f"{name} imports cua.policy"
