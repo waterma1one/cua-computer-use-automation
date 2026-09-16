@@ -38,6 +38,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -109,13 +110,21 @@ class Finding(BaseModel):
     where: str | None = None
 
 
+def _normalise_origin(origin: str) -> str:
+    parts = urlsplit(origin.strip().rstrip("/"))
+    if parts.scheme and parts.netloc:
+        return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+    return origin.strip().rstrip("/").lower()
+
+
 class DeploymentAllowlist(BaseModel):
     """What a deployment permits: spec §6.1's per-instance allowlist.
 
     Defined here as the minimal shape §4.4's narrowing check needs, and no more. Phase 5
-    owns the real allowlist engine and must **extend this type** rather than introduce a
-    second one -- two allowlist shapes drifting apart is an authorization bug, and this
-    validator is not the place it should be discovered.
+    added the real allowlist engine on this type itself -- `permits_origin`, `permits_url`,
+    `narrowed_by` -- rather than introduce a second one -- two allowlist shapes drifting
+    apart is an authorization bug, and this validator is not the place it should be
+    discovered.
 
     An allowlist is configuration, never part of the artifact (§6.1): the same artifact
     gets different permissions in a different tenant. Each field is the permitted set;
@@ -144,6 +153,51 @@ class DeploymentAllowlist(BaseModel):
         if any(path.startswith(prefix) for prefix in self.denied_paths):
             return False
         return any(path.startswith(prefix) for prefix in self.allowed_paths)
+
+    def permits_origin(self, origin: str) -> bool:
+        """Whether `origin` (`scheme://netloc`) is listed. Compared normalised: scheme and
+        host lower-cased, a trailing slash ignored. `http://h:80` and `http://h` are
+        different origins -- stated limit."""
+        return _normalise_origin(origin) in {_normalise_origin(o) for o in self.allowed_origins}
+
+    def permits_url(self, url: str) -> bool:
+        """Whether a full URL is permitted: only `http`/`https` can be; the origin must be
+        listed; then `permits_path` on the URL's path (query excluded -- the deny prefix
+        `/account/close` must catch `/account/close?number=1`).
+
+        Phase 5 / E1: the one implementation of "is this live URL permitted", built on the
+        one path rule. `cua.policy.allowlist.check_navigation` explains a refusal; this
+        decides it.
+        """
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            return False
+        if not self.permits_origin(f"{parts.scheme}://{parts.netloc}"):
+            return False
+        return self.permits_path(parts.path or "/")
+
+    def narrowed_by(self, policy: CapabilityPolicy | None) -> DeploymentAllowlist:
+        """The effective allowlist for one capability: this deployment intersected with
+        `policy` (§6.1: a policy may narrow, never widen). A policy path survives only if
+        this deployment already permits it; a policy action only if this deployment lists
+        it; `denied_paths` and `allowed_origins` are always this deployment's. A `None`
+        policy field means "not narrowed". Returns `self` for no policy at all.
+
+        Phase 5 / E6: intersection cannot widen by construction, so a caller that never ran
+        `validate(artifact, deployment)` is still safe; the validator's
+        `POLICY_WIDENS_ALLOWLIST` is what tells a human *that* the policy tried.
+        """
+        if policy is None:
+            return self
+        paths = (
+            list(self.allowed_paths) if policy.allowed_paths is None
+            else [p for p in policy.allowed_paths if self.permits_path(p)]
+        )
+        actions = (
+            list(self.allowed_actions) if policy.allowed_actions is None
+            else [a for a in policy.allowed_actions if a in self.allowed_actions]
+        )
+        return self.model_copy(update={"allowed_paths": paths, "allowed_actions": actions})
 
 
 # The credential-name rule itself lives in `cua.surface.models.is_protected_name` (E6): one

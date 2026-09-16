@@ -119,6 +119,10 @@ StepValue = FromInput | LiteralValue | FromStep
 IdentifierKey = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]*$")]
 
 Risk = Literal["safe", "risky", "irreversible"]
+# Phase 5 / E5: the registry's lifecycle vocabulary (§4.1's `draft | approved`) is contract
+# vocabulary, declared here so `cua.replay.engine` can type its `status` argument without
+# importing the store. `cua.artifact.store.RegistryEntry.status` uses this same name.
+RegistryStatus = Literal["draft", "approved"]
 Outcome = Literal["continue", "business", "retry", "fail"]
 
 # E4': the replay engine's failure vocabulary, declared here -- not in `cua/replay/` -- because

@@ -97,3 +97,19 @@ def test_every_evidence_text_write_goes_through_the_redacting_writer() -> None:
         assert "write_text(" not in source, f"{name} writes text directly"
         assert ".open(" not in source, f"{name} opens a file directly"
         assert "put_text(" in source or "put_line(" in source, f"{name} uses the writer"
+
+
+def test_the_policy_vocabulary_has_exactly_one_home() -> None:
+    """Phase 5 / E1, E5: one allowlist type, one registry-status vocabulary, one decision."""
+    from cua.artifact import models, store, validate
+    from cua.policy import allowlist, config
+
+    assert issubclass(config.PolicyConfig, validate.DeploymentAllowlist)
+    assert store.RegistryStatus is models.RegistryStatus
+    assert allowlist.RegistryStatus is models.RegistryStatus
+    assert not hasattr(allowlist, "_permits_path")
+    assert not hasattr(config, "_permits_path")
+    # E13: `cua.artifact.validate` imports `cua.policy.risk` and `cua.policy.allowlist`
+    # imports `validate`; the module graph stays acyclic only while the package init stays
+    # empty. Pinned, not assumed.
+    assert Path("cua/policy/__init__.py").read_text().strip() == ""
