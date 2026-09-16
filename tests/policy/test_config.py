@@ -39,6 +39,13 @@ def test_a_non_mapping_document_is_refused(tmp_path) -> None:
         load_policy(path)
 
 
+def test_a_syntactically_malformed_policy_file_is_a_clean_valueerror(tmp_path) -> None:
+    path = tmp_path / "p.yaml"
+    path.write_text("allowed_paths: [ '/'\n")  # unclosed bracket
+    with pytest.raises(ValueError, match="could not be parsed"):
+        load_policy(path)
+
+
 def test_policy_mode_is_a_closed_literal(tmp_path) -> None:
     path = tmp_path / "p.yaml"
     path.write_text("policy_mode: yolo\nallowed_paths: ['/']\n")

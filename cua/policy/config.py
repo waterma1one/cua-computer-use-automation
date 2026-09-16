@@ -38,7 +38,10 @@ def load_policy(path: Path) -> PolicyConfig:
     rather than silently permitting nothing."""
     if not path.exists():
         raise FileNotFoundError(f"no policy file at {path}")
-    raw = yaml.safe_load(path.read_text())
+    try:
+        raw = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as exc:
+        raise ValueError(f"policy file {path} could not be parsed: {exc}") from exc
     if not isinstance(raw, dict):
         raise ValueError(f"policy file {path} must be a mapping at the top level")
     try:
