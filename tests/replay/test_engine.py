@@ -811,10 +811,17 @@ def test_a_violation_during_settle_wins_even_when_the_expects_never_match() -> N
     )])
     artifact.outputs = {}
     clock = FakeClock()
+    sink = RecordingSink()
     surface = LateSurface(frames=[[node("button", name="Member ID")]])
-    result = replay(artifact, {"member_id": "12345"}, surface, "embedded", clock=clock)
+    result = replay(artifact, {"member_id": "12345"}, surface, "embedded", clock=clock,
+                    evidence=sink)
     assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
     assert len(clock.sleep_calls) <= 1  # settle stopped waiting; it did not poll to the deadline
+    # Fix round 2: settle's own Violated outcome reports the violation once -- the
+    # post-settle check must not ask again and duplicate the event and the frame.
+    violations = [e for e in sink.events if e["kind"] == "allowlist_violation"]
+    assert len(violations) == 1
+    assert len(sink.frames) == 1
 
 
 def test_a_fail_clause_matching_the_frozen_page_does_not_hide_the_violation() -> None:
