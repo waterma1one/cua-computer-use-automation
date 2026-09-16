@@ -530,3 +530,37 @@ def test_a_business_clause_with_an_empty_code_is_an_error() -> None:
                          expects=[Expect(when=Matcher(role="heading", name="x"),
                                         outcome="business", code="", source="observed")])])
     assert "BUSINESS_CODE_MISSING" in codes(a)
+
+
+# Phase 5 / E7: an authored risk below the heuristic is a warning -- a human at approval
+# confirms the value (§6.3), so it must stay loadable.
+
+def test_a_step_authored_below_the_heuristic_is_a_warning_not_an_error() -> None:
+    artifact = base(steps=[
+        Step(id="s1", action="click", locator=loc("Post"), risk="safe"),
+        Step(id="s2", action="read", locator=loc("Savings"), extract="text", parse="money",
+             into="balance", risk="safe"),
+    ])
+    findings = validate(artifact)
+    below = [f for f in findings if f.code == "RISK_BELOW_HEURISTIC"]
+    assert len(below) == 1
+    assert below[0].level == "warning"
+    assert below[0].where == "steps[0] (s1)"
+    assert "irreversible" in below[0].message
+    assert not any(f.level == "error" for f in findings)
+
+
+def test_a_step_authored_at_or_above_the_heuristic_is_not_reported() -> None:
+    artifact = base(steps=[
+        Step(id="s1", action="click", locator=loc("Post"), risk="irreversible"),
+        Step(id="s2", action="read", locator=loc("Savings"), extract="text", parse="money",
+             into="balance", risk="safe"),
+    ])
+    assert "RISK_BELOW_HEURISTIC" not in {f.code for f in validate(artifact)}
+    # Over-declaring is never a finding: a human may raise any step.
+    artifact = base(steps=[
+        Step(id="s1", action="click", locator=loc("Search"), risk="irreversible"),
+        Step(id="s2", action="read", locator=loc("Savings"), extract="text", parse="money",
+             into="balance", risk="safe"),
+    ])
+    assert "RISK_BELOW_HEURISTIC" not in {f.code for f in validate(artifact)}

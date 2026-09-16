@@ -51,6 +51,7 @@ from cua.artifact.models import (
     LiteralValue,
     Step,
 )
+from cua.policy.risk import RISK_ORDER, classify  # E13: cua/policy/__init__.py must stay empty
 from cua.surface.models import ActionKind, Locator, is_protected_name
 
 FindingLevel = Literal["error", "warning", "note"]
@@ -310,6 +311,23 @@ def _step_findings(artifact: Artifact) -> list[Finding]:
                     f"must not be replayable or approvable"
                 ),
             ))
+        else:
+            # E7 (phase 5): an authored risk below the heuristic's is reported, as a
+            # warning. §6.3 puts the final value in a human's hands at approval time, so a
+            # step a person deliberately downgraded must stay loadable; the warning is what
+            # makes the downgrade visible rather than silent. Over-declaring is never
+            # reported.
+            heuristic = classify(step.action, step.locator.name if step.locator else None)
+            if RISK_ORDER[step.risk] < RISK_ORDER[heuristic]:
+                findings.append(Finding(
+                    level="warning", code="RISK_BELOW_HEURISTIC", where=where,
+                    message=(
+                        f"step {step.id} is authored {step.risk!r} but the heuristic "
+                        f"classifies a {step.action} on "
+                        f"{(step.locator.name if step.locator else None)!r} as "
+                        f"{heuristic!r}; confirm the lower value deliberately at approval"
+                    ),
+                ))
 
         # E4'/E17/E29: a `fail` clause's `code` names the failure kind it declares, and a
         # `business` clause's `code` names the caller-facing business outcome. Neither
