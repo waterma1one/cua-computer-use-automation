@@ -272,6 +272,12 @@ def _violation(run: _Run, step_id: str | None) -> Failure | None:
     branch outcome. `capture=True`: the surface has been touched, and a frozen surface
     still captures (Task 4). A surface that cannot even answer is treated as having no
     violation; the caller's own `SurfaceError` path then applies.
+
+    Fix round 2: when `settle()` itself already discovered the violation (a `Violated`
+    outcome, translated to an `ALLOWLIST_VIOLATION` `Failure` by `_translate_outcome`),
+    the caller skips this call rather than asking again -- re-reading a sticky violation
+    would only duplicate the `allowlist_violation` event and the captured frame that the
+    first read already produced.
     """
     try:
         reason = run.surface.allowlist_violation()
@@ -730,6 +736,8 @@ def _run_step(run: _Run, step: Step) -> ReplayResult | None:
         return extraction_failure
 
     settled = _settle_step(run, step, step.id)
+    if isinstance(settled, Failure) and settled.kind == "ALLOWLIST_VIOLATION":
+        return settled  # settle already saw it and reported it once
     violated = _violation(run, step.id)
     if violated is not None:
         return violated
@@ -799,6 +807,8 @@ def replay(
                         source="observed")],
     )
     ended = _settle_step(run, checkpoint_step, None)
+    if isinstance(ended, Failure) and ended.kind == "ALLOWLIST_VIOLATION":
+        return ended  # settle already saw it and reported it once
     violated = _violation(run, None)
     if violated is not None:
         return violated
