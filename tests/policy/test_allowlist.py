@@ -34,7 +34,7 @@ def test_a_denied_path_inside_an_allowed_origin_and_prefix_is_still_refused() ->
 def test_an_unlisted_origin_is_refused_before_the_path_is_looked_at() -> None:
     decision = check_navigation("http://evil.example/", DEPLOYMENT)
     assert not decision.allowed and decision.kind == "ALLOWLIST_VIOLATION"
-    assert "origin 'http://evil.example' is not an allowed origin" == decision.reason  # noqa: SIM300
+    assert decision.reason == "origin 'http://evil.example' is not an allowed origin"
 
 
 def test_a_path_outside_every_allowed_prefix_is_refused() -> None:
@@ -67,6 +67,36 @@ def test_the_guard_returns_none_when_permitted_and_the_reason_when_not() -> None
     assert guard(f"{ORIGIN}/member/12345") is None
     assert guard(f"{ORIGIN}/account/close?number=1") == check_navigation(
         f"{ORIGIN}/account/close?number=1", DEPLOYMENT).reason
+
+
+@pytest.mark.parametrize("url", [
+    f"{ORIGIN}//account/close?number=1",
+    f"{ORIGIN}/%2Faccount/close",
+    f"{ORIGIN}/x/../account/close",
+    f"{ORIGIN}/account/./close/",
+])
+def test_a_denied_path_cannot_be_reached_through_unnormalised_syntax(url: str) -> None:
+    # Reviewer probe: `//account/close` and `/%2Faccount/close` sailed past a raw
+    # `startswith`. Deny rules are evaluated on the path a routing layer would see.
+    assert DEPLOYMENT.permits_url(url) is False
+    assert not check_navigation(url, DEPLOYMENT).allowed
+
+
+def test_permits_path_normalises_the_static_target_too() -> None:
+    assert DEPLOYMENT.permits_path("//account/close?number=1") is False
+    narrow = DEPLOYMENT.model_copy(update={"allowed_paths": ["/teller/"]})
+    assert narrow.permits_path("/teller/") is True
+    assert narrow.permits_path("/teller") is False
+
+
+def test_credentials_in_a_url_never_reach_the_reason() -> None:
+    decision = check_navigation("http://user:pw@evil.example/", DEPLOYMENT)
+    assert not decision.allowed
+    assert "pw" not in decision.reason and "user:" not in decision.reason
+    assert decision.reason == "origin 'http://evil.example' is not an allowed origin"
+    # And credentials cannot smuggle a permitted host past the origin check either.
+    host = ORIGIN.removeprefix("http://")
+    assert DEPLOYMENT.permits_url(f"http://user:pw@{host}/member/1") is True
 
 
 # --- criterion 4: narrowing -----------------------------------------------------------------
