@@ -91,6 +91,30 @@ def test_permits_path_normalises_the_static_target_too() -> None:
     assert narrow.permits_path("/teller") is False
 
 
+@pytest.mark.parametrize("path", [
+    "/account/close?x=/../../foo",
+    "/account/close#/../..",
+    "/account/close%3Fx=/../../foo",
+    "/account/close%23/../..",
+])
+def test_a_query_or_fragment_cannot_walk_a_static_target_out_of_a_deny_prefix(
+    path: str,
+) -> None:
+    # `cua.replay.engine` hands `Step.target.path` to `permits_path` whole. Resolving the
+    # whole string left `/account/close?x=/../../foo` as `/foo` -- outside the deny prefix
+    # and inside the allowed `/`. The query and the fragment are removed after decoding,
+    # so an encoded separator cannot reappear once the split has already happened.
+    assert DEPLOYMENT.permits_path(path) is False
+    assert DEPLOYMENT.denying_prefix(path) == "/account/close"
+
+
+def test_a_legitimate_query_string_is_not_treated_as_a_bypass() -> None:
+    # The mock application's fault switch is a query parameter; dropping the query must
+    # not drop the path it belongs to.
+    assert DEPLOYMENT.permits_path("/member/12345?fault=not_found") is True
+    assert DEPLOYMENT.permits_path("/member/12345#balance") is True
+
+
 def test_credentials_in_a_url_never_reach_the_reason() -> None:
     decision = check_navigation("http://user:pw@evil.example/", DEPLOYMENT)
     assert not decision.allowed
