@@ -556,11 +556,15 @@ def test_a_step_authored_at_or_above_the_heuristic_is_not_reported() -> None:
         Step(id="s2", action="read", locator=loc("Savings"), extract="text", parse="money",
              into="balance", risk="safe"),
     ])
-    assert "RISK_BELOW_HEURISTIC" not in {f.code for f in validate(artifact)}
+    findings = validate(artifact)
+    assert "RISK_BELOW_HEURISTIC" not in {f.code for f in findings}
+    assert not any(f.level == "error" for f in findings)
     # Over-declaring is never a finding: a human may raise any step.
     artifact = base(steps=[
         Step(id="s1", action="click", locator=loc("Search"), risk="irreversible"),
         Step(id="s2", action="read", locator=loc("Savings"), extract="text", parse="money",
              into="balance", risk="safe"),
     ])
-    assert "RISK_BELOW_HEURISTIC" not in {f.code for f in validate(artifact)}
+    findings = validate(artifact)
+    assert "RISK_BELOW_HEURISTIC" not in {f.code for f in findings}
+    assert not any(f.level == "error" for f in findings)
