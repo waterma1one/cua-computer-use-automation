@@ -165,6 +165,26 @@ def test_every_string_field_of_an_event_is_pattern_filtered(tmp_path) -> None:
     assert "********5512-01" in text and "***-**-0198" in text
 
 
+def test_write_result_with_a_bare_int_account_output_produces_valid_json(tmp_path) -> None:
+    # Fix round 1: an unmasked int leaf that happens to be account-shaped would otherwise
+    # survive redact_leaves as a number, and the text-level pattern pass in
+    # RedactingWriter would then rewrite its unquoted digits in place, corrupting the JSON.
+    writer = EvidenceWriter(tmp_path)
+    result = Success(outputs={"acct": 100045512345}, steps_run=["s1"],
+                     evidence_ref=writer.evidence_ref())
+    written = writer.write_result(result)
+    on_disk = json.loads((tmp_path / "evidence" / writer.run_id / "result.json").read_text())
+    assert on_disk == written
+    assert on_disk["outputs"] == {"acct": "********2345"}
+
+
+def test_a_bare_int_event_field_is_masked_to_a_string_and_stays_valid_json(tmp_path) -> None:
+    log = RunLog(tmp_path / "trace.jsonl")
+    log.event(kind="tick", ts=175802400012)
+    line = json.loads((tmp_path / "trace.jsonl").read_text().strip())
+    assert line["ts"] == "********0012"
+
+
 def test_a_non_sensitive_input_that_is_account_shaped_is_masked_in_run_json(tmp_path) -> None:
     # E8's accepted cost, pinned so it is a decision and not a surprise: the pattern layer
     # runs over run.json too. Shape kept, last four kept.
