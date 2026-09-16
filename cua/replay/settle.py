@@ -31,6 +31,7 @@ __all__ = [
     "Escalate",
     "Fail",
     "TimedOut",
+    "Violated",
     "settle",
 ]
 
@@ -111,7 +112,15 @@ class DialogUnhandled:
     message: str
 
 
-BranchOutcome = Continue | Business | Fail | Escalate | TimedOut | DialogUnhandled
+@dataclass(frozen=True)
+class Violated:
+    """The surface recorded an allowlist violation (spec §6.1) while the step was settling.
+    Polling a frozen page to its deadline would only delay the report."""
+
+    reason: str
+
+
+BranchOutcome = Continue | Business | Fail | Escalate | TimedOut | DialogUnhandled | Violated
 
 
 def _handle_dialog(
@@ -206,6 +215,11 @@ def settle(
     Phase 5 / E10: when `record_dialog` is given, every dialog this loop handles is
     reported to it as `(message, handling)` -- `handling` is `"dismissed"`, `"escalated"`
     or `"unhandled"` -- so the caller's trace records a dialog as well as routing it.
+
+    Phase 5 fix round 1: `surface.allowlist_violation()` is checked first on every poll,
+    ahead of `pending_dialog()` -- a frozen page keeps answering `observe()`/
+    `pending_dialog()`, so without this a violation recorded mid-settle would otherwise
+    be polled to `timeout_ms` before ever being reported.
     """
     deadline = clock.monotonic_ms() + settle_spec.timeout_ms
     # No observation exists yet if every poll finds a dialog pending; this placeholder
@@ -213,6 +227,13 @@ def settle(
     observation = Observation(generation=0, nodes=[], truncated=False)
 
     while True:
+        # D32: the settle loop is the only place replay waits, so it is where waiting
+        # stops -- a page the surface has already frozen must not be polled to its
+        # deadline before the violation that froze it is reported.
+        reason = surface.allowlist_violation()
+        if reason is not None:
+            return Violated(reason=reason)
+
         message = surface.pending_dialog()
         if message is not None:
             dialog_outcome = _handle_dialog(surface, message, recovery)

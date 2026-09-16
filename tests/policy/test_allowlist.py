@@ -155,7 +155,9 @@ def test_an_unclassified_step_is_policy_blocked() -> None:
 def test_a_risky_or_irreversible_step_requires_an_approved_artifact(risk: str) -> None:
     blocked = check_action("click", risk, "draft", DEPLOYMENT)  # type: ignore[arg-type]
     assert not blocked.allowed and blocked.kind == "POLICY_BLOCKED"
-    assert blocked.reason == f"a {risk} step requires status 'approved'; the artifact is 'draft'"
+    article = "an" if risk == "irreversible" else "a"
+    assert (blocked.reason
+            == f"{article} {risk} step requires status 'approved'; the artifact is 'draft'")
     assert check_action("click", risk, "approved", DEPLOYMENT).allowed  # type: ignore[arg-type]
 
 
