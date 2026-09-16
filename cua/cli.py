@@ -7,6 +7,13 @@ This module never names the driver package directly. Chromium is launched behind
 `cua.surface.web.launch_page`, the one factory in the system permitted to do that, and
 this module imports that name (rather than calling it fully qualified at the call site)
 so a test can substitute it and have the replacement actually take effect.
+
+Phase 5: `replay` now requires `--policy`, a deployment allowlist YAML (spec S6.1). It is
+loaded before the artifact -- a replay never runs without one -- and, once the artifact is
+loaded, `cua.artifact.validate.validate` checks that the artifact's own policy block (if
+any) only narrows it, never widens it. The effective (narrowed) allowlist is what is
+handed to the replay engine and to the live navigation guard installed on the `WebSurface`;
+the artifact's registry status (draft/approved) is read and passed through too.
 """
 
 from __future__ import annotations
@@ -17,8 +24,11 @@ from typing import NoReturn, cast, get_args
 import typer
 
 from cua.artifact.models import Artifact, InputSpec
-from cua.artifact.store import load
+from cua.artifact.store import RegistryEntry, load, read_registry
+from cua.artifact.validate import validate
 from cua.observability.evidence import EvidenceWriter
+from cua.policy.allowlist import navigation_guard
+from cua.policy.config import load_policy
 from cua.replay.engine import replay as run_replay
 from cua.replay.engine import validate_inputs
 from cua.replay.result import Failure, Mode, mint_run_id
@@ -141,6 +151,9 @@ def replay(
     version: int,
     root: Path = typer.Option(..., "--root", help="Artifact store root."),  # noqa: B008
     base_url: str = typer.Option(..., "--base-url", help="Base URL of the target app."),
+    policy_path: Path = typer.Option(  # noqa: B008
+        ..., "--policy", help="Deployment policy YAML (see policy.example.yaml)."
+    ),
     evidence_root: Path = typer.Option(  # noqa: B008
         Path("."), "--evidence-root", help="Where evidence/<run_id>/ is written."
     ),
@@ -151,11 +164,20 @@ def replay(
 ) -> None:
     """Replays one capability artifact against a live target application.
 
-    Prints the resulting `ReplayResult` as JSON to stdout and exits non-zero on a
-    `Failure`, on a `--mode` that is not one of `Mode`'s literals, or when `--mode
-    supervised` is requested (unattended replay only, this phase). Login is out of scope
-    for this command: a capability aimed at a route behind a login gate must itself
-    declare the login steps.
+    `--policy` is required: a deployment allowlist YAML that is loaded before the
+    artifact and, once the artifact loads, is checked against the artifact's own policy
+    block so a capability policy can only narrow the deployment's allowlist, never widen
+    it (exit 2 on either a policy that fails to load or a widening finding). The
+    resulting, narrowed allowlist -- not the raw policy file -- is what the replay engine
+    enforces and what the live navigation guard on the browser page checks.
+
+    Prints the resulting `ReplayResult` as JSON to stdout -- this is the caller's channel
+    and carries every output unmasked (E8) -- and exits non-zero on a `Failure`, on a
+    `--mode` that is not one of `Mode`'s literals, or when `--mode supervised` is
+    requested (unattended replay only, this phase). `result.json` under the printed
+    `evidence_ref` is the evidence copy of the same result, with any output the artifact
+    declares `redact: true` masked. Login is out of scope for this command: a capability
+    aimed at a route behind a login gate must itself declare the login steps.
     """
     if mode not in get_args(Mode):
         # E32: `Mode` is a closed literal in the engine's type, but a `--mode` value is
@@ -174,6 +196,15 @@ def replay(
         typer.echo("supervised mode is not yet implemented", err=True)
         raise typer.Exit(code=1)
 
+    # E12: the deployment allowlist is loaded before the artifact -- a replay never runs
+    # without one, and a refusal here is the same one-line, exit-2 shape as a load refusal
+    # (no evidence: nothing has been run).
+    try:
+        policy = load_policy(policy_path)
+    except (FileNotFoundError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
     artifact: Artifact
     try:
         artifact, _findings = load(artifact_id, version, root)
@@ -186,6 +217,18 @@ def replay(
         # replay failed". No evidence is written: there is no artifact to record a run of.
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
+
+    # E6: criterion 4 at the real path. `load()` has no allowlist to check narrowing
+    # against; this is the first place both are in hand. Any error-level finding refuses.
+    errors = [f for f in validate(artifact, policy) if f.level == "error"]
+    if errors:
+        typer.echo("; ".join(f"{f.code}: {f.message}" for f in errors), err=True)
+        raise typer.Exit(code=2)
+    effective = policy.narrowed_by(artifact.policy)
+    status = (
+        read_registry(root).get(artifact.id, {}).get(str(artifact.version), RegistryEntry())
+        .status
+    )
 
     # E33: the writer exists before any input is looked at, so every refusal from here on
     # leaves `result.json` under the `evidence_ref` it prints. Construction mints the run
@@ -221,16 +264,21 @@ def replay(
     writer.write_artifact(artifact)
 
     with launch_page(base_url) as page:
-        surface = WebSurface(page)
+        surface = WebSurface(page, navigation_guard=navigation_guard(effective))
         try:
-            result = run_replay(artifact, inputs, surface, cast(Mode, mode), evidence=writer)
+            result = run_replay(
+                artifact, inputs, surface, cast(Mode, mode), deployment=effective,
+                status=status, evidence=writer,
+            )
         except NotImplementedError as exc:
             # Same handling as the fast-path above, for a caller that reaches this some
             # other way -- not a second definition of "not implemented".
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=1) from exc
 
-    writer.write_result(result)
+    writer.write_result(
+        result, redacted_outputs={name for name, spec in artifact.outputs.items() if spec.redact},
+    )
     typer.echo(result.model_dump_json())
     if isinstance(result, Failure):
         raise typer.Exit(code=1)
