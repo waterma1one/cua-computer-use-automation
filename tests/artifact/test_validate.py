@@ -245,6 +245,33 @@ def test_a_policy_action_outside_the_deployment_widens_and_is_an_error() -> None
     assert "POLICY_WIDENS_ALLOWLIST" in {f.code for f in validate(a, DEPLOYMENT)}
 
 
+def test_an_allowed_prefix_is_normalised_the_same_way_a_queried_path_is() -> None:
+    allow = DeploymentAllowlist(allowed_paths=["/x/../account"])
+    assert allow.permits_path("/account") is True
+    assert allow.permits_path("/account/close") is True
+
+
+def test_narrowing_is_idempotent_however_a_prefix_was_spelled() -> None:
+    # `narrowed_by` stores the policy's own path spellings verbatim, so a path compared as
+    # an argument on the first call is walked as a prefix on the second. Normalising only
+    # the argument made the second call narrow to nothing.
+    allow = DeploymentAllowlist(allowed_paths=["/x/../account"])
+    policy = CapabilityPolicy(allowed_paths=["/account"])
+    once = allow.narrowed_by(policy)
+    twice = once.narrowed_by(policy)
+    assert once.allowed_paths == ["/account"]
+    assert twice.allowed_paths == once.allowed_paths
+
+
+def test_a_query_string_never_reaches_the_prefix_comparison() -> None:
+    # The path is compared as a routing layer sees it: query and fragment removed, not
+    # resolved along with the path. `?x=/../../foo` resolved as one string left
+    # `/teller/admin/close` as `/foo` -- outside its own deny prefix.
+    assert DEPLOYMENT.permits_path("/teller/admin/close?x=/../../foo") is False
+    assert DEPLOYMENT.denying_prefix("/teller/admin/close#/../..") == "/teller/admin/"
+    assert DEPLOYMENT.permits_path("/teller/search?q=1") is True
+
+
 def test_validation_reports_every_defect_rather_than_stopping_at_the_first() -> None:
     # A human reviewing an artifact wants the whole list, not the first thing that went
     # wrong, so `validate` never raises and never short-circuits.

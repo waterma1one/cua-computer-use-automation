@@ -120,12 +120,16 @@ def _normalise_path(path: str) -> str:
     against the raw text is bypassed by `//account/close` or `/%2Faccount/close`; deny
     rules that are evaluated first must also be evaluated on what the server will route.
 
-    A query string glued to the path (`cua.replay.engine` passes `target.path` whole, e.g.
-    `/account/close?number=1`) is percent-decoded along with it -- harmless, since the
-    prefix comparison this feeds only cares about the leading segments, which a query
-    string never changes.
+    A query string or fragment glued to the path (`cua.replay.engine` passes `target.path`
+    whole, e.g. `/account/close?number=1`) is **removed**, not normalised along with the
+    path: the comparison is against the path alone, which is what a routing layer matches
+    on. Removing it is not a convenience. `/account/close?x=/../../foo` resolved as one
+    string is `/foo`, so a query's own `..` segments walked a denied path out of its deny
+    prefix. Stripping happens *after* percent-decoding, so an encoded `%3F`/`%23` cannot
+    survive the split and reappear as a separator once decoded.
     """
-    decoded = _REPEATED_SLASHES.sub("/", unquote(path))
+    decoded = unquote(path).partition("#")[0].partition("?")[0]
+    decoded = _REPEATED_SLASHES.sub("/", decoded)
     normalised = posixpath.normpath(decoded) if decoded else "/"
     if not normalised.startswith("/"):
         normalised = "/" + normalised
@@ -181,9 +185,15 @@ class DeploymentAllowlist(BaseModel):
     allowed_actions: list[ActionKind] = Field(default_factory=list)
 
     def permits_path(self, path: str) -> bool:
-        """Whether `path` is permitted by this deployment: deny-first, prefix-matched, on
-        `path` normalised (`_normalise_path`) before either walk -- a deny prefix compared
-        against raw text is bypassed by `//account/close` or `/%2Faccount/close`.
+        """Whether `path` is permitted by this deployment: deny-first, prefix-matched, with
+        both sides normalised (`_normalise_path`) before either walk -- a deny prefix
+        compared against raw text is bypassed by `//account/close` or `/%2Faccount/close`.
+
+        Both sides, not only the queried path, because the comparison has to be symmetric
+        for `narrowed_by` to be idempotent: it stores the policy's own path spellings as
+        the new `allowed_paths`, so a path that was normalised as an argument on one call
+        is walked as a prefix on the next, and an un-normalised prefix such as
+        `/x/../account` would then match nothing at all.
 
         E29/D28: the one implementation of "is this single path permitted by this
         deployment", a method on the type itself so phase 5 -- which must extend this
@@ -193,15 +203,19 @@ class DeploymentAllowlist(BaseModel):
         prefix walk.
         """
         path = _normalise_path(path)
-        if any(path.startswith(prefix) for prefix in self.denied_paths):
+        if self.denying_prefix(path) is not None:
             return False
-        return any(path.startswith(prefix) for prefix in self.allowed_paths)
+        return any(path.startswith(_normalise_path(prefix)) for prefix in self.allowed_paths)
 
     def denying_prefix(self, path: str) -> str | None:
-        """The first `denied_paths` prefix that matches `path` (normalised as `permits_path`
-        normalises it), or `None`. For explaining a refusal; `permits_path` decides it."""
+        """The first `denied_paths` prefix that matches `path`, or `None` -- prefix and path
+        both normalised, exactly as `permits_path` compares them. The prefix is returned as
+        it was written, because that is the string an operator will look for in the
+        configuration. For explaining a refusal; `permits_path` decides it."""
         normalised = _normalise_path(path)
-        return next((p for p in self.denied_paths if normalised.startswith(p)), None)
+        return next(
+            (p for p in self.denied_paths if normalised.startswith(_normalise_path(p))), None
+        )
 
     def permits_origin(self, origin: str) -> bool:
         """Whether `origin` (`scheme://netloc`) is listed. Compared normalised: scheme and

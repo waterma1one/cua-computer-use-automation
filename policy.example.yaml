@@ -8,6 +8,9 @@
 
 policy_mode: strict            # strict | sandbox (governs discovery, spec §6.2)
 
+# Origins are compared literally, never resolved: `http://localhost:8000` and
+# `http://127.0.0.1:8000` are different origins, and so are `http://host:80` and
+# `http://host`. Spell the entry below exactly as `--base-url` is spelled.
 allowed_origins:
   - http://127.0.0.1:8000       # the local mock application; one entry per instance
 
