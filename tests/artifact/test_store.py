@@ -26,6 +26,7 @@ import logging
 import os
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from cua.artifact.models import Expect, InputSpec, LiteralValue, Matcher, OutputSpec, Step
@@ -791,3 +792,25 @@ def test_a_fail_clause_with_no_code_saves_but_refuses_to_load(tmp_path) -> None:
     save(a, tmp_path)  # FAIL_CODE_NOT_A_FAILURE_KIND is not in CRITERION_1_CODES
     with pytest.raises(ValueError, match="FAIL_CODE_NOT_A_FAILURE_KIND"):
         load(a.id, a.version, tmp_path)
+
+
+def test_load_refuses_a_syntactically_malformed_file_as_a_clean_value_error(tmp_path) -> None:
+    # Final review fix wave: `yaml.YAMLError` is not a `ValueError`, so a hand-edited file
+    # with an unclosed bracket escaped `cua.cli`'s `except (FileNotFoundError, ValueError)`
+    # as a traceback instead of the one-line refusal every other malformed artifact gets.
+    save(base(), tmp_path)
+    path = tmp_path / "artifacts" / "corebank.probe" / "v1.yaml"
+    path.write_text("schema_version: 1\nid: corebank.probe\nsteps: [\n")
+    with pytest.raises(ValueError, match="could not be parsed") as caught:
+        load("corebank.probe", 1, tmp_path)
+    assert not isinstance(caught.value, yaml.YAMLError)
+    assert "v1.yaml" in str(caught.value)
+
+
+def test_approval_by_id_refuses_a_syntactically_malformed_file_the_same_way(tmp_path) -> None:
+    # The other door onto `_parse_artifact`: the approval gate's disk-resolution branch.
+    save(base(), tmp_path)
+    path = tmp_path / "artifacts" / "corebank.probe" / "v1.yaml"
+    path.write_text("steps: [\n")
+    with pytest.raises(ValueError, match="could not be parsed"):
+        write_registry_entry(tmp_path, "corebank.probe", 1, RegistryEntry(status="approved"))
