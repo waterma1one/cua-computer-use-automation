@@ -27,6 +27,16 @@ exactly one of the three result shapes; every `SurfaceError`, wherever it arises
 `SESSION_LOST`, and `_fail` itself is safe on a dead surface), E29 (the failure-kind
 vocabulary, the expect-code check and the path allowlist rule each have one home in
 `cua.artifact`; this module calls them rather than carrying copies).
+
+Phase 5: E3 (`_violation` checks `Surface.allowlist_violation()` after every `act`, after
+every step's settle, and after the checkpoint settle -- ahead of any other reading of what
+the surface returned or raised), E5 (`_policy_gate` checks every step's action type and
+risk through `check_action` before any step runs, so a replay is never refused partway
+through at step N), E6 (the deployment allowlist is narrowed by the artifact's own
+`policy` before the gate ever sees it, whether or not the validator ran over this
+artifact), E9 (a `bound` trace event carries the extracted value and the output's
+`redact` flag, never an action's own value), E10 (`settle()`'s `record_dialog` reports
+every dialog it handles, dismissed or not, to the trace).
 """
 
 from __future__ import annotations
@@ -43,9 +53,11 @@ from cua.artifact.models import (
     InputSpec,
     LiteralValue,
     Matcher,
+    RegistryStatus,
     Step,
 )
 from cua.artifact.validate import DeploymentAllowlist, expect_code_problem
+from cua.policy.allowlist import check_action
 from cua.replay.extract import ParseError, extract
 from cua.replay.result import BusinessOutcome, Failure, Mode, ReplayResult, Success, mint_run_id
 from cua.replay.settle import (
@@ -247,6 +259,29 @@ def _fail(
                     evidence_ref=sink.evidence_ref())
 
 
+def _violation(run: _Run, step_id: str | None) -> Failure | None:
+    """E3: the surface's recorded allowlist violation, as the `Failure` it is, or `None`.
+    Asked after every `act` and after every settle, ahead of any other reading of what
+    the surface did -- a redirect onto a denied URL returns `ok=True` from `click`, an
+    aborted `goto` raises, and both must be `ALLOWLIST_VIOLATION`, never
+    `PRECONDITION_FAILED` or `SESSION_LOST`. `capture=True`: the surface has been touched,
+    and a frozen surface still captures (Task 4). A surface that cannot even answer is
+    treated as having no violation; the caller's own `SurfaceError` path then applies.
+    """
+    try:
+        reason = run.surface.allowlist_violation()
+    except SurfaceError:
+        return None
+    if reason is None:
+        return None
+    run.sink.event(kind="allowlist_violation", step_id=step_id, reason=reason)
+    return run.fail(
+        "ALLOWLIST_VIOLATION", step_id,
+        "every navigation the application initiates stays inside the deployment allowlist",
+        reason, capture=True,
+    )
+
+
 def _describe_matcher(matcher: Matcher) -> str:
     role = f"role={matcher.role!r} " if matcher.role else ""
     return f"{matcher.strategy} {role}name={matcher.name!r} ({matcher.name_match})"
@@ -313,17 +348,22 @@ class _Run:
 
 
 def _policy_gate(
-    artifact: Artifact, confirm_irreversible: bool, idempotency_key: str | None,
-    sink: EvidenceSink,
+    artifact: Artifact, deployment: DeploymentAllowlist | None, status: RegistryStatus,
+    confirm_irreversible: bool, idempotency_key: str | None, sink: EvidenceSink,
 ) -> Failure | None:
-    """The pre-loop refusals that need no surface (E17, E9/E27), every one `POLICY_BLOCKED`
-    and constructed directly rather than through `_fail` -- nothing has touched the surface
+    """The pre-loop refusals that need no surface (E17, E5/E6, E9/E27), every one
+    constructed directly rather than through `_fail` -- nothing has touched the surface
     yet, so there is nothing to capture.
 
     E17: `load()` already refuses to persist an artifact whose `fail` expect names an
     unknown code or whose `business` expect names none, but this module must not trust
     that every artifact it is handed went through `load()`. `expect_code_problem` is the
     validator's own check (E29), not a copy of it.
+
+    E5/E6: every step's action type is checked against `deployment` and its risk against
+    `status` before any step runs, so a replay never gets partway through before being
+    refused at step N. `deployment` here is already narrowed by the artifact's own policy
+    (E6, `DeploymentAllowlist.narrowed_by`) -- this function never narrows it itself.
 
     E27: an irreversible step requires both `confirm_irreversible` and an
     `idempotency_key`, and a key already burned for this `(id, version)` is refused here,
@@ -344,6 +384,24 @@ def _policy_gate(
                     ),
                     evidence_ref=sink.evidence_ref(),
                 )
+
+    # E5 (phase 5): every step is checked before any runs -- the action type against the
+    # effective allowlist (`ALLOWLIST_VIOLATION`), the risk against the registry status
+    # (`POLICY_BLOCKED`) -- so no session is created for a replay that would be refused at
+    # step N (§5.4's spirit, E21's capture=False). `check_action` is the one implementation;
+    # `deployment` here is already narrowed by the artifact's own policy (E6). The E18
+    # checkpoint step is not in `artifact.steps` and performs no act, so it is not gated.
+    for step in artifact.steps:
+        decision = check_action(step.action, step.risk, status, deployment)
+        if not decision.allowed:
+            assert decision.kind is not None
+            return Failure(
+                kind=decision.kind, step_id=step.id,
+                expected="every step is permitted by the deployment allowlist and may run "
+                         f"unattended at status {status!r}",
+                observed=f"step {step.id!r}: {decision.reason}",
+                evidence_ref=sink.evidence_ref(),
+            )
 
     irreversible = next((s for s in artifact.steps if s.risk == "irreversible"), None)
     if irreversible is None:
@@ -416,7 +474,8 @@ def _prepare_action(run: _Run, step: Step) -> tuple[Action, Node | None] | Failu
     `permits_path` before `act` is ever called -- `capture=False`, since the navigation
     this check exists to prevent has, by construction, not happened. A `navigate` with no
     target is `PRECONDITION_FAILED`, never an `Action` carrying an empty path (E28). Live
-    enforcement (redirects, a page that navigates itself) is phase 5's.
+    enforcement (redirects, a page that navigates itself) is the surface's
+    (`allowlist_violation`), checked after `act` and after settle.
 
     Every other action: `resolve` first, translating `NotFound`/`Ambiguous`/
     `PreconditionFailed` directly (`capture=True` -- the surface was just asked), then the
@@ -498,6 +557,8 @@ def _extract_binding(run: _Run, step: Step, resolved_node: Node | None) -> Failu
     run.bound_by_step[step.id] = extracted
     if step.into is not None:
         run.values[step.into] = extracted
+    redact = step.into in run.artifact.outputs and run.artifact.outputs[step.into].redact
+    run.sink.event(kind="bound", step_id=step.id, into=step.into, value=extracted, redact=redact)
     return None
 
 
@@ -558,13 +619,20 @@ def _translate_outcome(
 
 def _settle_step(run: _Run, step: Step, step_id: str | None) -> ReplayResult | None:
     """Settles one step (a real one, or the E18 checkpoint step with `step_id=None`) and
-    translates the outcome; a `SurfaceError` raised from inside the poll loop is
-    `SESSION_LOST` (E28).
+    translates the outcome; a `SurfaceError` raised from inside the poll loop checks
+    `_violation` first (a frozen surface's own `dismiss_dialog` raises `SurfaceError` too)
+    and only falls to `SESSION_LOST` (E28) when no violation was recorded.
     """
     try:
-        outcome = settle(run.surface, step, run.artifact.settle, run.artifact.recovery,
-                         clock=run.clock)
+        outcome = settle(
+            run.surface, step, run.artifact.settle, run.artifact.recovery, clock=run.clock,
+            record_dialog=lambda message, handling: run.sink.event(
+                kind="dialog", step_id=step_id, message=message, handling=handling),
+        )
     except SurfaceError as exc:
+        violated = _violation(run, step_id)
+        if violated is not None:
+            return violated
         return run.fail(
             "SESSION_LOST", step_id, "the surface stays observable while the step settles",
             str(exc), capture=True,
@@ -576,20 +644,16 @@ def _run_step(run: _Run, step: Step) -> ReplayResult | None:
     """Runs one step end to end: gates, action, extraction, settle. Returns the
     `ReplayResult` that ends the replay, or `None` to proceed to the next step.
 
-    Gates in order: `risk is None` (`POLICY_BLOCKED`, `capture=False`); the deadline, `>=`
-    not `>` (E25) -- `capture=False` while no step has yet completed, since nothing has
-    touched the surface, `capture=True` once one has. Then `_prepare_action`; then, for an
+    Gates in order: the deadline, `>=` not `>` (E25) -- `capture=False` while no step has
+    yet completed, since nothing has touched the surface, `capture=True` once one has (the
+    `risk is None` check that used to live here is now `_policy_gate`'s, via `check_action`,
+    which runs before any step is attempted). Then `_prepare_action`; then, for an
     irreversible step, the idempotency key is burned (E27) immediately before `act` --
     nothing before this point can be a duplicate risk, so a replay that failed earlier may
     be retried under the same key, while one that reached this line may not, whatever
     happens next. `act` raising is `SESSION_LOST`; `ok=False` with a pending dialog falls
     through to `settle()` (E14) and without one is `PRECONDITION_FAILED`.
     """
-    if step.risk is None:
-        return run.fail(
-            "POLICY_BLOCKED", step.id, "every replayed step carries a risk classification",
-            f"step {step.id!r} has risk=None", capture=False,
-        )
     if run.clock.monotonic_ms() >= run.deadline:
         budget = run.artifact.max_duration_ms
         return run.fail(
@@ -608,13 +672,22 @@ def _run_step(run: _Run, step: Step) -> ReplayResult | None:
             (run.artifact.id, run.artifact.version, run.idempotency_key)
         )
 
+    run.sink.event(kind="step_started", step_id=step.id, action=step.action, risk=step.risk)
+
     try:
         result = run.surface.act(action)
     except SurfaceError as exc:
+        violated = _violation(run, step.id)
+        if violated is not None:
+            return violated
         return run.fail(
             "SESSION_LOST", step.id, "the surface completes the action without error",
             str(exc), capture=True,
         )
+
+    violated = _violation(run, step.id)
+    if violated is not None:
+        return violated
 
     if not result.ok:
         try:
@@ -639,6 +712,9 @@ def _run_step(run: _Run, step: Step) -> ReplayResult | None:
     settled = _settle_step(run, step, step.id)
     if settled is not None:
         return settled
+    violated = _violation(run, step.id)
+    if violated is not None:
+        return violated
 
     run.steps_run.append(step.id)
     return None
@@ -646,9 +722,9 @@ def _run_step(run: _Run, step: Step) -> ReplayResult | None:
 
 def replay(
     artifact: Artifact, inputs: dict[str, object], surface: Surface, mode: Mode, *,
-    deployment: DeploymentAllowlist | None = None, confirm_irreversible: bool = False,
-    idempotency_key: str | None = None, evidence: EvidenceSink | None = None,
-    clock: Clock | None = None,
+    deployment: DeploymentAllowlist | None = None, status: RegistryStatus = "draft",
+    confirm_irreversible: bool = False, idempotency_key: str | None = None,
+    evidence: EvidenceSink | None = None, clock: Clock | None = None,
 ) -> ReplayResult:
     """Replays `artifact` against `surface` with `inputs`, returning exactly one
     `Success | BusinessOutcome | Failure` and never raising for a business-meaningful
@@ -657,9 +733,16 @@ def replay(
 
     Gate order, all before the step loop starts and all without touching `surface` (E21):
     `validate_inputs` (E22, re-stamped with this run's `evidence_ref`); `_policy_gate`
-    (E17's expect-code scan, then E9/E27's irreversible/idempotency gate). Then
-    `_run_step` per step, the E18 checkpoint settle, and the E28 unbound-output check
-    before `Success`.
+    (E17's expect-code scan, then E5/E6's per-step action/status gate, then E9/E27's
+    irreversible/idempotency gate). Then `_run_step` per step, the E18 checkpoint settle,
+    and the E28 unbound-output check before `Success`.
+
+    Phase 5: `deployment` is narrowed by `artifact.policy` (E6) before the gate ever sees
+    it, so the effective allowlist is always the intersection whether or not
+    `cua.artifact.validate.validate` ran over this artifact. After every `act`, every
+    step's settle, and the checkpoint's settle, `_violation` asks the surface whether an
+    application-initiated navigation was refused (E3) -- ahead of any other reading of
+    what the surface returned or raised, and even after `Success` would otherwise follow.
     """
     if mode == "supervised":
         raise NotImplementedError("supervised mode is not yet implemented")
@@ -672,13 +755,16 @@ def replay(
     if input_failure is not None:
         return input_failure.model_copy(update={"evidence_ref": sink.evidence_ref()})
 
-    blocked = _policy_gate(artifact, confirm_irreversible, idempotency_key, sink)
+    effective = deployment.narrowed_by(artifact.policy) if deployment is not None else None
+
+    blocked = _policy_gate(artifact, effective, status, confirm_irreversible, idempotency_key,
+                           sink)
     if blocked is not None:
         return blocked
 
     run = _Run(
         artifact=artifact, inputs=inputs, surface=surface, sink=sink, clock=active_clock,
-        deadline=deadline, deployment=deployment, idempotency_key=idempotency_key,
+        deadline=deadline, deployment=effective, idempotency_key=idempotency_key,
     )
     for step in artifact.steps:
         ended = _run_step(run, step)
@@ -695,6 +781,10 @@ def replay(
     ended = _settle_step(run, checkpoint_step, None)
     if ended is not None:
         return ended
+
+    violated = _violation(run, None)
+    if violated is not None:
+        return violated
 
     # E28: criterion 7 in its second form -- a declared output no step bound is a failure,
     # never a `Success` carrying `{}` where the caller was promised a value.

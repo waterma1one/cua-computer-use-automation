@@ -12,6 +12,7 @@ backed by the real `time` module for actual replay.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, cast, runtime_checkable
 
@@ -185,6 +186,7 @@ def _matching_expect(
 def settle(
     surface: Surface, step: Step, settle_spec: Settle, recovery: list[Recovery], *,
     clock: Clock = SYSTEM_CLOCK,
+    record_dialog: Callable[[str, str], None] | None = None,
 ) -> BranchOutcome:
     """Polls `surface` against `step.expects` and `recovery` until one settles, a recovery
     rule escalates, an unhandled dialog appears, or `settle_spec.timeout_ms` elapses.
@@ -200,6 +202,10 @@ def settle(
     must still respect `settle_spec.timeout_ms` rather than dismissing without bound, so a
     dismiss falls through to the same deadline check and poll sleep as any other absorbed
     iteration below, instead of restarting the loop before either runs.
+
+    Phase 5 / E10: when `record_dialog` is given, every dialog this loop handles is
+    reported to it as `(message, handling)` -- `handling` is `"dismissed"`, `"escalated"`
+    or `"unhandled"` -- so the caller's trace records a dialog as well as routing it.
     """
     deadline = clock.monotonic_ms() + settle_spec.timeout_ms
     # No observation exists yet if every poll finds a dialog pending; this placeholder
@@ -210,6 +216,15 @@ def settle(
         message = surface.pending_dialog()
         if message is not None:
             dialog_outcome = _handle_dialog(surface, message, recovery)
+            if record_dialog is not None:
+                # E10 (phase 5): a dialog is recorded as well as routed -- spec §5.5 says
+                # "recorded", and D32 only routed. The handling names what happened to it.
+                handling = (
+                    "dismissed" if dialog_outcome is None
+                    else "escalated" if isinstance(dialog_outcome, Escalate)
+                    else "unhandled"
+                )
+                record_dialog(message, handling)
             if dialog_outcome is not None:
                 return dialog_outcome
             # A dismiss rule fired -- fall through to the deadline check and sleep below

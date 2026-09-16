@@ -20,8 +20,11 @@ from typing import Any, cast
 
 import pytest
 
+from cua.artifact.models import App, Artifact, Expect, Matcher, Provenance, Settle, Step, Success
 from cua.artifact.validate import DeploymentAllowlist
 from cua.policy.allowlist import navigation_guard
+from cua.replay.engine import replay
+from cua.replay.result import Failure
 from cua.surface.base import Surface, SurfaceError
 from cua.surface.models import Action, Locator, SurfaceSegment
 from cua.surface.web import ObservationBudget, WebSurface
@@ -241,3 +244,74 @@ def test_freeze_is_first_wins() -> None:
     surface._freeze("first")
     surface._freeze("second")
     assert surface.allowlist_violation() == "first"
+
+
+# --- Criterion 2 through the engine ----------------------------------------------------------
+
+
+def _artifact(steps: list[Step]) -> Artifact:
+    return Artifact(
+        schema_version=1, id="corebank.close_probe", version=1, name="close_probe",
+        description="reaches the close hazard through the application's own link",
+        verified=False,
+        app=App(vendor_product="corebank-teller", variant="base", surface="web",
+                entry="/account/000100045512-01"),
+        settle=Settle(timeout_ms=2000, poll_ms=100), max_duration_ms=60000,
+        inputs={}, outputs={}, steps=steps,
+        success=Success(checkpoint=Matcher(strategy="text", name_match="contains",
+                                           name="Account closed")),
+        provenance=Provenance(discovered_at="2026-09-09T00:00:00", model="gemini-2.5-flash-lite",
+                              policy_mode="sandbox", provider_retention="training_permitted",
+                              run_id="r_close", trace_ref="evidence/r_close/trace.jsonl"),
+    )
+
+
+def test_an_app_initiated_hop_to_the_denied_route_is_allowlist_violation_and_the_get_never_fires(
+    page, live_mockapp,
+) -> None:
+    # The step is a `click` on the application's own link -- not a `navigate` step, so
+    # phase 4's static check on a declared target never sees it. Authored `safe` on purpose:
+    # allowlist and risk are orthogonal (§6.1), and this proves the allowlist binds even
+    # when risk is under-declared.
+    _login(page)
+    page.goto("/account/000100045512-01")
+    page.wait_for_load_state("networkidle")
+    surface = WebSurface(page, ObservationBudget(max_nodes=200),
+                         navigation_guard=navigation_guard(_deployment(live_mockapp)))
+    artifact = _artifact([
+        Step(id="s1", action="click", locator=_close_link(), risk="safe",
+             expects=[Expect(when=Matcher(strategy="text", name_match="contains",
+                                          name="Account closed"),
+                             outcome="continue", source="observed")]),
+    ])
+    before = len(LEDGER)
+    result = replay(artifact, {}, surface, "embedded", deployment=_deployment(live_mockapp))
+    assert isinstance(result, Failure)
+    assert result.kind == "ALLOWLIST_VIOLATION"
+    assert result.step_id == "s1"
+    assert "/account/close" in result.observed
+    assert len(LEDGER) == before, "the deny rule must stop the mutation, not just report it"
+    assert surface.allowlist_violation() is not None
+    with pytest.raises(SurfaceError, match="frozen"):
+        surface.act(Action(kind="click", locator=_close_link()))
+
+
+def test_a_redirect_onto_a_denied_path_is_allowlist_violation_through_the_engine(
+    page, live_mockapp,
+) -> None:
+    _login(page)
+    deployment = _deployment(live_mockapp, denied_paths=["/member/"])
+    surface = WebSurface(page, ObservationBudget(max_nodes=200),
+                         navigation_guard=navigation_guard(deployment))
+    member_id = Locator(role="textbox", name="Member ID", surface_path=TOP_LEVEL,
+                        rationale="search field", confidence="high")
+    search = Locator(role="button", name="Search", surface_path=TOP_LEVEL,
+                     rationale="search button", confidence="high")
+    artifact = _artifact([
+        Step(id="s1", action="fill", locator=member_id, value={"literal": "12345"}, risk="safe"),
+        Step(id="s2", action="click", locator=search, risk="safe"),
+    ])
+    result = replay(artifact, {}, surface, "embedded", deployment=deployment)
+    assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
+    assert result.step_id == "s2"
+    assert "'/member/12345'" in result.observed
