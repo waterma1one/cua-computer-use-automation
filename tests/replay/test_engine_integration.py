@@ -275,7 +275,8 @@ def test_allowlist_violation_prevents_the_mutating_get_from_ever_firing(surface_
     surface = WebSurface(surface_page, ObservationBudget(max_nodes=200))
     artifact = _navigate_only_artifact("/account/close?number=000100045512-01", [])
     before = len(LEDGER)
-    deployment = DeploymentAllowlist(allowed_paths=["/"], denied_paths=["/account/close"])
+    deployment = DeploymentAllowlist(allowed_paths=["/"], denied_paths=["/account/close"],
+                                     allowed_actions=["navigate"])
     result = replay(artifact, {}, surface, "embedded", deployment=deployment)
     assert isinstance(result, Failure)
     assert result.kind == "ALLOWLIST_VIOLATION"

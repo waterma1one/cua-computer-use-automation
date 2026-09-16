@@ -200,3 +200,20 @@ def test_first_match_wins_over_recovery_even_when_the_match_is_a_dismiss() -> No
     surface = FakeSurface(frames=[[node("text", value="Scheduled maintenance")]])
     outcome = settle(surface, step, SPEC, recovery, clock=FakeClock())
     assert not isinstance(outcome, Escalate)
+
+
+def test_settle_reports_each_dialog_it_handles_to_the_recorder() -> None:
+    recorded: list[tuple[str, str]] = []
+    step = Step(id="s1", action="click", risk="safe", expects=[
+        Expect(when=Matcher(role="heading", name_match="contains", name="Member "),
+               outcome="continue", source="observed")])
+    recovery = [Recovery(name="popup",
+                         detect=Matcher(strategy="text", name_match="contains", name="Unexpected"),
+                         handle="dismiss")]
+    surface = FakeSurface(frames=[[node("heading", name="Member 12345")]],
+                          dialog_messages=["Unexpected dialog", None])
+    outcome = settle(surface, step, SPEC, recovery, clock=FakeClock(),
+                     record_dialog=lambda m, h: recorded.append((m, h)))
+    assert isinstance(outcome, Continue)
+    assert recorded == [("Unexpected dialog", "dismissed")]
+    assert surface.dismiss_calls == 1
