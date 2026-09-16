@@ -73,9 +73,10 @@ def check_action(
         return Decision(allowed=False, kind="POLICY_BLOCKED",
                         reason="the step has no risk classification")
     if risk != "safe" and status != "approved":
+        article = "an" if risk == "irreversible" else "a"
         return Decision(
             allowed=False, kind="POLICY_BLOCKED",
-            reason=f"a {risk} step requires status 'approved'; the artifact is {status!r}",
+            reason=f"{article} {risk} step requires status 'approved'; the artifact is {status!r}",
         )
     return _PERMITTED
 

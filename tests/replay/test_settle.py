@@ -1,7 +1,16 @@
 import time
 
 from cua.artifact.models import Expect, Matcher, Recovery, Settle, Step
-from cua.replay.settle import Business, Continue, DialogUnhandled, Escalate, Fail, TimedOut, settle
+from cua.replay.settle import (
+    Business,
+    Continue,
+    DialogUnhandled,
+    Escalate,
+    Fail,
+    TimedOut,
+    Violated,
+    settle,
+)
 from tests.artifact.factories import loc
 from tests.replay.conftest import FakeClock, FakeSurface, node
 
@@ -217,3 +226,13 @@ def test_settle_reports_each_dialog_it_handles_to_the_recorder() -> None:
     assert isinstance(outcome, Continue)
     assert recorded == [("Unexpected dialog", "dismissed")]
     assert surface.dismiss_calls == 1
+
+
+def test_settle_reports_a_preexisting_violation_on_the_first_poll_without_sleeping() -> None:
+    surface = FakeSurface(frames=[[node("heading", name="Member 12345")]],
+                          violation="the application navigated to '/elsewhere', which is refused")
+    clock = FakeClock()
+    outcome = settle(surface, _step(), SPEC, [], clock=clock)
+    assert isinstance(outcome, Violated)
+    assert outcome.reason == "the application navigated to '/elsewhere', which is refused"
+    assert clock.sleep_calls == []

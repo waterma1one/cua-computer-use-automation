@@ -24,9 +24,10 @@ after the last real step), E21 (a frame is captured only for a failure that aris
 or after a surface interaction -- every pre-loop gate and every pre-act refusal passes
 `capture=False` and never calls a `Surface` method at all), E28 (`replay()` returns
 exactly one of the three result shapes; every `SurfaceError`, wherever it arises, is a
-`SESSION_LOST`, and `_fail` itself is safe on a dead surface), E29 (the failure-kind
-vocabulary, the expect-code check and the path allowlist rule each have one home in
-`cua.artifact`; this module calls them rather than carrying copies).
+`SESSION_LOST` unless the surface has recorded an allowlist violation (E3, below), and
+`_fail` itself is safe on a dead surface), E29 (the failure-kind vocabulary, the
+expect-code check and the path allowlist rule each have one home in `cua.artifact`; this
+module calls them rather than carrying copies).
 
 Phase 5: E3 (`_violation` checks `Surface.allowlist_violation()` after every `act`, after
 every step's settle, and after the checkpoint settle -- ahead of any other reading of what
@@ -69,6 +70,7 @@ from cua.replay.settle import (
     DialogUnhandled,
     Escalate,
     Fail,
+    Violated,
     settle,
 )
 from cua.surface.base import Surface, SurfaceError
@@ -261,12 +263,15 @@ def _fail(
 
 def _violation(run: _Run, step_id: str | None) -> Failure | None:
     """E3: the surface's recorded allowlist violation, as the `Failure` it is, or `None`.
-    Asked after every `act` and after every settle, ahead of any other reading of what
-    the surface did -- a redirect onto a denied URL returns `ok=True` from `click`, an
-    aborted `goto` raises, and both must be `ALLOWLIST_VIOLATION`, never
-    `PRECONDITION_FAILED` or `SESSION_LOST`. `capture=True`: the surface has been touched,
-    and a frozen surface still captures (Task 4). A surface that cannot even answer is
-    treated as having no violation; the caller's own `SurfaceError` path then applies.
+    Asked after every `act` and after every settle -- regardless of what settle returned
+    or raised -- and after the checkpoint settle: a recorded violation wins over every
+    other reading, including a settle outcome. A redirect onto a denied URL returns
+    `ok=True` from `click`, an aborted `goto` raises, a `fail`/`continue` expect may
+    happen to match the frozen page's unchanged content, and all of these must be
+    `ALLOWLIST_VIOLATION`, never `PRECONDITION_FAILED`, `SESSION_LOST`, or some other
+    branch outcome. `capture=True`: the surface has been touched, and a frozen surface
+    still captures (Task 4). A surface that cannot even answer is treated as having no
+    violation; the caller's own `SurfaceError` path then applies.
     """
     try:
         reason = run.surface.allowlist_violation()
@@ -610,6 +615,21 @@ def _translate_outcome(
             "UNHANDLED_DIALOG", step_id, "a recovery rule handles the pending dialog",
             f"an unhandled dialog appeared: {outcome.message!r}", capture=True,
         )
+    if isinstance(outcome, Violated):
+        # Route through the same `_violation` helper so the `allowlist_violation` event
+        # and the capture happen exactly once, whether the violation is discovered here
+        # or by a direct post-act/post-settle check. `_violation` re-reads the surface;
+        # on the vanishingly unlikely chance it now reads `None` (the surface un-froze
+        # between settle's read and this one), fall back to `outcome.reason` directly
+        # rather than silently losing the violation `settle()` already reported.
+        violated = _violation(run, step_id)
+        if violated is not None:
+            return violated
+        return run.fail(
+            "ALLOWLIST_VIOLATION", step_id,
+            "every navigation the application initiates stays inside the deployment allowlist",
+            outcome.reason, capture=True,
+        )
     # The only BranchOutcome variant left is TimedOut.
     return run.fail(
         "NO_BRANCH_MATCHED", step_id, _describe_expects(expects),
@@ -710,11 +730,11 @@ def _run_step(run: _Run, step: Step) -> ReplayResult | None:
         return extraction_failure
 
     settled = _settle_step(run, step, step.id)
-    if settled is not None:
-        return settled
     violated = _violation(run, step.id)
     if violated is not None:
         return violated
+    if settled is not None:
+        return settled
 
     run.steps_run.append(step.id)
     return None
@@ -779,12 +799,11 @@ def replay(
                         source="observed")],
     )
     ended = _settle_step(run, checkpoint_step, None)
-    if ended is not None:
-        return ended
-
     violated = _violation(run, None)
     if violated is not None:
         return violated
+    if ended is not None:
+        return ended
 
     # E28: criterion 7 in its second form -- a declared output no step bound is a failure,
     # never a `Success` carrying `{}` where the caller was promised a value.

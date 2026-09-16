@@ -795,6 +795,66 @@ def test_a_violation_before_the_checkpoint_settles_never_becomes_success() -> No
     assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
 
 
+def test_a_violation_during_settle_wins_even_when_the_expects_never_match() -> None:
+    # Reviewer probe: with the destination's expects authored on the step, a fill whose
+    # navigation was aborted used to poll the frozen page to its timeout and report
+    # NO_BRANCH_MATCHED. The violation wins, and quickly.
+    class LateSurface(FakeSurface):
+        def observe(self):
+            self.violation = "the application navigated to '/elsewhere', which is refused"
+            return super().observe()
+
+    artifact = _artifact(steps=[Step(
+        id="s1", action="fill", locator=loc("Member ID"), value={"literal": "12345"}, risk="safe",
+        expects=[Expect(when=Matcher(role="heading", name_match="contains", name="Elsewhere"),
+                        outcome="continue", source="observed")],
+    )])
+    artifact.outputs = {}
+    clock = FakeClock()
+    surface = LateSurface(frames=[[node("button", name="Member ID")]])
+    result = replay(artifact, {"member_id": "12345"}, surface, "embedded", clock=clock)
+    assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
+    assert len(clock.sleep_calls) <= 1  # settle stopped waiting; it did not poll to the deadline
+
+
+def test_a_fail_clause_matching_the_frozen_page_does_not_hide_the_violation() -> None:
+    class LateSurface(FakeSurface):
+        def observe(self):
+            self.violation = "the application navigated to '/elsewhere', which is refused"
+            return super().observe()
+
+    artifact = _artifact(steps=[Step(
+        id="s1", action="fill", locator=loc("Member ID"), value={"literal": "12345"}, risk="safe",
+        expects=[Expect(when=Matcher(role="button", name="Member ID"), outcome="fail",
+                        code="PRECONDITION_FAILED", source="observed")],
+    )])
+    artifact.outputs = {}
+    surface = LateSurface(frames=[[node("button", name="Member ID")]])
+    result = replay(artifact, {"member_id": "12345"}, surface, "embedded", clock=FakeClock())
+    assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
+
+
+def test_an_irreversible_violation_still_burns_the_idempotency_key() -> None:
+    class RedirectingSurface(FakeSurface):
+        def act(self, action):
+            self.violation = "the application navigated to '/elsewhere', which is refused"
+            return super().act(action)
+
+    artifact = _irreversible_artifact()
+    surface = RedirectingSurface(frames=_member_frame())
+    result = replay(artifact, {"member_id": "12345"}, surface, "embedded", status="approved",
+                    confirm_irreversible=True, idempotency_key="k-v", clock=FakeClock())
+    assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
+
+    # D34: the key is burned before the irreversible act, whatever happens next -- a
+    # recorded violation is no different from any other post-act failure in this regard.
+    retry = replay(artifact, {"member_id": "12345"}, PoisonSurface(), "embedded",
+                   status="approved", confirm_irreversible=True, idempotency_key="k-v",
+                   clock=FakeClock())
+    assert isinstance(retry, Failure) and retry.kind == "POLICY_BLOCKED"
+    assert "already used" in retry.observed
+
+
 class RecordingSink(FakeEvidenceSink):
     def __init__(self) -> None:
         super().__init__()
