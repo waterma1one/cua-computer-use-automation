@@ -730,3 +730,137 @@ can prove the poll loop waited — that proof is the `FakeClock` suite's. The po
 following the popup would flip the assertion; popups are not followed until a later phase adds
 multi-window tracking to the surface.
 **Cost accepted:** one integration path's timing is covered only by unit tests of the loop.
+
+## D38 — The deployment allowlist has one type across the whole system
+`PolicyConfig` (`cua/policy/config.py`) is `DeploymentAllowlist` extended, not a parallel
+shape — the contract card's field names (`origins`, `allow_paths`) yield to the type phase 3
+already declared and phase 4's `_narrowing_findings` already depends on. `PolicyConfig` adds
+only `policy_mode`; the validator, the replay engine, and the live surface guard all consume
+one `DeploymentAllowlist` (or its subclass), never a second copy that could drift from it
+(D28). `DeploymentAllowlist` gains `permits_origin`, `permits_url` (origin leg, then
+`permits_path` on the path with the query and fragment excluded), and `narrowed_by` (a
+per-capability policy intersected with the deployment — a policy path or action survives
+only if the deployment already permits it, so a policy cannot widen by construction, not only
+by the validator's separate check). Both the queried path and every stored prefix are
+normalised the same way (percent-decoded once, repeated slashes collapsed, `.`/`..`
+segments resolved, query and fragment stripped): comparing only the query side left a
+`navigate` target's own `..`-bearing query string able to walk a denied path's prefix
+comparison out from under it, and comparing only the argument side left `narrowed_by`
+non-idempotent, since a policy's own path spelling is stored verbatim as the next call's
+prefix.
+**Cost accepted:** a bare 13-17-digit account-shaped number is a different concern
+(redaction, D42) and this normalisation says nothing about it; an operator's deny prefix
+written with an unusual slash count or a stray `..` behaves as if it had been written
+canonically, which is the safer reading, not a silent no-op.
+
+## D39 — Enforcement on the live surface has two points, and each proves a different half
+An application-initiated navigation is stopped two ways, deliberately, because one probe
+showed neither alone is enough: `WebSurface` registers a context-level route on every
+navigation request the page itself initiates (a link, a form, `goto`, a popup's first
+request) and aborts a denied one before it reaches the server — proven against the mock
+app's mutating `/account/close` GET by an unchanged ledger, not merely a refused result. A
+server-side redirect is invisible to that interception (a POST that 303s is seen by the
+route handler only as the POST; the redirect's own `framenavigated` event fires before the
+initiating call even returns), so a `framenavigated` listener — attached to every page the
+browser context opens, not only the one this surface drives, closing a popup-redirect blind
+spot the first draft missed — detects a redirect that has already landed on a denied URL and
+freezes the surface. `Surface.allowlist_violation()` is sticky (the first reason survives for
+the life of the surface); once set, `act`/`act_on_index` raise rather than run, while
+`observe`/`capture`/`pending_dialog` keep working so the violation can be evidenced. A guard
+that raises is a denial naming the error (fail closed), never treated as permission.
+**Cost accepted:** the redirect's own request has already reached the server by the time it
+is caught — detection, not prevention, for that one case; a subresource fetch (script,
+image, XHR) is not gated by either point; a listener sits on every popup for the life of the
+surface even if none is ever opened.
+
+## D40 — A recorded violation outranks every other reading a step could produce
+Once `allowlist_violation()` is non-`None`, the replay engine reports `ALLOWLIST_VIOLATION`
+ahead of whatever else the surface's call returned or raised — after every `act`, after
+every `resolve` failure, after every settle (including a violation `settle()` itself detects
+mid-poll, which now returns at once rather than waiting out the declared timeout against a
+page that can never satisfy its `expects`), and after the checkpoint's own settle. The first
+draft checked only after `act` and after settle when settle returned a matched outcome; a
+`fill`/`select` step does not wait for an initiated navigation on this driver, so a
+violation recorded during that step's own settle poll was previously masked as
+`NO_BRANCH_MATCHED` or `PRECONDITION_FAILED` after a full timeout, and a violation recorded
+during locator resolution was masked as `LOCATOR_NOT_FOUND` or its siblings. Each check site
+consults the surface once and reports once — a violation `settle()` already translated is
+not re-read and re-captured by the caller's own check immediately afterward.
+**Cost accepted:** the check sites are enumerated by hand, not derived structurally from
+"every place a `Surface` method is called" — a call site added later without the same
+`_violation` guard reintroduces exactly this defect, and one such site (a `pending_dialog()`
+check made after `act()` returns `ok=False`) is still open at this phase's close, flagged
+for the human rather than fixed here (see the phase-5 ledger's final entry).
+
+## D41 — Risk is heuristic first, human second, and the heuristic is asymmetric on purpose
+`classify(action, accessible_name)` scores an action `safe`, `risky`, or `irreversible` from
+the action type and the control's own accessible name — never a model, never a guess at
+intent. `read`/`wait_for` can never rise above `safe` (observing cannot mutate); a `click`/
+`press_key` on a name naming a commit verb (`post`, `delete`, `submit payment`, `close`
+within two words of `account`) is `irreversible`; any action on a name matching the wider
+`transfer|delete|close|post|submit payment` vocabulary is `risky` — including "Transfer
+History", a read-only link, which is exactly the asymmetry §6.3 asks for: over-classifying
+costs a human a moment at approval; a genuine transfer classified safe and run unattended
+cannot be undone. An artifact author may declare a lower risk than the heuristic would —
+`validate()` reports it as a warning, never an error, because the human at approval is the
+final authority and must be able to downgrade deliberately — but never a higher one without
+comment, since over-declaring costs nothing. The engine's own gate (`check_action`) then
+refuses to run a `risky` or `irreversible` step unattended unless the artifact's registry
+`status` is `approved`, and refuses any step with no risk classification at all, closing the
+one path an artifact that bypassed `validate()` could otherwise take.
+**Cost accepted:** the `close`-near-`account` phrase is bounded to two words apart, so "Close
+this account" commits but a sentence that merely mentions an account two paragraphs later
+does not — a deliberately narrower net than the unbounded first draft, at the cost of a
+crafted three-word gap escaping the heaviest tier (it still lands on `risky`, not `safe`).
+
+## D42 — Redaction has two vocabularies, and a shape is preserved only when shape carries meaning
+A credential (a password, a token) is scrubbed to the literal `[REDACTED]` wherever the
+existing rule already caught it (D15) — nothing about a credential's shape is worth keeping,
+and phase 5 adds no third treatment for it. A PII-shaped value (an SSN, a card number, an
+account number) is masked instead with its shape and its last four characters intact, so a
+mismatch stays debuggable (§6.5) — the account shape is bounded at ten to twelve digits
+specifically so the run-id timestamp's fourteen digits can never be caught by it, and a
+shaped numeric JSON leaf (an `int`-typed output, an epoch-seconds trace field) is emitted as
+the masked *string* rather than corrupting the surrounding JSON with an unquoted partial
+mask. One `RedactingWriter` is the sole path evidence text reaches disk through — `RunLog`
+and `EvidenceWriter` both go through it, and a test greps the observability package for a
+direct file write to enforce that structurally rather than by convention. This resolves §10's
+"result.json exactly as returned" in favour of §6.5's "masked in ... evidence": a `redact`-
+flagged output is returned to the caller (stdout) unmasked and written to `result.json`
+masked — the two channels are asserted apart by one test, not folded together.
+**Cost accepted:** a value with no digits at all (a name, an address) tagged `redact` is
+masked by turning every alphanumeric character into `*`, which destroys more than a digit
+run's shape would; a short sensitive input's literal value, when it must be masked out of a
+free-text reason rather than a declared field, is masked by substring replacement and can
+therefore touch unrelated text that happens to contain it — the same accepted trade-off
+`scrub_protected_values` already made, now a third site using it. The marker's own sign-off
+remains owed to the repository owner, carried since phase 2.
+
+## D43 — The CLI requires a deployment policy, and narrowing is checked where the browser is
+`cua replay` refuses to run without `--policy PATH`: an unattended replay with no allowlist
+is exactly the unbounded blast radius §6.7 warns against. The order is `--mode` literal,
+then `load_policy` (a parse or schema refusal is one stderr line and exit 2, no evidence —
+the same shape D36 gave a `load` refusal), then `load`, then `validate(artifact, policy)` —
+the one place a per-capability policy's widening is checked against a real allowlist, since
+the store's own `load` has none to check against — then the registry's recorded `status`,
+then the writer, then inputs, then `launch_page`, then a `WebSurface` built with a guard
+compiled from the same narrowed allowlist the engine receives. A syntactically malformed
+policy file and a syntactically malformed artifact file are refused the same way — a parser
+exception is caught and re-raised as the same `ValueError` every other malformed-input path
+already produces, so an operator hand-editing either file sees one refusal shape, never a
+traceback.
+**Cost accepted:** a policy-load or widening refusal leaves no evidence directory at all
+(D36's "a refused invocation still leaves a record" applies only from `load` onward, not to
+a policy that never got that far); the deployment's own YAML file carries no schema
+enforcement beyond what `PolicyConfig` itself validates.
+
+**Standing note on this phase's whole-review close:** the final whole-phase review (five
+findings, five folded minors) closed clean except one residual the scoped re-review
+surfaced afterward — a fifth `SurfaceError`-to-`SESSION_LOST` translation site in the replay
+engine (the `pending_dialog()` check made when an action reports `ok=False`) does not
+consult the recorded-violation check D40 describes, and can therefore report `SESSION_LOST`
+instead of `ALLOWLIST_VIOLATION` on a frozen surface. The security property is unaffected —
+the surface stays frozen and no further action executes — only the diagnosis is wrong. Left
+open deliberately rather than triggering a second fix wave; the phase-5 ledger names the
+exact fix (mirror the two-line guard already applied at the other four sites) and this is
+flagged to the repository owner at branch-finish for an explicit decision.
