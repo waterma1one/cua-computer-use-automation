@@ -282,9 +282,18 @@ def _parse_artifact(root: Path, id: str, version: int) -> Artifact:
     because a file whose content disagrees with its path is a defect in every reading: E18
     compared only a *passed* artifact to the key, so a byte-copy of one version's file at
     another key's path loaded and approved under the spoofed key (C4).
+
+    A file that is not parseable YAML at all is a malformed artifact like any other, and is
+    refused as `ValueError` with the parser's own complaint in the message. `yaml.YAMLError`
+    is not a `ValueError`, so left uncaught a hand-edited file with an unclosed bracket
+    escaped every caller's `except (FileNotFoundError, ValueError)` as a traceback.
     """
     path = _artifact_path(root, id, version)
-    artifact = Artifact.model_validate(yaml.safe_load(path.read_text()))
+    try:
+        raw = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{path} could not be parsed: {exc}") from exc
+    artifact = Artifact.model_validate(raw)
     if artifact.id != id or artifact.version != version:
         raise ValueError(
             f"{path} declares itself {artifact.id!r} v{artifact.version}, which does not "
