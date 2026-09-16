@@ -522,10 +522,13 @@ def test_a_missing_policy_flag_is_a_usage_error(tmp_path) -> None:
     save(artifact, tmp_path)
     result = runner.invoke(app, [
         "replay", artifact.id, str(artifact.version), "--root", str(tmp_path),
-        "--base-url", "http://127.0.0.1:1", "--input", "member_id=12345",
+        "--base-url", "http://127.0.0.1:1",
+        "--evidence-root", str(tmp_path / "evidence_out"), "--input", "member_id=12345",
     ])
     assert result.exit_code == 2
-    assert "--policy" in result.output
+    assert result.stdout == ""
+    assert "--policy" in result.stderr
+    assert not (tmp_path / "evidence_out").exists()
 
 
 def test_an_unloadable_policy_is_a_clean_exit_2_with_no_evidence(tmp_path, monkeypatch) -> None:
@@ -544,7 +547,35 @@ def test_an_unloadable_policy_is_a_clean_exit_2_with_no_evidence(tmp_path, monke
         "--evidence-root", str(tmp_path / "evidence_out"), "--input", "member_id=12345",
     ])
     assert result.exit_code == 2
-    assert "allow_paths" in result.output
+    assert result.stdout == ""
+    assert "allow_paths" in result.stderr
+    assert not (tmp_path / "evidence_out").exists()
+
+
+def test_a_syntactically_malformed_policy_file_is_a_clean_cli_error(
+    tmp_path, monkeypatch,
+) -> None:
+    # Same defect class as 06ba350 ("turn load and input failures into clean errors instead
+    # of tracebacks"), on the file an operator hand-edits most: `yaml.safe_load` raises
+    # `yaml.YAMLError`, not `ValueError`, on a syntactically broken document.
+    import cua.cli as cli_module
+    artifact = base()
+    save(artifact, tmp_path)
+    bad = tmp_path / "policy.yaml"
+    bad.write_text("allowed_paths: [ '/'\n")  # unclosed bracket
+
+    def _must_not_launch(base_url: str):
+        raise AssertionError("a browser was launched despite a malformed policy")
+
+    monkeypatch.setattr(cli_module, "launch_page", _must_not_launch)
+    result = runner.invoke(app, [
+        "replay", artifact.id, str(artifact.version), "--root", str(tmp_path),
+        "--base-url", "http://127.0.0.1:1", "--policy", str(bad),
+        "--evidence-root", str(tmp_path / "evidence_out"), "--input", "member_id=12345",
+    ])
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "could not be parsed" in result.stderr
     assert not (tmp_path / "evidence_out").exists()
 
 
@@ -566,7 +597,8 @@ def test_a_widening_capability_policy_is_refused_at_the_cli_with_exit_2(
         "--evidence-root", str(tmp_path / "evidence_out"), "--input", "member_id=12345",
     ])
     assert result.exit_code == 2
-    assert "POLICY_WIDENS_ALLOWLIST" in result.output
+    assert result.stdout == ""
+    assert "POLICY_WIDENS_ALLOWLIST" in result.stderr
     assert not (tmp_path / "evidence_out").exists()
 
 
@@ -724,7 +756,13 @@ def test_no_credential_appears_anywhere_in_the_evidence_of_a_login_bearing_run(
     # "LOGIN page snapshot"), so this is the one construction that puts the credential in
     # front of every layer at once: the snapshot scrub, the `Failure.observed` text built
     # from scrubbed node names, `run.json`'s input mask, stdout. Then every file under the
-    # evidence directory is read and grepped.
+    # evidence directory is read and grepped. The `screenshots/s3.png` byte-grep below is
+    # vacuous by construction -- compressed pixel data never carries the literal ASCII
+    # password bytes regardless of what is on screen -- and it only happens not to matter
+    # here because the mock app's password field is a real `<input type="password">`
+    # rendering dots rather than the typed characters, not because pixels are inherently
+    # safe; `EvidenceWriter.frame`'s own docstring already states screenshots are not
+    # redacted (E8).
     from mockapp.app import DEFAULT_LOGIN_PASSWORD, DEFAULT_LOGIN_USER
 
     top = [SurfaceSegment(kind="window", name="main")]
