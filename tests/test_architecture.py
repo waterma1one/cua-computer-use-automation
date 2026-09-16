@@ -85,3 +85,15 @@ def test_the_failure_kind_vocabulary_has_exactly_one_implementation() -> None:
         assert not hasattr(module, "_FAILURE_KINDS")
         assert not hasattr(module, "_permits_path")
         assert not hasattr(module, "_denied_navigation_reason")
+
+
+def test_every_evidence_text_write_goes_through_the_redacting_writer() -> None:
+    """E8: one choke point. `cua/observability/` may not write text to disk except through
+    `cua.policy.redact.RedactingWriter`; a direct `write_text(` or `.open(` there is a write
+    the pattern filter never saw. `write_bytes` (screenshots) is exempt and stated as such.
+    """
+    for name in ("log.py", "evidence.py"):
+        source = (Path("cua/observability") / name).read_text()
+        assert "write_text(" not in source, f"{name} writes text directly"
+        assert ".open(" not in source, f"{name} opens a file directly"
+        assert "put_text(" in source or "put_line(" in source, f"{name} uses the writer"
