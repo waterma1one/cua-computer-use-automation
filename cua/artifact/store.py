@@ -112,12 +112,12 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, ConfigDict
 
-from cua.artifact.models import Artifact
+from cua.artifact.models import Artifact, RegistryStatus
 from cua.artifact.validate import CRITERION_1_CODES, Finding, validate
 
 logger = logging.getLogger(__name__)
@@ -149,7 +149,7 @@ class RegistryEntry(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["draft", "approved"] = "draft"
+    status: RegistryStatus = "draft"
     replays: int = 0
     successes: int = 0
     score: float | None = None

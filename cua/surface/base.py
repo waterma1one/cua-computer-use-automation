@@ -9,6 +9,7 @@ which concrete implementation backs it.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
 from cua.surface.models import (
@@ -44,6 +45,14 @@ class SurfaceError(RuntimeError):
     have no importable type to catch it with. A concrete surface wraps its own failures
     in this instead.
     """
+
+
+# Phase 5 / E4, E17: what a concrete surface consults before letting the page reach a URL.
+# `None` means permitted; a string is the reason it is not. A guard that raises is treated
+# as a denial (fail closed). Declared here, as a bare callable, so the surface never has to
+# import `cua.policy` -- `cua.policy.allowlist.navigation_guard` builds one and the caller
+# hands it over. The protocol method that reports a violation is Task 4's.
+NavigationGuard = Callable[[str], str | None]
 
 
 @runtime_checkable
