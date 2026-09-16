@@ -13,6 +13,10 @@ protected value by global substring replacement with a visible `"[REDACTED]"` ma
 can touch unrelated text around a very short secret. `EvidenceWriter.write_run`'s
 sensitive-input masking uses the same literal marker and inherits the same accepted
 trade-off -- the repository owner should sign off on this consciously.
+
+Every text write in this package -- `RunLog.event`, and every `EvidenceWriter` method that
+writes text -- goes through `cua.policy.redact.RedactingWriter`, which applies the
+shape-preserving pattern filter (`cua.policy.redact.redact`) on the way to disk.
 """
 
 from __future__ import annotations

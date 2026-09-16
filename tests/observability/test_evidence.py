@@ -2,7 +2,8 @@ import json
 
 from cua.artifact.models import InputSpec, Provenance
 from cua.observability.evidence import EvidenceWriter
-from cua.replay.result import Success
+from cua.observability.log import RunLog
+from cua.replay.result import Failure, Success
 from cua.surface.models import EvidenceFrame
 from tests.artifact.factories import base
 
@@ -98,3 +99,80 @@ def test_write_run_refuses_an_input_with_no_spec_rather_than_guessing(tmp_path) 
                          inputs={"password": "hunter2"},
                          input_specs={}, policy_mode="sandbox")
     assert not (tmp_path / "evidence" / writer.run_id / "run.json").exists()
+
+
+# Phase 5 / E8, E9: the writer is the redaction layer. Every text write is pattern-filtered;
+# a `redact` output is masked in evidence and untouched in the returned result.
+
+def test_a_snapshot_with_an_ssn_is_shape_redacted_on_write(tmp_path) -> None:
+    writer = EvidenceWriter(tmp_path)
+    frame = EvidenceFrame(
+        generation=1, image_png=None,
+        snapshot_yaml="- text: Member 12345 Dana Whitfield SSN 412-55-0198 Acct 000100045512",
+    )
+    writer.frame(frame, "s1")
+    snapshot = (tmp_path / "evidence" / writer.run_id / "snapshots" / "s1.yaml").read_text()
+    assert "412-55-0198" not in snapshot
+    assert "***-**-0198" in snapshot
+    assert "********5512" in snapshot
+    assert "Member 12345" in snapshot
+
+
+def test_a_redact_output_is_masked_in_result_json_and_untouched_in_the_result(
+    tmp_path,
+) -> None:
+    # Criterion 7, both halves on one object: the caller asked for the balance and gets it;
+    # the evidence copy is masked, shape kept.
+    writer = EvidenceWriter(tmp_path)
+    result = Success(outputs={"balance": "4218.60", "kind": "Savings"}, steps_run=["s1"],
+                     evidence_ref=writer.evidence_ref())
+    written = writer.write_result(result, redacted_outputs={"balance"})
+    on_disk = json.loads((tmp_path / "evidence" / writer.run_id / "result.json").read_text())
+    assert on_disk == written
+    assert on_disk["outputs"] == {"balance": "**18.60", "kind": "Savings"}
+    assert result.outputs == {"balance": "4218.60", "kind": "Savings"}
+
+
+def test_result_json_is_pattern_filtered_even_with_no_redact_outputs(tmp_path) -> None:
+    writer = EvidenceWriter(tmp_path)
+    failure = Failure(
+        kind="NO_BRANCH_MATCHED", step_id="s1", expected="a heading",
+        observed="observed: Member 12345 Dana Whitfield SSN 412-55-0198",
+        evidence_ref=writer.evidence_ref(),
+    )
+    writer.write_result(failure)
+    text = (tmp_path / "evidence" / writer.run_id / "result.json").read_text()
+    assert "412-55-0198" not in text
+    assert "***-**-0198" in text
+    assert writer.evidence_ref() in text  # the pointer survives the pattern pass
+
+
+def test_a_bound_event_tagged_redact_is_masked_in_the_trace(tmp_path) -> None:
+    log = RunLog(tmp_path / "trace.jsonl")
+    log.event(kind="bound", step_id="s2", into="balance", value="4218.60", redact=True)
+    log.event(kind="bound", step_id="s3", into="kind", value="Savings", redact=False)
+    lines = [json.loads(line) for line in (tmp_path / "trace.jsonl").read_text().splitlines()]
+    assert lines[0]["value"] == "**18.60"
+    assert lines[1]["value"] == "Savings"
+
+
+def test_every_string_field_of_an_event_is_pattern_filtered(tmp_path) -> None:
+    log = RunLog(tmp_path / "trace.jsonl")
+    log.event(kind="dialog", message="Confirm transfer from 000100045512-01?",
+              nested={"ssn": "412-55-0198"})
+    text = (tmp_path / "trace.jsonl").read_text()
+    assert "000100045512" not in text and "412-55-0198" not in text
+    assert "********5512-01" in text and "***-**-0198" in text
+
+
+def test_a_non_sensitive_input_that_is_account_shaped_is_masked_in_run_json(tmp_path) -> None:
+    # E8's accepted cost, pinned so it is a decision and not a surprise: the pattern layer
+    # runs over run.json too. Shape kept, last four kept.
+    writer = EvidenceWriter(tmp_path)
+    writer.write_run(goal="g", capability="c",
+                     inputs={"acct": "000100045512", "member_id": "12345"},
+                     input_specs={"acct": InputSpec(type="string"),
+                                  "member_id": InputSpec(type="string")},
+                     policy_mode="strict")
+    data = json.loads((tmp_path / "evidence" / writer.run_id / "run.json").read_text())
+    assert data["inputs"] == {"acct": "********5512", "member_id": "12345"}

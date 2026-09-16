@@ -16,11 +16,13 @@ docstring restates, why the coupling runs one way only).
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
 
 from cua.artifact.models import Artifact, InputSpec
 from cua.artifact.store import dump_yaml
 from cua.observability.log import RunLog
+from cua.policy.redact import RedactingWriter, mask_field, redact_leaves
 from cua.replay.result import ReplayResult, mint_run_id
 from cua.surface.models import EvidenceFrame
 from cua.surface.snapshot import scrub_protected_values
@@ -38,6 +40,7 @@ class EvidenceWriter:
     def __init__(self, root: Path) -> None:
         self._root = root
         self.run_id = mint_run_id()
+        self._writer = RedactingWriter()
 
     def _run_dir(self) -> Path:
         return self._root / "evidence" / self.run_id
@@ -51,24 +54,19 @@ class EvidenceWriter:
         RunLog(self._run_dir() / "trace.jsonl").event(**fields)
 
     def frame(self, frame: EvidenceFrame, name: str) -> None:
-        """Writes one `EvidenceFrame` under `name` (E16: both artifacts in one call, since
-        the engine always has both a screenshot and a snapshot at once).
-
-        `screenshots/<name>.png` is written only when `frame.image_png` is not `None`.
-        `snapshots/<name>.yaml` is always written, re-scrubbed through
-        `scrub_protected_values` -- belt-and-suspenders with `WebSurface.capture()`
-        already scrubbing it before this frame ever reached here.
+        """Writes one `EvidenceFrame` under `name` (E16 of phase 4: both artifacts in one
+        call). `screenshots/<name>.png` is written only when `frame.image_png` is not
+        `None` -- pixels, not redacted, a stated limit. `snapshots/<name>.yaml` is always
+        written, re-scrubbed through `scrub_protected_values` and then through the
+        `RedactingWriter`'s pattern filter (§6.5's third layer).
         """
         run_dir = self._run_dir()
         if frame.image_png is not None:
             screenshots_dir = run_dir / "screenshots"
             screenshots_dir.mkdir(parents=True, exist_ok=True)
             (screenshots_dir / f"{name}.png").write_bytes(frame.image_png)
-
-        snapshots_dir = run_dir / "snapshots"
-        snapshots_dir.mkdir(parents=True, exist_ok=True)
         scrubbed = scrub_protected_values(frame.snapshot_yaml)
-        (snapshots_dir / f"{name}.yaml").write_text(scrubbed)
+        self._writer.put_text(run_dir / "snapshots" / f"{name}.yaml", scrubbed)
 
     def write_run(
         self, *, goal: str, capability: str, inputs: dict[str, object],
@@ -89,6 +87,8 @@ class EvidenceWriter:
         `INVALID_INPUT`). Nothing is written when the check fails: the comprehension
         runs to completion before `run.json` is opened.
         """
+        # Non-sensitive input values still pass through the pattern filter on the way to
+        # disk (E8's accepted cost, pinned by a test).
         masked_inputs: dict[str, object] = {
             name: _REDACTION_MARKER if input_specs[name].sensitive else value
             for name, value in inputs.items()
@@ -99,19 +99,30 @@ class EvidenceWriter:
             "inputs": masked_inputs,
             "policy_mode": policy_mode,
         }
-        run_dir = self._run_dir()
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "run.json").write_text(json.dumps(data, indent=2))
+        self._writer.put_text(self._run_dir() / "run.json", json.dumps(data, indent=2))
 
-    def write_result(self, result: ReplayResult) -> None:
-        """Writes `result.json`: the `ReplayResult` exactly as returned to the caller."""
-        run_dir = self._run_dir()
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "result.json").write_text(json.dumps(result.model_dump(mode="json"), indent=2))
+    def write_result(
+        self, result: ReplayResult, *, redacted_outputs: Iterable[str] = (),
+    ) -> dict[str, object]:
+        """Writes `result.json`: the `ReplayResult` as returned to the caller, with every
+        output named in `redacted_outputs` masked through `mask_field` (E9/E16: the caller
+        keeps the value; the evidence copy keeps only its shape) and the pattern filter
+        applied to every string on the way to disk (E8). Returns the mapping that was
+        written, so a caller can see exactly what evidence holds. The `result` object
+        itself is never modified.
+        """
+        data = result.model_dump(mode="json")
+        outputs = data.get("outputs")
+        if isinstance(outputs, dict):
+            for name in redacted_outputs:
+                if name in outputs and outputs[name] is not None:
+                    outputs[name] = mask_field(str(outputs[name]))
+        written = redact_leaves(data)
+        assert isinstance(written, dict)
+        self._writer.put_text(self._run_dir() / "result.json", json.dumps(written, indent=2))
+        return written
 
     def write_artifact(self, artifact: Artifact) -> None:
         """Writes `artifact.yaml`, via `cua.artifact.store.dump_yaml` -- never a second
-        dump implementation."""
-        run_dir = self._run_dir()
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "artifact.yaml").write_text(dump_yaml(artifact))
+        dump implementation -- through the pattern filter like every other text write."""
+        self._writer.put_text(self._run_dir() / "artifact.yaml", dump_yaml(artifact))
