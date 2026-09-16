@@ -197,6 +197,12 @@ class DeploymentAllowlist(BaseModel):
             return False
         return any(path.startswith(prefix) for prefix in self.allowed_paths)
 
+    def denying_prefix(self, path: str) -> str | None:
+        """The first `denied_paths` prefix that matches `path` (normalised as `permits_path`
+        normalises it), or `None`. For explaining a refusal; `permits_path` decides it."""
+        normalised = _normalise_path(path)
+        return next((p for p in self.denied_paths if normalised.startswith(p)), None)
+
     def permits_origin(self, origin: str) -> bool:
         """Whether `origin` (`scheme://netloc`) is listed. Compared normalised: scheme and
         host lower-cased, a trailing slash ignored. `http://h:80` and `http://h` are
@@ -822,7 +828,7 @@ def _narrowing_findings(
         # cannot change the verdict.
         if deployment.permits_path(path):
             continue
-        if any(path.startswith(prefix) for prefix in deployment.denied_paths):
+        if deployment.denying_prefix(path) is not None:
             findings.append(Finding(
                 level="error", code="POLICY_WIDENS_ALLOWLIST", where="policy.allowed_paths",
                 message=(

@@ -79,7 +79,9 @@ def test_a_denied_path_cannot_be_reached_through_unnormalised_syntax(url: str) -
     # Reviewer probe: `//account/close` and `/%2Faccount/close` sailed past a raw
     # `startswith`. Deny rules are evaluated on the path a routing layer would see.
     assert DEPLOYMENT.permits_url(url) is False
-    assert not check_navigation(url, DEPLOYMENT).allowed
+    decision = check_navigation(url, DEPLOYMENT)
+    assert not decision.allowed
+    assert "denied by prefix '/account/close'" in decision.reason
 
 
 def test_permits_path_normalises_the_static_target_too() -> None:

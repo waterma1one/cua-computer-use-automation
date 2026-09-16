@@ -47,7 +47,7 @@ def check_navigation(url: str, allowlist: DeploymentAllowlist) -> Decision:
         reason = f"origin {origin!r} is not an allowed origin"
     else:
         path = parts.path or "/"
-        denied = next((p for p in allowlist.denied_paths if path.startswith(p)), None)
+        denied = allowlist.denying_prefix(path)
         if denied is not None:
             reason = (f"path {path!r} is denied by prefix {denied!r} "
                       "(deny rules are evaluated first and win)")
