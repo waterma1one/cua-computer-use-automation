@@ -42,6 +42,7 @@ class FakeSurface:
     act_ok: bool = True
     act_read_value: str | None = None
     raise_on_act: Exception | None = None
+    violation: str | None = None
     dismiss_calls: int = 0
     _obs_index: int = 0
     _dialog_index: int = 0
@@ -72,6 +73,9 @@ class FakeSurface:
         i = min(self._dialog_index, len(self.dialog_messages) - 1)
         self._dialog_index += 1
         return self.dialog_messages[i]
+
+    def allowlist_violation(self) -> str | None:
+        return self.violation
 
 
 assert isinstance(FakeSurface([]), Surface)  # module import time: conformance, not just shape
