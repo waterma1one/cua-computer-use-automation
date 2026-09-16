@@ -36,10 +36,12 @@ class RunLog:
         `scrub_protected_values` (a credential never reaches the trace verbatim); a `value`
         field is masked through `mask_field` when the event carries `redact=True` (§6.5:
         field-level `redact` is honoured by the log writer, and the replay engine tags its
-        `bound` events with the output's declared flag -- E9); then every string leaf goes
-        through the pattern filter (`redact_leaves`), and the serialised line goes through
-        `RedactingWriter` once more, which is a no-op on already-filtered text and is what
-        makes "every write is filtered" true by construction rather than by discipline.
+        `bound` events with the output's declared flag -- E9; the masked value is always
+        emitted as a string, whatever type the caller passed in); then every string leaf
+        goes through the pattern filter (`redact_leaves`), and the serialised line goes
+        through `RedactingWriter` once more, which is a no-op on already-filtered text and
+        is what makes "every write is filtered" true by construction rather than by
+        discipline.
         """
         scrubbed = dict(fields)
         snapshot_yaml = scrubbed.get("snapshot_yaml")

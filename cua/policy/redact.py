@@ -26,9 +26,9 @@ from pathlib import Path
 
 __all__ = ["RedactingWriter", "mask_digits", "mask_field", "redact", "redact_leaves"]
 
-_SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
-_CARD_RE = re.compile(r"\b\d{4}([ -]?)\d{4}\1\d{4}\1\d{4}\b")
-_ACCOUNT_RE = re.compile(r"\b(\d{10,12})(-\d{2})?\b")
+_SSN_RE = re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)")
+_CARD_RE = re.compile(r"(?<!\d)\d{4}([ -]?)\d{4}\1\d{4}\1\d{4}(?!\d)")
+_ACCOUNT_RE = re.compile(r"(?<!\d)(\d{10,12})(-\d{2})?(?!\d)")
 
 
 def mask_digits(value: str, *, keep: int = 4) -> str:
@@ -75,10 +75,26 @@ def redact(text: str) -> str:
 
 
 def redact_leaves(value: object) -> object:
-    """`redact` applied to every string leaf of a JSON-shaped structure; dict keys, numbers,
-    booleans and `None` pass through unchanged."""
+    """`redact` applied to every string leaf of a JSON-shaped structure.
+
+    A `bool` or `None` leaf passes through unchanged. An `int`/`float` leaf whose decimal
+    string form `redact` would change (a bare account-shaped number, say) is itself
+    PII-shaped, so it is emitted as that masked *string* rather than left as a number --
+    if it were left as a number, the digit run would reach the serialised line unquoted,
+    and the writer's own text-level pattern pass would then rewrite those digits in place,
+    corrupting the JSON. A number `redact` would not change passes through as a number.
+
+    Dict keys are left alone by this function; a key that happens to be PII-shaped is
+    caught by the writer's text-level pattern pass instead.
+    """
     if isinstance(value, str):
         return redact(value)
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int | float):
+        text = str(value)
+        masked = redact(text)
+        return masked if masked != text else value
     if isinstance(value, dict):
         return {key: redact_leaves(item) for key, item in value.items()}
     if isinstance(value, list):

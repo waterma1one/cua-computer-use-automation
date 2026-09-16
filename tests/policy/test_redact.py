@@ -73,6 +73,21 @@ def test_redact_leaves_walks_nested_structures_and_leaves_non_strings_alone() ->
     }
 
 
+def test_redact_leaves_masks_a_bare_shaped_number_to_a_string_and_leaves_bools_alone() -> None:
+    # A bare int/float leaf that is itself PII-shaped must come back as a masked *string*,
+    # not a number: an unquoted digit run in the serialised line would otherwise be
+    # rewritten a second time by the writer's text-level pass, corrupting the JSON.
+    assert redact_leaves({"acct": 100045512345, "n": 42, "flag": True}) == {
+        "acct": "********2345", "n": 42, "flag": True,
+    }
+
+
+def test_an_ssn_with_no_space_before_it_is_still_masked() -> None:
+    # Digit-only lookarounds, not \b: "ssn412..." has no \w/\W boundary before the digits
+    # (both 'n' and '4' are word characters), but the digit run must still be caught.
+    assert redact("ssn412-55-0198") == "ssn***-**-0198"
+
+
 def test_the_writer_redacts_every_byte_it_writes(tmp_path) -> None:
     writer = RedactingWriter()
     target = tmp_path / "nested" / "out.txt"
