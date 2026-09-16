@@ -6,7 +6,7 @@ Stated as a heuristic, not dressed up as risk detection. The tiers (E7):
 - `read` and `wait_for` are `safe` whatever the control is called -- observing cannot
   mutate.
 - A `click` or `press_key` on a control whose name carries a commit verb (`post`, `delete`,
-  `submit payment`, `close ... account`) is `irreversible`.
+  `submit payment`, or `close` followed within two words by `account`) is `irreversible`.
 - Any other action on a name matching §6.3's `transfer|delete|close|post|submit payment`
   is `risky` -- this is what flags "Transfer History", a read-only link, and that is the
   documented cost of erring toward the recoverable mistake.
@@ -28,7 +28,7 @@ RISK_ORDER: dict[Risk, int] = {"safe": 0, "risky": 1, "irreversible": 2}
 
 _RISKY_RE = re.compile(r"\b(?:transfer|delete|close|post|submit payment)\b", re.IGNORECASE)
 _IRREVERSIBLE_RE = re.compile(
-    r"\b(?:post|delete|submit payment)\b|\bclose\b.*\baccount\b", re.IGNORECASE
+    r"\b(?:post|delete|submit payment)\b|\bclose\b(?:\s+\w+){0,2}\s+account\b", re.IGNORECASE
 )
 _OBSERVING: frozenset[str] = frozenset({"read", "wait_for"})
 _FIRING: frozenset[str] = frozenset({"click", "press_key"})

@@ -46,6 +46,15 @@ def test_matching_is_case_insensitive_and_word_bounded() -> None:
     assert classify("click", "Closed accounts") == "safe"   # `close` inside a word
 
 
+def test_close_must_be_within_two_words_of_account_to_be_irreversible() -> None:
+    # A bounded phrase: "Close this account" commits; a name that merely mentions an
+    # account somewhere later does not jump to the heaviest gate -- it stays `risky`
+    # because `close` alone is on the §6.3 list, and a human confirms from there.
+    assert classify("click", "Close this account") == "irreversible"
+    assert classify("click", "Close the savings account") == "irreversible"
+    assert classify("click", "Close the dialog and view account") == "risky"
+
+
 def test_the_order_is_total_and_irreversible_is_highest() -> None:
     assert RISK_ORDER["safe"] < RISK_ORDER["risky"] < RISK_ORDER["irreversible"]
     assert set(RISK_ORDER) == {"safe", "risky", "irreversible"}
