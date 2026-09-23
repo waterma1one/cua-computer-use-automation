@@ -15,12 +15,12 @@ system that silently clicks the wrong thing.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 
-from playwright.sync_api import Dialog, Frame, Page, Route, sync_playwright
+from playwright.sync_api import Browser, Dialog, Frame, Page, Playwright, Route, sync_playwright
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator as PlaywrightLocator
 
@@ -47,7 +47,14 @@ from cua.surface.snapshot import parse_aria_snapshot, scrub_protected_values
 # Re-exporting it from this, the one Playwright-importing module, would invite exactly the
 # import it exists to avoid -- so it is imported here (raised by `act_on_index`) but not
 # re-exported.
-__all__ = ["ObservationBudget", "WebSurface", "launch_page"]
+__all__ = [
+    "ObservationBudget",
+    "SessionBrowser",
+    "WebSurface",
+    "close_session_page",
+    "launch_page",
+    "open_session_page",
+]
 
 # Also fix: a real Observation's generation is always >= 1 (spec §3.1: `observe()`
 # increments before returning). This sentinel is what `capture()` reports before the first
@@ -726,3 +733,57 @@ def launch_page(base_url: str) -> Iterator[Page]:
                 page.close()
         finally:
             browser.close()
+
+
+@dataclass
+class SessionBrowser:
+    """The three handles `open_session_page` opened, held together so `close_session_page`
+    can tear all three down -- Playwright's sync API gives no public way back from a `Browser`
+    to the `Playwright` object that created it (E9). `page` is the only field any caller
+    outside this module reads; `_browser`/`_playwright` stay private to this pairing (E9,
+    §2.3 -- nothing outside `cua.surface.web` holds a `Browser` or `Playwright` object).
+    """
+
+    page: Page
+    _browser: Browser
+    _playwright: Playwright
+
+
+def open_session_page(base_url: str, *, headless: bool = True) -> SessionBrowser:
+    """Opens one headed-capable Chromium page against `base_url` -- unlike `launch_page`, not
+    as a context manager, because a session's page is held across many separate HTTP requests
+    by `cua.session.service`, not torn down at the end of the call that opened it.
+    `headless=True` is every test's default; a real human handoff needs `headless=False`, set
+    by `cua serve`, never by a test.
+
+    **Thread-affine (E15):** the thread that calls this becomes the only thread that may ever
+    call a method on the returned `SessionBrowser.page`, or pass it to `close_session_page`,
+    for its whole lifetime -- Playwright's sync API is not safe to call from a second OS
+    thread against a `Page`/`Browser` a different thread created (verified: it raises
+    `greenlet.error`, not a `PlaywrightError`). `cua.session.service`'s session-owning thread
+    (Task 6) is this module's only production caller and respects this by construction.
+    """
+    playwright = sync_playwright().start()
+    browser = playwright.chromium.launch(headless=headless)
+    page = browser.new_page(base_url=base_url)
+    return SessionBrowser(page=page, _browser=browser, _playwright=playwright)
+
+
+def close_session_page(session_browser: SessionBrowser, *, logout_path: str | None = None) -> None:
+    """Tears down one session's browser: attempts a logout first (§7.7 -- "attempts", not
+    "guarantees"), then closes the page, its browser, and the driver, regardless of whether
+    the logout attempt succeeded. Must be called from the same thread that called
+    `open_session_page` for this `SessionBrowser` (E15).
+
+    Best-effort by design, like the human-action capture script (E14): a timeout or a
+    `PlaywrightError` while navigating to `logout_path` is swallowed, not raised, because a
+    teardown that cannot fail to close is the actual safety property here (§7.7: leaving a
+    headed browser parked on an authenticated session is the risk this exists to close, and
+    that must happen even when the logout attempt itself goes wrong).
+    """
+    if logout_path is not None:
+        with suppress(PlaywrightError):
+            session_browser.page.goto(logout_path, timeout=_NAVIGATION_TIMEOUT_MS)
+    session_browser.page.close()
+    session_browser._browser.close()
+    session_browser._playwright.stop()

@@ -268,6 +268,15 @@ def create_app(variant: str = "base") -> FastAPI:
         response.set_cookie(SESSION_COOKIE, token, httponly=True)
         return response
 
+    @app.get("/logout")
+    def logout(request: Request) -> RedirectResponse:
+        token = request.cookies.get(SESSION_COOKIE)
+        if token is not None:
+            app.state.sessions.pop(token, None)
+        response = RedirectResponse("/login", status_code=303)
+        response.delete_cookie(SESSION_COOKIE)
+        return response
+
     @app.get("/search", response_model=None)
     def search_form(request: Request, error: str | None = None) -> HTMLResponse | RedirectResponse:
         resp: HTMLResponse | RedirectResponse | None  # see apply_fault's docstring
