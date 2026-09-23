@@ -14,14 +14,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
+from cua.surface.models import EvidenceFrame
+
 
 class _CaptureSink(Protocol):
     def event(self, **fields: object) -> None: ...
-    def frame(self, frame: object, name: str) -> None: ...
+    def frame(self, frame: EvidenceFrame, name: str) -> None: ...
 
 
 class _CaptureSurface(Protocol):
-    def capture(self) -> object: ...
+    def capture(self) -> EvidenceFrame: ...
     def pending_dialog(self) -> str | None: ...
 
 
@@ -29,12 +31,11 @@ class _CaptureSurface(Protocol):
 class HumanAction:
     """One captured human action. `human_origin` is required, not defaulted (E20) -- the real
     guarantee this codebase gives is structural, not type-level: `tests/test_architecture.py`
-    greps `cua/` for `HumanAction(` and requires it to appear only in this module (specifically,
-    only inside `record_human_action`, below). A defaulted `Literal[True] = True` field would
-    still be an ordinary settable kwarg at every call site regardless of its annotation -- the
-    contract card's own earlier draft claimed the default alone made this "never
-    caller-constructible with `human_origin=False`," which is false; this is the honest version
-    of that claim.
+    greps `cua/` for `HumanAction(` and requires it to appear only inside this module. A
+    defaulted `Literal[True] = True` field would still be an ordinary settable kwarg at every
+    call site regardless of its annotation -- the contract card's own earlier draft claimed the
+    default alone made this "never caller-constructible with `human_origin=False`," which is
+    false; this is the honest version of that claim.
     """
 
     operator_id: str
@@ -51,9 +52,12 @@ def record_human_action(
     sink: _CaptureSink, operator_id: str, raw: dict[str, object]
 ) -> HumanAction:
     action = HumanAction(
-        operator_id=operator_id, type=str(raw.get("type", "")),
-        role=raw.get("role"), name=raw.get("name"),  # type: ignore[arg-type]
-        value=raw.get("value"), url=str(raw.get("url", "")),  # type: ignore[arg-type]
+        operator_id=operator_id,
+        type=str(raw.get("type", "")),
+        role=raw.get("role"),  # type: ignore[arg-type]
+        name=raw.get("name"),  # type: ignore[arg-type]
+        value=raw.get("value"),  # type: ignore[arg-type]
+        url=str(raw.get("url", "")),
         timestamp=int(raw.get("timestamp") or 0),  # type: ignore[call-overload]
         human_origin=True,
     )
