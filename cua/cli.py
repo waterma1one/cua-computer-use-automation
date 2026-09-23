@@ -14,14 +14,19 @@ loaded, `cua.artifact.validate.validate` checks that the artifact's own policy b
 any) only narrows it, never widens it. The effective (narrowed) allowlist is what is
 handed to the replay engine and to the live navigation guard installed on the `WebSurface`;
 the artifact's registry status (draft/approved) is read and passed through too.
+
+Phase 6: `serve` runs the session service (`cua.session.service.create_app`) under uvicorn,
+the same shape `mockapp/__main__.py` uses for the mock app.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import NoReturn, cast, get_args
 
 import typer
+import uvicorn
 
 from cua.artifact.models import Artifact, InputSpec
 from cua.artifact.store import RegistryEntry, load, read_registry
@@ -32,6 +37,7 @@ from cua.policy.config import load_policy
 from cua.replay.engine import replay as run_replay
 from cua.replay.engine import validate_inputs
 from cua.replay.result import Failure, Mode, mint_run_id
+from cua.session.service import create_app as create_session_app
 from cua.surface.web import WebSurface, launch_page
 
 app = typer.Typer()
@@ -282,3 +288,26 @@ def replay(
     typer.echo(result.model_dump_json())
     if isinstance(result, Failure):
         raise typer.Exit(code=1)
+
+
+_OPERATOR_TOKEN_ENV = "CUA_OPERATOR_TOKEN"
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Interface to bind."),
+    port: int = typer.Option(8800, "--port", help="Port to bind."),
+) -> None:
+    """Runs the session service (spec S7): sessions, interventions, and the control lease.
+
+    Requires `CUA_OPERATOR_TOKEN` in the environment (see `.env.example`) -- the shared
+    token the intervention endpoints check -- and refuses to start without one (exit 2)
+    rather than serving an operator API nobody can authenticate to, or anyone can. Session
+    browsers are opened headed, because a human handoff needs a browser the operator can
+    see. Binds to loopback by default.
+    """
+    token = os.environ.get(_OPERATOR_TOKEN_ENV, "")
+    if not token:
+        typer.echo(f"{_OPERATOR_TOKEN_ENV} must be set to a non-empty token", err=True)
+        raise typer.Exit(code=2)
+    uvicorn.run(create_session_app(operator_token=token, headless=False), host=host, port=port)
