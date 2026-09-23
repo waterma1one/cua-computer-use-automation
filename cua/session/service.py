@@ -29,7 +29,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import Response
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict
 
 from cua.artifact.models import Artifact, FailureKind, RegistryStatus
@@ -67,6 +69,12 @@ __all__ = ["SessionService", "create_app"]
 _SESSION_READY_TIMEOUT_S = 45.0
 
 _REDACTION_MARKER = "[REDACTED]"
+
+# Task 7's ruling: the browser console is a convenience layer over the same shared
+# CUA_OPERATOR_TOKEN the JSON API's Authorization header already checks -- not a second
+# auth mechanism. This cookie carries that same token value; `/interventions/*` never reads
+# it (see `_require_operator`, unchanged).
+_CONSOLE_COOKIE = "cua_operator"
 
 _OUTCOME_NAMES: dict[type, str] = {
     Resolved: "resolved", ResolvedManually: "resolved_manually",
@@ -437,6 +445,30 @@ class SessionService:
         ):
             raise HTTPException(status_code=401, detail="a valid operator bearer token is required")
 
+    def _require_console(self, token: str | None, cookie: str | None) -> None:
+        """`GET /console`'s own ruling (Task 7): a query-string `?token=` or the httponly
+        cookie it sets, either checked against the same `CUA_OPERATOR_TOKEN`
+        `_require_operator` checks for the JSON API -- a convenience layer over that one
+        token, never a second mechanism. `_require_operator` itself is untouched."""
+        for candidate in (token, cookie):
+            if candidate is not None and secrets.compare_digest(
+                candidate.encode(), self._operator_token.encode()
+            ):
+                return
+        raise HTTPException(status_code=401, detail="a valid operator token is required")
+
+    def list_all_interventions(self) -> list[Intervention]:
+        """Every intervention across every live session, for `GET /console`'s listing."""
+        with self._lock:
+            return [iv for session in self._sessions.values()
+                    for iv in session.interventions.list_all()]
+
+    def console_intervention(self, iv_id: str) -> Intervention:
+        """One intervention, for `GET /console/interventions/{id}`'s detail page."""
+        with self._lock:
+            _session, iv = self._owned_intervention(iv_id)
+            return iv
+
     def _session(self, session_id: str) -> _LiveSession:
         with self._lock:
             session = self._sessions.get(session_id)
@@ -613,6 +645,7 @@ def create_app(*, operator_token: str, headless: bool = True) -> FastAPI:
     serve` passes `False`, because a human handoff needs a browser the operator can see."""
     service = SessionService(operator_token=operator_token, headless=headless)
     app = FastAPI()
+    templates = Jinja2Templates(directory=str(Path(__file__).parent / "console"))
 
     @app.post("/sessions", status_code=201)
     def post_session(request: _CreateSessionRequest) -> dict[str, str]:
@@ -643,5 +676,26 @@ def create_app(*, operator_token: str, headless: bool = True) -> FastAPI:
     ) -> dict[str, Any]:
         service._require_operator(authorization)
         return service.handback(iv_id, request)
+
+    @app.get("/console")
+    def get_console(request: Request, token: str | None = None) -> Response:
+        service._require_console(token, request.cookies.get(_CONSOLE_COOKIE))
+        response = templates.TemplateResponse(
+            request, "index.html", {"interventions": service.list_all_interventions()},
+        )
+        if token is not None:
+            response.set_cookie(_CONSOLE_COOKIE, service._operator_token, httponly=True)
+        return response
+
+    @app.get("/console/interventions/{iv_id}")
+    def get_console_intervention(
+        request: Request, iv_id: str, token: str | None = None,
+    ) -> Response:
+        service._require_console(token, request.cookies.get(_CONSOLE_COOKIE))
+        iv = service.console_intervention(iv_id)
+        response = templates.TemplateResponse(request, "intervention.html", {"iv": iv})
+        if token is not None:
+            response.set_cookie(_CONSOLE_COOKIE, service._operator_token, httponly=True)
+        return response
 
     return app

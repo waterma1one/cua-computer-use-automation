@@ -40,6 +40,14 @@ def test_get_returns_none_for_an_unknown_id() -> None:
     assert interventions.get("nope") is None
 
 
+def test_list_all_returns_every_intervention_in_creation_order() -> None:
+    interventions = Interventions(clock=FakeClock())
+    assert interventions.list_all() == []
+    first = _create(interventions, run_id="run-a")
+    second = _create(interventions, run_id="run-b")
+    assert interventions.list_all() == [first, second]
+
+
 def test_claim_records_the_operator_and_moves_to_claimed() -> None:
     clock = FakeClock()
     interventions = Interventions(clock=clock)

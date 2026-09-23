@@ -81,6 +81,11 @@ class Interventions:
     def get(self, id: str) -> Intervention | None:
         return self._by_id.get(id)
 
+    def list_all(self) -> list[Intervention]:
+        """Every intervention this instance has ever created, oldest first (dict insertion
+        order) -- the console's own read, so it never reaches into `_by_id` directly."""
+        return list(self._by_id.values())
+
     def claim(self, id: str, operator_id: str, *, clock: Clock) -> Intervention:
         iv = self._by_id[id]
         if iv.status == "open" and clock.monotonic_ms() - iv.created_at >= iv.ttl_ms:
