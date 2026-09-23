@@ -773,6 +773,9 @@ def _run_step(run: _Run, step: Step) -> ReplayResult | None:
         try:
             dialog_message = run.surface.pending_dialog()
         except SurfaceError as exc:
+            violated = _violation(run, step.id)
+            if violated is not None:
+                return violated
             return run.fail(
                 "SESSION_LOST", step.id, "the surface reports its dialog state",
                 str(exc), capture=True,
