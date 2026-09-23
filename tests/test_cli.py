@@ -819,3 +819,41 @@ def test_no_credential_appears_anywhere_in_the_evidence_of_a_login_bearing_run(
     assert "[REDACTED]" in snapshot and DEFAULT_LOGIN_USER in snapshot
     trace = next(b for n, b in written.items() if n.endswith("trace.jsonl")).decode()
     assert '"kind": "step_started"' in trace and '"step_id": "s3"' in trace
+
+
+def test_serve_refuses_to_start_without_an_operator_token(monkeypatch) -> None:
+    import cua.cli as cli_module
+
+    def _must_not_run(*args, **kwargs):
+        raise AssertionError("the service must not start without CUA_OPERATOR_TOKEN")
+
+    monkeypatch.delenv("CUA_OPERATOR_TOKEN", raising=False)
+    monkeypatch.setattr(cli_module.uvicorn, "run", _must_not_run)
+    result = runner.invoke(app, ["serve"])
+    assert result.exit_code == 2
+    assert "CUA_OPERATOR_TOKEN" in result.stderr
+
+
+def test_serve_runs_the_session_service_headed_with_the_env_token(monkeypatch) -> None:
+    # Spec §2.1's `cua serve`, mirroring `mockapp/__main__.py`: `create_app` handed straight
+    # to `uvicorn.run`. Headed (`headless=False`), because a human handoff needs a browser the
+    # operator can actually see -- the one caller that ever passes it.
+    import cua.cli as cli_module
+
+    built: dict[str, object] = {}
+    ran: dict[str, object] = {}
+
+    def _fake_create_app(*, operator_token: str, headless: bool) -> str:
+        built.update(operator_token=operator_token, headless=headless)
+        return "the-app"
+
+    def _fake_run(app_: object, *, host: str, port: int) -> None:
+        ran.update(app=app_, host=host, port=port)
+
+    monkeypatch.setenv("CUA_OPERATOR_TOKEN", "s3cret")
+    monkeypatch.setattr(cli_module, "create_session_app", _fake_create_app)
+    monkeypatch.setattr(cli_module.uvicorn, "run", _fake_run)
+    result = runner.invoke(app, ["serve", "--port", "9123"])
+    assert result.exit_code == 0, result.output
+    assert built == {"operator_token": "s3cret", "headless": False}
+    assert ran == {"app": "the-app", "host": "127.0.0.1", "port": 9123}
