@@ -25,6 +25,7 @@ artifact is checked against. This module imports it rather than redeclaring it;
 from __future__ import annotations
 
 import secrets
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
@@ -34,10 +35,15 @@ from cua.artifact.models import FailureKind
 
 __all__ = [
     "BusinessOutcome",
+    "CannotResolve",
     "Failure",
     "FailureKind",
+    "HandbackOutcome",
     "Mode",
     "ReplayResult",
+    "Resolved",
+    "ResolvedManually",
+    "RestartFrom",
     "Success",
     "mint_run_id",
 ]
@@ -96,6 +102,49 @@ class Failure(BaseModel):
 
 
 ReplayResult = Success | BusinessOutcome | Failure
+
+
+# E3/E6/E4: what a human's resolution of an escalation hands back to the engine, spec
+# §7.6. `Resolved`/`ResolvedManually`/`RestartFrom` name how the run should proceed;
+# `CannotResolve` ends it as a `Failure` carrying the operator's own note. Plain
+# dataclasses, not pydantic models -- this is an in-process handoff between
+# `cua.session`-side code and `cua.replay.engine`, never serialised, so there is nothing
+# for validation to buy here.
+@dataclass
+class Resolved:
+    """The condition the paused step was waiting on now holds. The engine re-verifies the
+    resume checkpoint and continues from the next step (E6) -- the paused step itself is
+    never re-run.
+    """
+
+
+@dataclass
+class ResolvedManually:
+    """The operator completed the capability's goal by hand. The run ends as a
+    human-assisted success with no extracted outputs (E4: this reuses `Success`'s
+    existing `assistance` field -- there is no new field on `Success` for this).
+    """
+
+
+@dataclass
+class RestartFrom:
+    """Resume by re-running the artifact from the named step, discarding whatever partial
+    progress happened after it.
+    """
+
+    step_id: str
+
+
+@dataclass
+class CannotResolve:
+    """The operator could not resolve the escalation. The run ends as a `Failure` whose
+    `observed` text carries this note.
+    """
+
+    note: str
+
+
+HandbackOutcome = Resolved | ResolvedManually | RestartFrom | CannotResolve
 
 
 def mint_run_id() -> str:

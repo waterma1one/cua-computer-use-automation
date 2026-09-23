@@ -17,8 +17,15 @@ from cua.artifact.models import (
 )
 from cua.artifact.validate import DeploymentAllowlist
 from cua.policy.allowlist import check_navigation
-from cua.replay.engine import replay, validate_inputs
-from cua.replay.result import BusinessOutcome, Failure
+from cua.replay.engine import Escalator, replay, validate_inputs
+from cua.replay.result import (
+    BusinessOutcome,
+    CannotResolve,
+    Failure,
+    Resolved,
+    ResolvedManually,
+    RestartFrom,
+)
 from cua.replay.result import Success as ReplaySuccess
 from cua.surface.base import SurfaceError
 from cua.surface.models import EvidenceFrame
@@ -32,7 +39,8 @@ def _artifact(**steps_kwargs) -> Artifact:
         description="test capability", verified=False,
         app=App(vendor_product="corebank-teller", variant="base", surface="web",
                 entry="/teller/index.html"),
-        settle=Settle(timeout_ms=1000, poll_ms=50), max_duration_ms=60000,
+        settle=steps_kwargs.get("settle", Settle(timeout_ms=1000, poll_ms=50)),
+        max_duration_ms=60000,
         inputs={"member_id": InputSpec(type="string", pattern="^[0-9]{5}$", required=True)},
         outputs={"balance": OutputSpec(type="string", format="money")},
         steps=steps_kwargs["steps"],
@@ -1105,3 +1113,277 @@ def test_the_static_navigate_gate_explains_a_refusal_the_way_check_navigation_do
         assert isinstance(result, Failure)
         assert result.observed == check_navigation(
             f"http://127.0.0.1:8000{path}", deployment).reason
+
+
+# --- Phase 6: pluggable escalation ----------------------------------------------------------
+
+class FakeEscalator:
+    """Records every call and returns whatever `next(self._outcomes)` yields -- a script of
+    handback outcomes, one per escalation, the same shape `FakeSurface.dialog_messages` already
+    uses for a sequence of scripted answers.
+    """
+
+    def __init__(self, outcomes: list) -> None:
+        self._outcomes = iter(outcomes)
+        self.calls: list[dict] = []
+
+    def escalate(self, *, step_id, kind, expected, observed):
+        self.calls.append(dict(step_id=step_id, kind=kind, expected=expected, observed=observed))
+        return next(self._outcomes)
+
+
+assert isinstance(FakeEscalator([]), Escalator)  # module import time: conformance
+
+
+def _escalating_recovery() -> Recovery:
+    return Recovery(name="popup", detect=Matcher(name_match="contains", name="Unexpected"),
+                    handle="escalate")
+
+
+def test_supervised_with_no_escalator_still_raises_not_implemented() -> None:
+    # D31, unchanged: this is the one behaviour that must survive this task untouched.
+    artifact = _artifact(steps=[Step(id="s1", action="click", locator=loc("Search"), risk="safe")])
+    with pytest.raises(NotImplementedError):
+        replay(artifact, {"member_id": "12345"}, PoisonSurface(), "supervised")
+
+
+def test_a_recovery_escalate_trigger_calls_the_escalator_with_the_recovery_kind() -> None:
+    artifact = _artifact(steps=[Step(
+        id="s1", action="click", locator=loc("Search"), risk="safe",
+        expects=[Expect(when=Matcher(role="heading", name_match="contains", name="Member "),
+                        outcome="continue", source="observed")],
+    )])
+    artifact.recovery = [_escalating_recovery()]
+    surface = FakeSurface(frames=[[node("button", name="Search"), node("text", name="Unexpected")]])
+    escalator = FakeEscalator([CannotResolve(note="could not tell what happened")])
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised",
+                    escalator=escalator, clock=FakeClock())
+    assert escalator.calls[0]["step_id"] == "s1"
+    assert isinstance(result, Failure)
+    assert "could not tell what happened" in result.observed
+
+
+def test_no_branch_matched_escalates_in_supervised_mode_instead_of_failing_outright() -> None:
+    artifact = _artifact(steps=[Step(
+        id="s1", action="click", locator=loc("Search"), risk="safe",
+        expects=[Expect(when=Matcher(role="heading", name_match="contains", name="Nope"),
+                        outcome="continue", source="observed")],
+    )])
+    surface = FakeSurface(frames=[[node("button", name="Search")]])
+    escalator = FakeEscalator([CannotResolve(note="gave up")])
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised",
+                    escalator=escalator, clock=FakeClock())
+    assert escalator.calls[0]["kind"] == "NO_BRANCH_MATCHED"
+    assert isinstance(result, Failure) and result.kind == "NO_BRANCH_MATCHED"
+    assert "gave up" in result.observed
+
+
+def test_an_irreversible_steps_locator_not_found_escalates_as_locator_not_found() -> None:
+    artifact = _artifact(steps=[
+        Step(id="s1", action="click", locator=loc("Post"), risk="irreversible"),
+    ])
+    artifact.outputs = {}
+    surface = FakeSurface(frames=[[node("button", name="Something Else")]])
+    escalator = FakeEscalator([CannotResolve(note="operator stepped away")])
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised", status="approved",
+                    confirm_irreversible=True, idempotency_key="k-2", escalator=escalator,
+                    clock=FakeClock())
+    assert escalator.calls[0]["kind"] == "LOCATOR_NOT_FOUND"
+    assert isinstance(result, Failure) and result.kind == "LOCATOR_NOT_FOUND"
+    assert "operator stepped away" in result.observed
+
+
+def test_an_irreversible_steps_ordinary_success_never_escalates() -> None:
+    artifact = _irreversible_artifact()
+    surface = FakeSurface(
+        frames=[[node("button", name="Post"), node("heading", name="Member 12345")]]
+    )
+    escalator = FakeEscalator([])  # never called -- next() on it would raise StopIteration
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised", status="approved",
+                    confirm_irreversible=True, idempotency_key="k-3", escalator=escalator,
+                    clock=FakeClock())
+    assert isinstance(result, ReplaySuccess)
+    assert escalator.calls == []
+
+
+# --- Resolved: resume with checkpoint re-verification ----------------------------------------
+
+def test_resolved_resumes_at_the_next_step_after_re_verifying_the_prior_steps_checkpoint() -> None:
+    artifact = _artifact(steps=[
+        Step(id="s1", action="click", locator=loc("Search"), risk="safe",
+             expects=[Expect(when=Matcher(role="heading", name_match="contains", name="Member "),
+                             outcome="continue", source="observed")]),
+        Step(id="s2", action="read", locator=loc("Savings"), extract="value", parse="money",
+             into="balance", risk="safe",
+             expects=[Expect(when=Matcher(role="heading", name_match="contains", name="Never "),
+                             outcome="continue", source="observed")]),
+    ])
+    # s2's own expects can never match (deliberately) -- it will NO_BRANCH_MATCHED and
+    # escalate. Per E6, T (=s2) is never re-run on Resolved -- its own act()/extraction
+    # already happened during this first attempt, before its settle timed out. Resolved
+    # re-verifies s1's own continue matcher ("Member "), and because s2 is the artifact's
+    # own last step, that re-verification target IS the "next step to resume at" -- there is
+    # no T+1, so _resume_after goes straight to _run_from's tail, which settles the
+    # artifact's own success.checkpoint (the same matcher here) and ends as Success.
+    #
+    # Frame accounting (FakeSurface: observe() reads the PRE-increment index then increments;
+    # resolve() reads _obs_index - 1, i.e. whatever observe() last returned):
+    #   f0 -- s1's resolve (obs_index starts at 0) and s1's settle poll 1 (no match)
+    #   f1 -- s1's settle poll 2: matches "Member ", Continue(). obs_index is now 2, so s2's
+    #         own resolve (reads _obs_index-1 = 1) reads f1 too -- it MUST already carry the
+    #         Savings button (the contract card's original draft put Savings one frame later,
+    #         which made s2's own resolve() fail LOCATOR_NOT_FOUND before it ever reached
+    #         settle -- the actual bug review finding #6 caught here).
+    #   f2 -- held for s2's own settle timeout (NO_BRANCH_MATCHED, escalates) and reused,
+    #         once more, for Resolved's own checkpoint re-verification poll -- both still see
+    #         "Member 12345", so both pass without needing a fourth, distinct frame.
+    savings = node("button", name="Savings", value="4,218.60")
+    surface = FakeSurface(frames=[
+        [node("button", name="Search")],                       # f0
+        [node("heading", name="Member 12345"), savings],        # f1
+        [node("heading", name="Member 12345"), savings],        # f2
+    ])
+    escalator = FakeEscalator([Resolved()])
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised",
+                    escalator=escalator, clock=FakeClock())
+    assert isinstance(result, ReplaySuccess)
+    assert result.outputs == {"balance": "4218.60"}
+    assert result.steps_run == ["s1", "s2"]  # s2 recorded by _resume_after once Resolved's
+                                              # own re-verification passes -- not re-run
+
+
+def test_resolved_falls_back_to_checkpoint_when_the_paused_step_is_the_last_one() -> None:
+    # Re-traced against the real FakeSurface arithmetic and found already correct as drafted
+    # (unlike the test above): s1 is index 0, so its own re-verification checkpoint is
+    # artifact.success.checkpoint directly (step_index == 0 -> no predecessor); s1 is also
+    # the artifact's only step, so T+1 does not exist either -- _resume_after's single
+    # re-verification poll and _run_from's own tail checkpoint settle both read frame index 2
+    # (held, since only 3 frames exist and both polls land past the end), both matching
+    # "Member 12345" -- no re-run of s1, straight to Success.
+    artifact = _artifact(steps=[
+        Step(id="s1", action="click", locator=loc("Search"), risk="safe",
+             expects=[Expect(when=Matcher(role="heading", name_match="contains", name="Never "),
+                             outcome="continue", source="observed")]),
+    ])
+    artifact.outputs = {}
+    surface = FakeSurface(frames=[
+        [node("button", name="Search")],
+        [node("heading", name="Member 12345")],  # s1's own settle exhausts -> escalates
+        [node("heading", name="Member 12345")],  # Resolved's own re-verification: checkpoint
+    ])
+    escalator = FakeEscalator([Resolved()])
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised",
+                    escalator=escalator, clock=FakeClock())
+    assert isinstance(result, ReplaySuccess)
+
+
+def test_resolved_escalates_again_when_the_checkpoint_re_verification_fails() -> None:
+    # Also re-traced and already correct as drafted: frame index 2 ("Something else
+    # entirely", a "text" node, not a heading) is what both s1's own timed-out settle holds
+    # on and what Resolved's own re-verification poll reads -- it never matches "Member ", so
+    # the re-verification fails and re-escalates with NO_BRANCH_MATCHED, exactly as asserted.
+    artifact = _artifact(steps=[
+        Step(id="s1", action="click", locator=loc("Search"), risk="safe",
+             expects=[Expect(when=Matcher(role="heading", name_match="contains", name="Never "),
+                             outcome="continue", source="observed")]),
+    ])
+    artifact.outputs = {}
+    surface = FakeSurface(frames=[
+        [node("button", name="Search")],
+        [node("heading", name="Member 12345")],
+        [node("text", name="Something else entirely")],  # re-verification fails
+    ])
+    escalator = FakeEscalator([Resolved(), CannotResolve(note="page moved on")])
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised",
+                    escalator=escalator, clock=FakeClock())
+    assert len(escalator.calls) == 2
+    assert escalator.calls[1]["kind"] == "NO_BRANCH_MATCHED"
+    assert isinstance(result, Failure)
+    assert "page moved on" in result.observed
+
+
+# --- ResolvedManually ------------------------------------------------------------------------
+
+def test_resolved_manually_ends_the_run_as_an_assisted_success_with_no_outputs() -> None:
+    artifact = _artifact(steps=[Step(
+        id="s1", action="click", locator=loc("Search"), risk="safe",
+        expects=[Expect(when=Matcher(role="heading", name_match="contains", name="Never "),
+                        outcome="continue", source="observed")],
+    )])
+    surface = FakeSurface(
+        frames=[[node("button", name="Search")], [node("heading", name="Member 12345")]]
+    )
+    escalator = FakeEscalator([ResolvedManually()])
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised",
+                    escalator=escalator, clock=FakeClock())
+    assert isinstance(result, ReplaySuccess)
+    assert result.assistance == "human"  # the EXISTING D-104 field (E4) -- no new one
+    assert result.outputs == {}
+
+
+# --- RestartFrom -------------------------------------------------------------------------------
+
+def test_restart_from_resumes_at_the_named_step_with_no_checkpoint_re_verification() -> None:
+    # Re-traced and found unsatisfiable as originally drafted, for two independent reasons
+    # (review finding #6): (1) s2's own `expects` named a heading ("Never ") that can never
+    # appear in any frame by construction, so its SECOND attempt (after RestartFrom) would
+    # time out and escalate again too -- but the escalator only has one scripted outcome, so
+    # the second escalate() call would raise StopIteration. (2) the asserted `steps_run ==
+    # ["s1", "s2", "s1", "s2"]` double-counts s2 -- its first attempt never completes (it
+    # escalates), so only 3 entries are ever appended: s1 (1st, succeeds), s1 (2nd, restart,
+    # succeeds), s2 (2nd, restart, succeeds).
+    #
+    # Fixed by giving s2 a matchable-but-not-yet-present target (a "Refreshed" text node that
+    # only appears from frame index 5 onward -- simulating "the operator's restart put the
+    # page into a state where s2 now settles cleanly") and a short settle timeout (via
+    # `_artifact`'s new `settle=` override) so the frame list stays a manageable length: with
+    # `Settle(timeout_ms=100, poll_ms=50)`, a timing-out settle takes exactly 3 `observe()`
+    # calls (polls at clock 0, 50, 100), not the default spec's 20.
+    #
+    # Frame-by-frame (obs_index bookkeeping, same FakeSurface arithmetic as the test above):
+    #   f0 -- s1(1st)'s resolve + its single Continue() poll (s1 has no `expects`, so it
+    #         always settles on its first poll, in 1 observe() call)
+    #   f1,f2,f3 -- s2(1st)'s resolve (reads f0) then its 3-poll settle timeout (NO_BRANCH_
+    #         MATCHED on f3) -- escalates; RestartFrom(step_id="s1") re-enters _run_from(0)
+    #   f4 -- s1(2nd)'s resolve + its single Continue() poll; s2(2nd)'s resolve (reads f4,
+    #         Savings still present)
+    #   f5 -- s2(2nd)'s own settle: matches "Refreshed" on its very first poll; also what the
+    #         artifact's own final checkpoint settle reads afterward (held, still matches
+    #         "Member ")
+    base = [node("button", name="Search"), node("heading", name="Member 12345"),
+            node("button", name="Savings", value="4,218.60")]
+    artifact = _artifact(
+        settle=Settle(timeout_ms=100, poll_ms=50),
+        steps=[
+            Step(id="s1", action="click", locator=loc("Search"), risk="safe"),
+            Step(id="s2", action="read", locator=loc("Savings"), extract="value", parse="money",
+                 into="balance", risk="safe",
+                 expects=[Expect(when=Matcher(strategy="text", name_match="contains",
+                                             name="Refreshed"),
+                                 outcome="continue", source="observed")]),
+        ],
+    )
+    refreshed = [*base, node("text", value="Refreshed")]
+    surface = FakeSurface(frames=[base, base, base, base, base, refreshed])
+    escalator = FakeEscalator([RestartFrom(step_id="s1")])
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised",
+                    escalator=escalator, clock=FakeClock())
+    assert isinstance(result, ReplaySuccess)
+    assert result.outputs == {"balance": "4218.60"}
+    assert result.steps_run == ["s1", "s1", "s2"]  # s2's failed first attempt is never
+                                                    # appended; RestartFrom re-runs s1 fully
+
+
+def test_restart_from_an_unknown_step_id_is_a_precondition_failure() -> None:
+    artifact = _artifact(steps=[Step(
+        id="s1", action="click", locator=loc("Search"), risk="safe",
+        expects=[Expect(when=Matcher(role="heading", name_match="contains", name="Never "),
+                        outcome="continue", source="observed")],
+    )])
+    surface = FakeSurface(
+        frames=[[node("button", name="Search")], [node("heading", name="Member 12345")]]
+    )
+    escalator = FakeEscalator([RestartFrom(step_id="does-not-exist")])
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised",
+                    escalator=escalator, clock=FakeClock())
+    assert isinstance(result, Failure) and result.kind == "PRECONDITION_FAILED"
