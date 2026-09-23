@@ -63,4 +63,9 @@
     post({ type: "navigation", role: null, name: null, value: null,
           url: window.location.href, timestamp: Date.now() });
   });
+
+  window.addEventListener("beforeunload", function () {
+    post({ type: "navigation", role: null, name: null, value: null,
+          url: window.location.href, timestamp: Date.now() });
+  });
 })();
