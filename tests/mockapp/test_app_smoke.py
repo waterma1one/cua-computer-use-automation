@@ -36,3 +36,17 @@ def test_print_statement_icon_has_a_title_but_no_alt(
     # Its accessible name comes only from the title attribute; there is no alt at all.
     assert 'title="Print statement"' in r.text
     assert "alt=" not in r.text
+
+
+def test_logout_clears_the_session_and_redirects_to_login(
+    signed_in: Callable[..., TestClient],
+) -> None:
+    client = signed_in()
+    assert client.cookies.get("session") is not None
+    response = client.get("/logout", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+    # The session cookie is gone from the response; a follow-up authenticated request is
+    # bounced back to /login rather than served.
+    after = client.get("/search")
+    assert after.url.path == "/login"
