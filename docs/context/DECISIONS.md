@@ -864,3 +864,39 @@ the surface stays frozen and no further action executes — only the diagnosis i
 open deliberately rather than triggering a second fix wave; the phase-5 ledger names the
 exact fix (mirror the two-line guard already applied at the other four sites) and this is
 flagged to the repository owner at branch-finish for an explicit decision.
+
+## D44 — The operator console bootstraps its cookie from the same shared token, in the clear
+Task 7's `GET /console` accepts `CUA_OPERATOR_TOKEN` as a query-string parameter and, on a
+match, sets an `httponly` cookie whose value is the raw token itself — the same secret the
+JSON API's `Authorization: Bearer` header already checks. This was ruled in the phase-6 plan
+(a plain `<a href>` navigation cannot send a bearer header, so a browser-reachable console
+needs some other bootstrap) and confirmed by Task 7's own review as a real, independently
+verified risk rather than an implementer defect: a query-string token lands in `uvicorn`'s
+access logs and any reverse proxy in front of it, and `cua serve --host` is a free-form CLI
+flag with no guard against binding a non-loopback interface (default is `127.0.0.1`). The
+cookie carries the raw shared secret rather than an opaque per-session id, and `set_cookie`
+does not pass `secure=True` (Starlette's default `samesite="lax"` already applies and
+mitigates classic cross-site-POST CSRF, which is moot today since no console `POST` route
+exists yet). No TLS exists anywhere in this codebase, so `secure=True` alone would not close
+the underlying exposure and would break the cookie outright on a non-HTTPS non-loopback
+bind — closing this needs a design decision (add TLS, or hard-guard loopback-only), not a
+one-line fix.
+**Cost accepted:** on the default loopback bind this is low-risk (same trust boundary as a
+developer's own machine); if `cua serve --host` is ever pointed at a shared or non-loopback
+interface, the operator token is exposed in plaintext logs and cookie storage with no
+independent mitigation. Flagged to the repository owner, not fixed in Task 7 — the lower-risk
+alternative (a `POST /console/login` form whose body isn't logged the same way as a query
+string) is a future ruling, not this task's to make unilaterally.
+
+## D45 — The console ships a claim/handback UI with no backing route
+Task 7's `intervention.html` template renders claim and handback `<form action=...>` targets
+that have no corresponding route in `cua/session/service.py` — only the two `GET` routes
+(`/console`, `/console/interventions/{id}`) exist. Task 7's own review confirmed no task in
+the 8-task phase-6 plan currently owns wiring these forms (Task 8 is integration tests only,
+"no new production code"), and that inventing an operator-identity concept for the POST path
+would be improvisation beyond a shared-token design that has no such concept today.
+**Cost accepted:** the console is real, half-built UI an operator could open during a live
+incident and find non-functional past the read-only view. Flagged to the repository owner
+before the console is relied on for a real handoff — either a future task wires the forms
+against the existing JSON API (reusing `_require_operator`'s bearer check via the cookie, or
+prompting for the token per POST), or the forms are removed until that task exists.
