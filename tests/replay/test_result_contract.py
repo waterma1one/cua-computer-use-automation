@@ -75,3 +75,26 @@ def test_a_minted_run_id_never_trips_the_criterion_1_scan(tmp_path) -> None:
     artifact.provenance.run_id = run_id
     artifact.provenance.trace_ref = f"evidence/{run_id}/trace.jsonl"
     save(artifact, tmp_path)  # must not raise
+
+
+# --- Phase 6 / E3, E4: HandbackOutcome, and ResolvedManually's use of the EXISTING
+# `assistance` field (no new field -- see E4; these two tests exist only to pin that the
+# field this phase relies on already behaves as phase 5 shipped it) ---------------------------
+
+def test_assistance_still_defaults_to_none_and_every_success_construction_stays_valid() -> None:
+    result_ = Success(outputs={"balance": "1.00"}, steps_run=["s1"], evidence_ref="evidence/r")
+    assert result_.assistance == "none"
+
+
+def test_a_human_assisted_success_can_be_constructed_via_the_existing_field() -> None:
+    result_ = Success(outputs={}, steps_run=["s1"], evidence_ref="evidence/r", assistance="human")
+    assert result_.assistance == "human"
+
+
+def test_handback_outcome_variants_are_distinguishable_by_isinstance() -> None:
+    from cua.replay.result import CannotResolve, Resolved, ResolvedManually, RestartFrom
+
+    assert isinstance(Resolved(), Resolved)
+    assert isinstance(ResolvedManually(), ResolvedManually)
+    assert isinstance(RestartFrom(step_id="s2"), RestartFrom)
+    assert isinstance(CannotResolve(note="tried twice, still stuck"), CannotResolve)

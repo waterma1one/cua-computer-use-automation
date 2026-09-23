@@ -3,10 +3,6 @@ expire, hand back. `Clock`-driven throughout (`cua.replay.settle.Clock`, the sam
 `settle()` takes -- one home, D28), so the whole state machine is provable under `FakeClock`
 with no real time anywhere. The live wiring that backs a real wait with a real
 `threading.Event` is Task 6's job, on top of this module, not inside it.
-
-`handback_outcome`/`handback`'s `outcome` parameter are typed `object | None` for now --
-`cua.replay.result.HandbackOutcome` does not exist yet at this task's dispatch point. A later
-task narrows both to `HandbackOutcome | None` once that type lands.
 """
 
 from __future__ import annotations
@@ -16,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from cua.artifact.models import FailureKind
+from cua.replay.result import HandbackOutcome
 from cua.replay.settle import Clock
 
 __all__ = ["Intervention", "InterventionExpired", "InterventionStatus", "Interventions"]
@@ -51,7 +48,7 @@ class Intervention:
     claimed_by: str | None = None
     claimed_at: int | None = None
     status: InterventionStatus = "open"
-    handback_outcome: object | None = None
+    handback_outcome: HandbackOutcome | None = None
 
 
 @dataclass
@@ -113,7 +110,7 @@ class Interventions:
             return True
         return False
 
-    def handback(self, id: str, outcome: object | None = None) -> Intervention:
+    def handback(self, id: str, outcome: HandbackOutcome | None = None) -> Intervention:
         iv = self._by_id[id]
         if iv.status != "claimed":
             raise ValueError(f"intervention {id!r} is {iv.status!r}, not claimed")

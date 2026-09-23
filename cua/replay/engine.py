@@ -38,6 +38,16 @@ through at step N), E6 (the deployment allowlist is narrowed by the artifact's o
 artifact), E9 (a `bound` trace event carries the extracted value and the output's
 `redact` flag, never an action's own value), E10 (`settle()`'s `record_dialog` reports
 every dialog it handles, dismissed or not, to the trace).
+
+Phase 6: E2 (`Escalator` is a structural `Protocol`; this module still never imports
+`cua.session` -- the dependency runs the other way, the same shape `EvidenceSink` already
+proved out for `cua.observability`), E5 (three triggers route a `Failure` through
+`escalator.escalate(...)` instead of ending the replay: a settle timeout
+(`NO_BRANCH_MATCHED`), a recovery rule's `Escalate` outcome (`ESCALATION_UNAVAILABLE`), and
+any `Failure` on an `irreversible` step, whatever its own kind -- but never an
+`ALLOWLIST_VIOLATION`, D40's override, unconditionally), E6 (a `Resolved` handback
+re-verifies the resume checkpoint and re-resolves the next step's locator before
+continuing, rather than re-running the step that paused).
 """
 
 from __future__ import annotations
@@ -60,7 +70,18 @@ from cua.artifact.models import (
 from cua.artifact.validate import DeploymentAllowlist, expect_code_problem
 from cua.policy.allowlist import check_action
 from cua.replay.extract import ParseError, extract
-from cua.replay.result import BusinessOutcome, Failure, Mode, ReplayResult, Success, mint_run_id
+from cua.replay.result import (
+    BusinessOutcome,
+    CannotResolve,
+    Failure,
+    HandbackOutcome,
+    Mode,
+    ReplayResult,
+    ResolvedManually,
+    RestartFrom,
+    Success,
+    mint_run_id,
+)
 from cua.replay.settle import (
     SYSTEM_CLOCK,
     BranchOutcome,
@@ -74,9 +95,9 @@ from cua.replay.settle import (
     settle,
 )
 from cua.surface.base import Surface, SurfaceError
-from cua.surface.models import Action, EvidenceFrame, Locator, Node, Observation
+from cua.surface.models import Action, EvidenceFrame, Locator, Node, Observation, Resolution
 
-__all__ = ["EvidenceSink", "replay", "validate_inputs"]
+__all__ = ["Escalator", "EvidenceSink", "replay", "validate_inputs"]
 
 # E27: an irreversible step, once actually attempted under a given idempotency key, must
 # not be attempted again under the same key for the same capability -- in-memory, for the
@@ -121,6 +142,36 @@ class EvidenceSink(Protocol):
 
     def evidence_ref(self) -> str:
         """A pointer into this run's evidence trail, stored on every `ReplayResult`."""
+        ...
+
+
+_ESCALATION_KINDS: frozenset[FailureKind] = frozenset(
+    {"NO_BRANCH_MATCHED", "ESCALATION_UNAVAILABLE"}
+)
+# E5: trigger (b) is a settle timeout; trigger (a) is a recovery rule's Escalate outcome,
+# which _translate_outcome (UNCHANGED by this task) already turns into a Failure with this
+# exact kind, D31's own shipped mapping. Trigger (c) (any Failure on an irreversible step)
+# is checked separately in _maybe_escalate, not through this set.
+
+
+@runtime_checkable
+class Escalator(Protocol):
+    """What the engine needs to hand an escalation to a human, and nothing more (E2).
+
+    A pure interface -- `cua.session.service.SessionService` satisfies it structurally; this
+    module never imports `cua.session` (the same one-way coupling `EvidenceSink` already
+    proved out for `cua.observability`). Fully testable today against `FakeEscalator` in
+    `tests/replay/test_engine.py`.
+    """
+
+    def escalate(
+        self, *, step_id: str | None, kind: FailureKind, expected: str, observed: str,
+    ) -> HandbackOutcome:
+        """Blocks until a human hands the intervention back (or it expires -- a caller's own
+        `escalate()` implementation is responsible for turning an expiry into whichever
+        `HandbackOutcome` it prefers to model that as, or for raising in a way `replay()`'s
+        caller can translate to `ESCALATION_TIMEOUT`; this protocol does not constrain that
+        choice)."""
         ...
 
 
@@ -336,15 +387,24 @@ def _describe_expects(expects: list[Expect]) -> str:
     return "one of: " + "; ".join(f"{e.outcome} on {_describe_matcher(e.when)}" for e in expects)
 
 
+def _continue_matchers(expects: list[Expect]) -> list[Matcher]:
+    """Every `continue`-outcome `Expect.when` in `expects`, in declared order -- the one
+    place this project decides "which matcher does a step's own continue clause name"
+    (D28). `_describe_continues` (a `Failure.expected` sentence) and `_resume_after` (E6, a
+    `Matcher` to settle against) both call this rather than each re-deriving the list.
+    """
+    return [e.when for e in expects if e.outcome == "continue"]
+
+
 def _describe_continues(expects: list[Expect], checkpoint: Matcher) -> str:
     """What a step *should* have settled on, for a matched `fail` clause's `expected`: its
     `continue` clauses, or the artifact's success checkpoint when it declares none. Naming
     the failure condition that matched there would restate `observed`.
     """
-    continues = [e for e in expects if e.outcome == "continue"]
+    continues = _continue_matchers(expects)
     if not continues:
         return f"the success checkpoint {_describe_matcher(checkpoint)}"
-    return "one of: " + "; ".join(f"continue on {_describe_matcher(e.when)}" for e in continues)
+    return "one of: " + "; ".join(f"continue on {_describe_matcher(m)}" for m in continues)
 
 
 def _describe_observation(observation: Observation) -> str:
@@ -378,6 +438,7 @@ class _Run:
     deadline: int
     deployment: DeploymentAllowlist | None
     idempotency_key: str | None
+    mode: Mode
     values: dict[str, object] = field(default_factory=dict)
     bound_by_step: dict[str, object] = field(default_factory=dict)
     steps_run: list[str] = field(default_factory=list)
@@ -509,6 +570,25 @@ def _step_value(run: _Run, step: Step) -> str | None | Failure:
     return str(run.bound_by_step[value.from_step])
 
 
+def _resolution_failure_parts(
+    resolution: Resolution, locator: Locator,
+) -> tuple[FailureKind, str, str]:
+    """The `(kind, expected, observed)` a non-`unique` `Resolution` translates to -- shared by
+    `_prepare_action` (wraps it in `run.fail(..., capture=True)`) and `_resume_after` (hands it
+    to `_escalate_and_continue` instead), so there is one mapping from `Resolution.kind` to
+    `FailureKind`, not two (D28)."""
+    if resolution.kind == "not_found":
+        return "LOCATOR_NOT_FOUND", _describe_locator(locator), resolution.reason
+    if resolution.kind == "ambiguous":
+        return ("AMBIGUOUS_LOCATOR",
+                _describe_locator(locator) + " to resolve to exactly one control",
+                f"{resolution.count} controls matched")
+    # "precondition_failed" is the only Resolution.kind left besides "unique".
+    assert resolution.kind == "precondition_failed"
+    return ("PRECONDITION_FAILED", f"the control is {resolution.which}",
+            f"the control failed the {resolution.which} precondition")
+
+
 def _prepare_action(run: _Run, step: Step) -> tuple[Action, Node | None] | Failure:
     """Turns one step into the `Action` to perform, resolving its locator and value first,
     or returns the `Failure` that stops it before anything is performed.
@@ -574,22 +654,8 @@ def _prepare_action(run: _Run, step: Step) -> tuple[Action, Node | None] | Failu
             violated = _violation(run, step.id)
             if violated is not None:
                 return violated
-        if resolution.kind == "not_found":
-            return run.fail(
-                "LOCATOR_NOT_FOUND", step.id, _describe_locator(step.locator),
-                resolution.reason, capture=True,
-            )
-        if resolution.kind == "ambiguous":
-            return run.fail(
-                "AMBIGUOUS_LOCATOR", step.id,
-                _describe_locator(step.locator) + " to resolve to exactly one control",
-                f"{resolution.count} controls matched", capture=True,
-            )
-        if resolution.kind == "precondition_failed":
-            return run.fail(
-                "PRECONDITION_FAILED", step.id, f"the control is {resolution.which}",
-                f"the control failed the {resolution.which} precondition", capture=True,
-            )
+            kind, expected, observed = _resolution_failure_parts(resolution, step.locator)
+            return run.fail(kind, step.id, expected, observed, capture=True)
         resolved_node = resolution.node
 
     value = _step_value(run, step)
@@ -720,7 +786,7 @@ def _settle_step(run: _Run, step: Step, step_id: str | None) -> ReplayResult | N
     return _translate_outcome(run, outcome, step_id, step.expects)
 
 
-def _run_step(run: _Run, step: Step) -> ReplayResult | None:
+def _run_step_inner(run: _Run, step: Step) -> ReplayResult | None:
     """Runs one step end to end: gates, action, extraction, settle. Returns the
     `ReplayResult` that ends the replay, or `None` to proceed to the next step.
 
@@ -733,6 +799,10 @@ def _run_step(run: _Run, step: Step) -> ReplayResult | None:
     be retried under the same key, while one that reached this line may not, whatever
     happens next. `act` raising is `SESSION_LOST`; `ok=False` with a pending dialog falls
     through to `settle()` (E14) and without one is `PRECONDITION_FAILED`.
+
+    Phase 6: this is the un-escalated step body -- exactly what `_run_step` used to be, in
+    full, with none of its own D40 `_violation` checks touched. `_run_step` (below) wraps
+    it and routes an escalation-worthy result through `_maybe_escalate` instead (E5).
     """
     if run.clock.monotonic_ms() >= run.deadline:
         budget = run.artifact.max_duration_ms
@@ -805,22 +875,212 @@ def _run_step(run: _Run, step: Step) -> ReplayResult | None:
     return None
 
 
+def _run_step(
+    run: _Run, artifact: Artifact, step_index: int, step: Step, escalator: Escalator | None,
+) -> ReplayResult | None:
+    outcome = _run_step_inner(run, step)
+    return _maybe_escalate(run, artifact, step_index, step, outcome, escalator)
+
+
+def _maybe_escalate(
+    run: _Run, artifact: Artifact, step_index: int, step: Step,
+    outcome: ReplayResult | None, escalator: Escalator | None,
+) -> ReplayResult | None:
+    """E5: routes an escalation-worthy Failure through `escalator.escalate(...)` instead of
+    returning it directly. `None` (continue), a `BusinessOutcome`, and every `Failure` that
+    does not qualify pass through unchanged -- including, always, an `ALLOWLIST_VIOLATION`
+    (D40's override: a recorded violation is never escalated, whatever else is true of the
+    step, review finding #19's residual risk).
+    """
+    if (escalator is None or run.mode != "supervised" or not isinstance(outcome, Failure)
+            or outcome.kind == "ALLOWLIST_VIOLATION"):
+        return outcome
+    if outcome.kind in _ESCALATION_KINDS or step.risk == "irreversible":
+        return _escalate_and_continue(
+            run, artifact, step_id=step.id, step_index=step_index, escalator=escalator,
+            kind=outcome.kind, expected=outcome.expected, observed=outcome.observed,
+        )
+    return outcome
+
+
+def _maybe_escalate_checkpoint(
+    run: _Run, artifact: Artifact, ended: ReplayResult, escalator: Escalator | None,
+) -> ReplayResult:
+    """The checkpoint tail's own analogue of `_maybe_escalate` -- the synthetic `_checkpoint`
+    step is never `irreversible` (trigger (c) does not apply to it), so only the
+    `_ESCALATION_KINDS` check matters here. `_run_from`'s own caller has already returned an
+    `ALLOWLIST_VIOLATION`-kind `ended` before this function is ever reached (D40), so no
+    exclusion is needed here -- this function only ever sees a kind that could still qualify.
+    """
+    if escalator is None or run.mode != "supervised" or not isinstance(ended, Failure):
+        return ended
+    if ended.kind in _ESCALATION_KINDS:
+        resumed = _escalate_and_continue(
+            run, artifact, step_id=None, step_index=len(artifact.steps), escalator=escalator,
+            kind=ended.kind, expected=ended.expected, observed=ended.observed,
+        )
+        # Unlike the per-step call site, there is no next loop iteration for `None` (the
+        # checkpoint is the tail): every `_escalate_and_continue` branch reachable from the
+        # tail bottoms out at a concrete `_run_from` call, a `Failure`, or a `Success` --
+        # never a bare `None` -- so this holds structurally, not just by luck.
+        assert resumed is not None
+        return resumed
+    return ended
+
+
+def _escalate_and_continue(
+    run: _Run, artifact: Artifact, *, step_id: str | None, step_index: int,
+    escalator: Escalator, kind: FailureKind, expected: str, observed: str,
+) -> ReplayResult | None:
+    """`None` means "continue the loop from here" (used by `Resolved` after its own
+    re-verification succeeds); any other return ends the whole replay. E17: the human-wait
+    interval `escalator.escalate(...)` spends is excluded from `run.deadline`'s own budget --
+    `run.deadline` is a plain mutable field on `_Run`, advanced by exactly however long the
+    call took, so a resumed step has the same *remaining* budget it had when it paused.
+    """
+    before = run.clock.monotonic_ms()
+    outcome = escalator.escalate(step_id=step_id, kind=kind, expected=expected, observed=observed)
+    run.deadline += run.clock.monotonic_ms() - before
+    if isinstance(outcome, CannotResolve):
+        return run.fail(kind, step_id, expected, f"{observed} (operator: {outcome.note})",
+                        capture=False)  # already captured once by the failure this wraps (E8)
+    if isinstance(outcome, ResolvedManually):
+        return Success(outputs={}, steps_run=run.steps_run, evidence_ref=run.sink.evidence_ref(),
+                       assistance="human")  # E4: the EXISTING field, never a new one
+    if isinstance(outcome, RestartFrom):
+        index = next((i for i, s in enumerate(artifact.steps) if s.id == outcome.step_id), None)
+        if index is None:
+            return run.fail(
+                "PRECONDITION_FAILED", step_id,
+                f"restart_from names a step in this capability ({[s.id for s in artifact.steps]})",
+                f"restart_from named {outcome.step_id!r}, which this artifact does not declare",
+                capture=False,
+            )
+        return _run_from(run, artifact, index, escalator)
+    # Resolved: E6's two checks.
+    return _resume_after(run, artifact, step_id=step_id, step_index=step_index, escalator=escalator)
+
+
+def _resume_after(
+    run: _Run, artifact: Artifact, *, step_id: str | None, step_index: int, escalator: Escalator,
+) -> ReplayResult | None:
+    """Spec §7.6/E6: re-verify the resume checkpoint, then (unless the triggering step, T, was
+    the artifact's own last step) re-resolve T+1's own locator, before continuing at T+1. T
+    itself is never re-run -- its own `act()` already completed (both triggers that reach
+    `Resolved` presuppose this); a human confirming `Resolved` is confirming the resulting
+    state, not asking for T's action to happen a second time. `step_index` is the checkpoint
+    tail's own `len(artifact.steps)` when T was the synthetic checkpoint itself (`step_id is
+    None`), in which case `step_index == 0` never triggers (an artifact always has at least
+    one real step by the time replay reaches its checkpoint) but the branch below still holds
+    structurally.
+    """
+    if step_index == 0:
+        matchers: list[Matcher] = []
+    else:
+        matchers = _continue_matchers(artifact.steps[step_index - 1].expects)
+    checkpoint = matchers[0] if matchers else artifact.success.checkpoint
+
+    checkpoint_probe = Step(
+        id="_resume_checkpoint", action="wait_for", risk="safe",
+        expects=[Expect(when=checkpoint, outcome="continue", source="observed")],
+    )
+    verified = _settle_step(run, checkpoint_probe, None)
+    if isinstance(verified, Failure) and verified.kind == "ALLOWLIST_VIOLATION":
+        return verified  # D40: never escalated (review finding #7)
+    if verified is not None:
+        if isinstance(verified, Failure):
+            return _escalate_and_continue(run, artifact, step_id=step_id, step_index=step_index,
+                                          escalator=escalator, kind=verified.kind,
+                                          expected=verified.expected, observed=verified.observed)
+        return verified  # a BusinessOutcome ends the replay as-is -- vanishingly unlikely here
+
+    if step_id is not None:
+        run.steps_run.append(step_id)  # T's action already ran; the human confirmed it's fine
+
+    next_index = step_index + 1
+    if next_index >= len(artifact.steps):
+        return _run_from(run, artifact, next_index, escalator)  # straight to the checkpoint tail
+
+    next_step = artifact.steps[next_index]
+    if next_step.locator is not None:
+        try:
+            resolution = run.surface.resolve(next_step.locator)
+        except SurfaceError as exc:
+            violated = _violation(run, next_step.id)
+            if violated is not None:
+                return violated
+            return _escalate_and_continue(run, artifact, step_id=step_id, step_index=step_index,
+                                          escalator=escalator, kind="SESSION_LOST",
+                                          expected="the surface resolves the next step's locator",
+                                          observed=str(exc))
+        if resolution.kind != "unique":
+            violated = _violation(run, next_step.id)  # review finding #7: this site was missing
+            if violated is not None:                  # the D40 guard in the contract card's draft
+                return violated
+            kind, expected, observed = _resolution_failure_parts(resolution, next_step.locator)
+            return _escalate_and_continue(run, artifact, step_id=step_id, step_index=step_index,
+                                          escalator=escalator, kind=kind, expected=expected,
+                                          observed=observed)
+
+    return _run_from(run, artifact, next_index, escalator)
+
+
+def _run_from(
+    run: _Run, artifact: Artifact, start_index: int, escalator: Escalator | None,
+) -> ReplayResult:
+    """Runs `artifact.steps[start_index:]` plus the checkpoint settle, exactly what the
+    original `replay()` loop did for `start_index=0` -- factored out so `Resolved` and
+    `RestartFrom` can re-enter it partway through without duplicating the loop.
+    """
+    for index, step in enumerate(artifact.steps[start_index:], start=start_index):
+        ended = _run_step(run, artifact, index, step, escalator)
+        if ended is not None:
+            return ended
+
+    checkpoint_step = Step(
+        id="_checkpoint", action="wait_for", risk="safe",
+        expects=[Expect(when=artifact.success.checkpoint, outcome="continue", source="observed")],
+    )
+    ended = _settle_step(run, checkpoint_step, None)
+    if isinstance(ended, Failure) and ended.kind == "ALLOWLIST_VIOLATION":
+        return ended  # settle already saw it and reported it once -- D40, never escalated
+                       # (review finding #8: the contract card's draft dropped this exact
+                       # three-line shape `replay()`'s own current tail already uses)
+    violated = _violation(run, None)
+    if violated is not None:
+        return violated
+    if ended is not None:
+        return _maybe_escalate_checkpoint(run, artifact, ended, escalator)
+
+    missing = [name for name in artifact.outputs if name not in run.values]
+    if missing:
+        return run.fail(
+            "OUTPUT_VALIDATION_FAILED", None,
+            f"every declared output is bound by a step: {sorted(artifact.outputs)}",
+            f"no step bound {missing}", capture=True,
+        )
+    outputs = {key: value for key, value in run.values.items() if not key.startswith("_")}
+    return Success(outputs=outputs, steps_run=run.steps_run, evidence_ref=run.sink.evidence_ref())
+
+
 def replay(
     artifact: Artifact, inputs: dict[str, object], surface: Surface, mode: Mode, *,
     deployment: DeploymentAllowlist | None = None, status: RegistryStatus = "draft",
     confirm_irreversible: bool = False, idempotency_key: str | None = None,
     evidence: EvidenceSink | None = None, clock: Clock | None = None,
+    escalator: Escalator | None = None,
 ) -> ReplayResult:
     """Replays `artifact` against `surface` with `inputs`, returning exactly one
     `Success | BusinessOutcome | Failure` and never raising for a business-meaningful
-    outcome (E28). `mode="supervised"` raises `NotImplementedError` -- this phase
-    implements unattended (`"embedded"`) replay only.
+    outcome (E28). `mode="supervised"` with no `escalator` raises `NotImplementedError` --
+    a supervised replay with nothing to hand an escalation to cannot do anything other
+    than an embedded one would, so it refuses rather than silently behaving like one (D31).
 
     Gate order, all before the step loop starts and all without touching `surface` (E21):
     `validate_inputs` (E22, re-stamped with this run's `evidence_ref`); `_policy_gate`
     (E17's expect-code scan, then E5/E6's per-step action/status gate, then E9/E27's
-    irreversible/idempotency gate). Then `_run_step` per step, the E18 checkpoint settle,
-    and the E28 unbound-output check before `Success`.
+    irreversible/idempotency gate). Then `_run_from` runs the step loop (`_run_step` per
+    step), the E18 checkpoint settle, and the E28 unbound-output check before `Success`.
 
     Phase 5: `deployment` is narrowed by `artifact.policy` (E6) before the gate ever sees
     it, so the effective allowlist is always the intersection whether or not
@@ -828,8 +1088,17 @@ def replay(
     step's settle, and the checkpoint's settle, `_violation` asks the surface whether an
     application-initiated navigation was refused (E3) -- ahead of any other reading of
     what the surface returned or raised, and even after `Success` would otherwise follow.
+
+    Phase 6: `mode="supervised"` with an `escalator` routes an escalation-worthy `Failure`
+    (E5: a settle timeout, a recovery rule's `Escalate` outcome, or any `Failure` on an
+    `irreversible` step) through `escalator.escalate(...)` instead of returning it, and
+    resumes the step loop from wherever the human's `HandbackOutcome` says to (E6) --
+    `_run_from` is what makes that loop re-enterable. `escalator=None` in either mode, or
+    `mode="embedded"` with one supplied, behaves exactly as before this phase (E2: this
+    module never imports `cua.session`; `Escalator` is a structural protocol any conforming
+    object satisfies).
     """
-    if mode == "supervised":
+    if mode == "supervised" and escalator is None:
         raise NotImplementedError("supervised mode is not yet implemented")
 
     sink: EvidenceSink = evidence if evidence is not None else _NullEvidenceSink()
@@ -849,38 +1118,6 @@ def replay(
 
     run = _Run(
         artifact=artifact, inputs=inputs, surface=surface, sink=sink, clock=active_clock,
-        deadline=deadline, deployment=effective, idempotency_key=idempotency_key,
+        deadline=deadline, deployment=effective, idempotency_key=idempotency_key, mode=mode,
     )
-    for step in artifact.steps:
-        ended = _run_step(run, step)
-        if ended is not None:
-            return ended
-
-    # E18: the artifact's own success checkpoint is settled as a synthetic single-clause
-    # step, after the last real step -- not assumed from the last step's own `continue`.
-    checkpoint_step = Step(
-        id="_checkpoint", action="wait_for", risk="safe",
-        expects=[Expect(when=artifact.success.checkpoint, outcome="continue",
-                        source="observed")],
-    )
-    ended = _settle_step(run, checkpoint_step, None)
-    if isinstance(ended, Failure) and ended.kind == "ALLOWLIST_VIOLATION":
-        return ended  # settle already saw it and reported it once
-    violated = _violation(run, None)
-    if violated is not None:
-        return violated
-    if ended is not None:
-        return ended
-
-    # E28: criterion 7 in its second form -- a declared output no step bound is a failure,
-    # never a `Success` carrying `{}` where the caller was promised a value.
-    missing = [name for name in artifact.outputs if name not in run.values]
-    if missing:
-        return run.fail(
-            "OUTPUT_VALIDATION_FAILED", None,
-            f"every declared output is bound by a step: {sorted(artifact.outputs)}",
-            f"no step bound {missing}", capture=True,
-        )
-
-    outputs = {key: value for key, value in run.values.items() if not key.startswith("_")}
-    return Success(outputs=outputs, steps_run=run.steps_run, evidence_ref=sink.evidence_ref())
+    return _run_from(run, artifact, 0, escalator)
