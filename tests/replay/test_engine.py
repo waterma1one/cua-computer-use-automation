@@ -761,6 +761,24 @@ def test_a_violation_wins_over_session_lost_when_act_raises() -> None:
     assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
 
 
+def test_a_violation_recorded_when_pending_dialog_raises_wins_over_session_lost() -> None:
+    # The phase 5 open item: act() returns ok=False, the engine asks the surface about a
+    # pending dialog to tell a real precondition failure from one, and *that* call is the
+    # one that raises -- with the violation already recorded by the surface. This is the
+    # fifth SurfaceError-to-SESSION_LOST site D40 named; it must defer to the recorded
+    # violation exactly like the other four.
+    class FreezingDialogSurface(FakeSurface):
+        def pending_dialog(self):
+            self.violation = "the application navigated to '/elsewhere', which is refused"
+            raise SurfaceError("the frame detached while checking for a dialog")
+
+    artifact = _artifact(steps=[Step(id="s1", action="click", locator=loc("Search"), risk="safe")])
+    surface = FreezingDialogSurface(frames=[[node("button", name="Search")]], act_ok=False)
+    result = replay(artifact, {"member_id": "12345"}, surface, "embedded", clock=FakeClock())
+    assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
+    assert result.step_id == "s1"
+
+
 def test_a_violation_during_settle_is_reported_after_the_step_settles() -> None:
     class LateSurface(FakeSurface):
         def observe(self):
