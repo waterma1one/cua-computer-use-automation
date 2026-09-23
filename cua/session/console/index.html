@@ -1,0 +1,15 @@
+<html><body>
+<font size="4"><b>Interventions</b></font><br><br>
+<table border="1" cellpadding="5" cellspacing="0">
+  <tr><td><b>Run</b></td><td><b>Reason</b></td><td><b>Status</b></td><td><b>Claimed by</b></td><td></td></tr>
+  {% for iv in interventions %}
+  <tr>
+    <td>{{ iv.run_id }}</td>
+    <td>{{ iv.reason_code }}: {{ iv.observed }}</td>
+    <td>{{ iv.status }}</td>
+    <td>{{ iv.claimed_by or "" }}</td>
+    <td><a href="/console/interventions/{{ iv.id }}">Open</a></td>
+  </tr>
+  {% endfor %}
+</table>
+</body></html>
