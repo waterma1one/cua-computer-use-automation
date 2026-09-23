@@ -900,3 +900,31 @@ incident and find non-functional past the read-only view. Flagged to the reposit
 before the console is relied on for a real handoff — either a future task wires the forms
 against the existing JSON API (reusing `_require_operator`'s bearer check via the cookie, or
 prompting for the token per POST), or the forms are removed until that task exists.
+
+## D46 — Resume re-verifies the escalating step itself, per §7.6; the shipped predecessor check was a bug
+Task 8's reviewer confirmed a real conflict between spec §7.6 and this plan's own E6 ruling
+that no test before Task 8 ever forced apart: §7.6 re-verifies "the `outcome: continue` clause
+of the last completed step (falling back to `success.checkpoint` when the paused step is the
+last one)"; E6 and the shipped `_resume_after` instead checked the escalating step's
+**predecessor**, falling back only when the escalating step was the artifact's own **first**
+step. Different entity, different trigger condition.
+**Ruling: §7.6 is correct.** "The last completed step" is the escalating step itself — its own
+`act()` already ran by the time a human hands back `Resolved`, and a human confirming
+`Resolved` is confirming that step's own resulting state, which is exactly its own `continue`
+clause. The stated fallback (checking `success.checkpoint` when that step is the artifact's
+*last* one) only makes sense under this reading: a non-last step always declares a `continue`
+clause because it needs one to advance past it, while a last step typically has none. Checking
+the predecessor instead re-verifies a fact already true before the escalating step ever ran —
+it can mask a genuinely unresumed middle step (replay proceeds to the next step's locator on
+unverified state) and can spuriously re-escalate an otherwise-fine resume (when the
+predecessor's own on-screen text has moved on by handback time even though
+`success.checkpoint` already holds).
+**Why not fixed silently:** this is production code in an already-reviewed, already-shipped
+task (`cua/replay/engine.py`, part of Task 4's diff), so the fix is its own task (Task 9,
+the `06-session.md` phase plan) with its own review, per this project's standing rule that a
+ruling changing shipped code is never patched inside the session that made the ruling.
+**Cost accepted:** the two existing `test_engine.py` cases for this path (both: the escalating
+step is also the artifact's only or last step) pass unmodified under either reading, because
+in both fixtures the predecessor's clause and `success.checkpoint` coincide by construction —
+which is exactly why the discrepancy went undetected through Task 4's own review and Task 8's
+close. Task 9 adds the discriminating test this gap needed.
