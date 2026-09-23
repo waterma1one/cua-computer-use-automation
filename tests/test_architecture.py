@@ -127,3 +127,19 @@ def test_the_surface_never_imports_the_policy_package() -> None:
         source = text.read_text().lower()
         assert "import cua.policy" not in source, f"{name} imports cua.policy"
         assert "from cua.policy" not in source, f"{name} imports cua.policy"
+
+
+def test_human_action_is_only_constructed_by_record_human_action() -> None:
+    """E20: HumanAction.human_origin has no default, but that alone does not stop a second
+    call site from constructing one -- this is the actual guarantee: grep the whole `cua/`
+    tree for `HumanAction(` and require it to appear only inside `cua/session/actions.py`
+    (record_human_action's own module), the same way this module already greps for a
+    Playwright import outside `cua/surface/web.py`.
+    """
+    hits = []
+    for path in Path("cua").rglob("*.py"):
+        if path == Path("cua/session/actions.py"):
+            continue
+        if "HumanAction(" in path.read_text():
+            hits.append(path)
+    assert hits == []
