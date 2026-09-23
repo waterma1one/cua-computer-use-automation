@@ -13,9 +13,7 @@ the test that opened it by more than a moment.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 import pytest
 from fastapi import HTTPException
@@ -27,51 +25,28 @@ from cua.artifact.models import (
     Expect,
     InputSpec,
     Matcher,
-    Provenance,
     Settle,
     Step,
     Success,
     Target,
 )
-from cua.artifact.store import RegistryEntry, save, write_registry_entry
+from cua.artifact.store import save
 from cua.observability import EvidenceWriter
 from cua.policy.config import load_policy
 from cua.replay.settle import SYSTEM_CLOCK
 from cua.session.lease import Lease, LeasedSurface
-from cua.session.service import SessionService, _HandbackRequest, _LiveSession, create_app
-
-TOKEN = "test-operator-token"
-AUTH = {"Authorization": f"Bearer {TOKEN}"}
-
-
-def _write_policy(tmp_path, origin: str) -> str:
-    # Review finding #11: `policy.example.yaml` names a fixed origin that can never match
-    # `live_mockapp`'s randomly-assigned port -- every session in this module would freeze
-    # before ever escalating if the tests pointed at it. Write a real policy file per test,
-    # matching the PolicyConfig/DeploymentAllowlist YAML shape `policy.example.yaml` itself
-    # documents, with the live mock app's own dynamic origin.
-    policy_path = tmp_path / "policy.yaml"
-    policy_path.write_text(
-        "policy_mode: sandbox\n"
-        f"allowed_origins:\n  - {origin}\n"
-        "allowed_paths:\n  - /\n"
-        "denied_paths: []\n"
-        "allowed_actions:\n  - navigate\n  - click\n  - fill\n  - select\n  - press_key\n"
-        "  - wait_for\n  - read\n  - dismiss_dialog\n"
-    )
-    return str(policy_path)
-
-
-# An anonymous `GET /search` redirects to `/login`, and the mock app renders no heading on
-# either page -- so a step that must settle cleanly matches the login page's own submit
-# button, the one thing every anonymous navigation to `/search` really lands on.
-_LOGIN_PAGE = Matcher(role="button", name_match="exact", name="Sign in")
-
-
-def _provenance(run_id: str) -> Provenance:
-    return Provenance(discovered_at="2026-09-09T00:00:00", model="gemini-2.5-flash-lite",
-                      policy_mode="sandbox", provider_retention="training_permitted",
-                      run_id=run_id, trace_ref=f"evidence/{run_id}/trace.jsonl")
+from cua.session.service import SessionService, _HandbackRequest, _LiveSession
+from tests.session.conftest import (
+    _LOGIN_PAGE,
+    AUTH,
+    TOKEN,
+    _poll_interventions,
+    _poll_result,
+    _provenance,
+    _save_approved,
+    _session_body,
+    _write_policy,
+)
 
 
 def _artifact_that_always_escalates(tmp_path, *, version: int = 1) -> Artifact:
@@ -116,53 +91,13 @@ def _three_step_artifact(tmp_path, *, s0_risk: str, version: int) -> Artifact:
         success=Success(checkpoint=Matcher(role="heading", name_match="contains", name="Nope")),
         provenance=_provenance("r_handoff3"),
     )
-    save(artifact, tmp_path)
-    write_registry_entry(tmp_path, artifact.id, artifact.version,
-                         RegistryEntry(status="approved"), artifact=artifact)
+    _save_approved(tmp_path, artifact)
     return artifact
-
-
-def _session_body(tmp_path, live_mockapp, artifact: Artifact, **over: Any) -> dict[str, Any]:
-    body: dict[str, Any] = {
-        "artifact_id": artifact.id, "version": artifact.version, "root": str(tmp_path),
-        "base_url": live_mockapp, "policy_path": _write_policy(tmp_path, live_mockapp),
-        "inputs": {}, "ttl_ms": 5000, "claim_ttl_ms": 10000,
-    }
-    body.update(over)
-    return body
-
-
-def _poll(fetch: Callable[[], Any], *, timeout_s: float = 10.0) -> Any:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        value = fetch()
-        if value:
-            return value
-        time.sleep(0.05)
-    raise AssertionError(f"nothing arrived within {timeout_s}s")
-
-
-def _poll_result(client: TestClient, session_id: str) -> dict[str, Any]:
-    result: dict[str, Any] = _poll(lambda: client.get(f"/sessions/{session_id}").json()["result"])
-    return result
-
-
-def _poll_interventions(client: TestClient, session_id: str, *, count: int = 1) -> list[dict]:
-    def fetch() -> list[dict] | None:
-        listing: list[dict] = client.get(f"/sessions/{session_id}/interventions").json()
-        return listing if len(listing) >= count else None
-    interventions: list[dict] = _poll(fetch)
-    return interventions
 
 
 def _end(client: TestClient, iv_id: str) -> None:
     client.post(f"/interventions/{iv_id}/handback",
                 json={"outcome": "cannot_resolve", "note": "test cleanup"}, headers=AUTH)
-
-
-@pytest.fixture
-def client() -> TestClient:
-    return TestClient(create_app(operator_token=TOKEN))
 
 
 def test_post_sessions_returns_a_session_id_and_a_lease_token(
@@ -322,9 +257,7 @@ def test_restart_from_a_non_safe_range_is_refused_before_it_reaches_the_engine(
         success=Success(checkpoint=Matcher(role="heading", name_match="contains", name="Nope")),
         provenance=_provenance("r_handoff2"),
     )
-    save(artifact, tmp_path)
-    write_registry_entry(tmp_path, artifact.id, artifact.version,
-                         RegistryEntry(status="approved"), artifact=artifact)
+    _save_approved(tmp_path, artifact)
     # An irreversible step is refused by `replay()`'s own E27 gate without both of these --
     # before any step runs, and so before anything could escalate.
     session = client.post("/sessions", json=_session_body(
@@ -410,9 +343,7 @@ def test_restart_before_an_irreversible_step_that_already_acted_is_refused(
         success=Success(checkpoint=Matcher(role="heading", name_match="contains", name="Nope")),
         provenance=_provenance("r_handoff4"),
     )
-    save(artifact, tmp_path)
-    write_registry_entry(tmp_path, artifact.id, artifact.version,
-                         RegistryEntry(status="approved"), artifact=artifact)
+    _save_approved(tmp_path, artifact)
     session = client.post("/sessions", json=_session_body(
         tmp_path, live_mockapp, artifact, confirm_irreversible=True,
         idempotency_key=f"irreversible-acted-{time.monotonic_ns()}",
