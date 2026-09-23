@@ -1009,15 +1009,23 @@ def _resume_after(
     #2, routes a `Resolved` for T's own pre-act failure through `_run_from(step_index)`
     instead, before this function is ever called); a human confirming `Resolved` here is
     confirming the resulting state, not asking for T's action to happen a second time.
-    `step_index` is the checkpoint tail's own `len(artifact.steps)` when T was the synthetic
-    checkpoint itself (`step_id is None`), in which case `step_index == 0` never triggers (an
-    artifact always has at least one real step by the time replay reaches its checkpoint) but
-    the branch below still holds structurally.
+
+    The re-verification checkpoint is T's *own* `outcome: continue` clause, not its
+    predecessor's -- a human confirming `Resolved` is vouching for the state T's own `act()`
+    left behind, and T's predecessor's clause was already true before T ever ran (checking it
+    again here proves nothing about whether T's action landed). Falls back to
+    `artifact.success.checkpoint` in exactly the two cases where T has no `continue` clause of
+    its own to consult: T is the artifact's own last step (nothing to continue to, so a
+    well-formed artifact typically declares none there -- D9/E6), or T is the synthetic
+    checkpoint tail itself (`step_id is None`, `step_index == len(artifact.steps)`, one past
+    the end -- not a real step, with no `expects` at all).
     """
-    if step_index == 0:
+    is_checkpoint_tail = step_id is None
+    is_last_step = step_index == len(artifact.steps) - 1
+    if is_checkpoint_tail or is_last_step:
         matchers: list[Matcher] = []
     else:
-        matchers = _continue_matchers(artifact.steps[step_index - 1].expects)
+        matchers = _continue_matchers(artifact.steps[step_index].expects)
     checkpoint = matchers[0] if matchers else artifact.success.checkpoint
 
     checkpoint_probe = Step(

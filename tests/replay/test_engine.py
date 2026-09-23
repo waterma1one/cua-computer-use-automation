@@ -1222,11 +1222,11 @@ def test_resolved_resumes_at_the_next_step_after_re_verifying_the_prior_steps_ch
     ])
     # s2's own expects can never match (deliberately) -- it will NO_BRANCH_MATCHED and
     # escalate. Per E6, T (=s2) is never re-run on Resolved -- its own act()/extraction
-    # already happened during this first attempt, before its settle timed out. Resolved
-    # re-verifies s1's own continue matcher ("Member "), and because s2 is the artifact's
-    # own last step, that re-verification target IS the "next step to resume at" -- there is
-    # no T+1, so _resume_after goes straight to _run_from's tail, which settles the
-    # artifact's own success.checkpoint (the same matcher here) and ends as Success.
+    # already happened during this first attempt, before its settle timed out. Because s2 is
+    # the artifact's own last step, it has no continue clause of its own to fall back on, so
+    # Resolved's re-verification checkpoint is artifact.success.checkpoint ("Member ") --
+    # and since there is no T+1 either, _resume_after goes straight to _run_from's tail,
+    # which settles that same success.checkpoint again and ends as Success.
     #
     # Frame accounting (FakeSurface: observe() reads the PRE-increment index then increments;
     # resolve() reads _obs_index - 1, i.e. whatever observe() last returned):
@@ -1256,12 +1256,13 @@ def test_resolved_resumes_at_the_next_step_after_re_verifying_the_prior_steps_ch
 
 def test_resolved_falls_back_to_checkpoint_when_the_paused_step_is_the_last_one() -> None:
     # Re-traced against the real FakeSurface arithmetic and found already correct as drafted
-    # (unlike the test above): s1 is index 0, so its own re-verification checkpoint is
-    # artifact.success.checkpoint directly (step_index == 0 -> no predecessor); s1 is also
-    # the artifact's only step, so T+1 does not exist either -- _resume_after's single
-    # re-verification poll and _run_from's own tail checkpoint settle both read frame index 2
-    # (held, since only 3 frames exist and both polls land past the end), both matching
-    # "Member 12345" -- no re-run of s1, straight to Success.
+    # (unlike the test above): s1 is the artifact's own last step (its only step), so it has
+    # no continue clause of its own to fall back on and its re-verification checkpoint is
+    # artifact.success.checkpoint directly; s1 is also the artifact's only step, so T+1 does
+    # not exist either -- _resume_after's single re-verification poll and _run_from's own tail
+    # checkpoint settle both read frame index 2 (held, since only 3 frames exist and both
+    # polls land past the end), both matching "Member 12345" -- no re-run of s1, straight to
+    # Success.
     artifact = _artifact(steps=[
         Step(id="s1", action="click", locator=loc("Search"), risk="safe",
              expects=[Expect(when=Matcher(role="heading", name_match="contains", name="Never "),
@@ -1277,6 +1278,54 @@ def test_resolved_falls_back_to_checkpoint_when_the_paused_step_is_the_last_one(
     result = replay(artifact, {"member_id": "12345"}, surface, "supervised",
                     escalator=escalator, clock=FakeClock())
     assert isinstance(result, ReplaySuccess)
+
+
+def test_resolved_checkpoint_is_not_the_predecessors_clause_when_the_last_step_escalates() -> None:
+    # The discriminating case §7.6 needs: s2 is the artifact's own last step, but it is NOT
+    # the first step -- it has a predecessor, s1. s1's own continue clause ("Member ") and
+    # artifact.success.checkpoint ("Done") are deliberately two different matchers, and by
+    # the time of the handback the on-screen text is "Done", not "Member " -- s1's own text
+    # has moved on (realistic: the UI advanced). Per §7.6, s2 has no continue clause of its
+    # own (it's the last step), so Resolved's re-verification must fall back straight to
+    # success.checkpoint ("Done") and match immediately. The pre-fix code instead checked
+    # s1's predecessor clause ("Member "), which this frame does not match -- it would poll
+    # to timeout, re-escalate with NO_BRANCH_MATCHED, and call the escalator a second time,
+    # for which FakeEscalator has no second outcome scripted: `next()` raises StopIteration.
+    #
+    # Frame accounting (FakeSurface: observe() reads the PRE-increment index then increments;
+    # resolve() reads _obs_index - 1, i.e. whatever observe() last returned):
+    #   f0 -- s1's resolve (obs_index starts at 0) and s1's settle poll 1 (no match: "Search"
+    #         button only, no heading yet)
+    #   f1 -- s1's settle poll 2: matches "Member ", Continue(). obs_index is now 2, so s2's
+    #         own resolve (reads _obs_index-1 = 1) reads f1 too -- it MUST already carry s2's
+    #         own locator target ("Next").
+    #   f2 -- held for s2's own settle timeout (its own "Never " clause never matches;
+    #         NO_BRANCH_MATCHED, escalates) and reused, once more, for Resolved's own
+    #         checkpoint re-verification poll. f2 carries "Done", not "Member " -- the two
+    #         matchers this test exists to pull apart.
+    artifact = _artifact(steps=[
+        Step(id="s1", action="click", locator=loc("Search"), risk="safe",
+             expects=[Expect(when=Matcher(role="heading", name_match="contains", name="Member "),
+                             outcome="continue", source="observed")]),
+        Step(id="s2", action="click", locator=loc("Next"), risk="safe",
+             expects=[Expect(when=Matcher(role="heading", name_match="contains", name="Never "),
+                             outcome="continue", source="observed")]),
+    ])
+    artifact.outputs = {}
+    artifact.success = Success(checkpoint=Matcher(role="heading", name_match="contains",
+                                                   name="Done"))
+    surface = FakeSurface(frames=[
+        [node("button", name="Search")],                                # f0
+        [node("heading", name="Member 12345"), node("button", name="Next")],  # f1
+        [node("heading", name="Done")],                                 # f2
+    ])
+    escalator = FakeEscalator([Resolved()])  # exactly one outcome -- a second escalate() call
+                                              # (the pre-fix code's own failure mode) raises
+                                              # StopIteration
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised",
+                    escalator=escalator, clock=FakeClock())
+    assert isinstance(result, ReplaySuccess)
+    assert len(escalator.calls) == 1  # never re-escalated -- the fix matched on the first poll
 
 
 def test_resolved_escalates_again_when_the_checkpoint_re_verification_fails() -> None:
