@@ -283,7 +283,14 @@ def test_resolved_transfers_the_lease_back_to_the_agent_and_the_run_resumes(
     second = listing[1]["id"]
     client.post(f"/interventions/{second}/claim", json={"operator_id": "op-1"}, headers=AUTH)
     _end(client, second)
-    assert _poll_result(client, sid)["kind"] != "ESCALATION_TIMEOUT"
+    result = _poll_result(client, sid)
+    assert result["kind"] != "ESCALATION_TIMEOUT"
+    # Both claims' bracket evidence survives: the second claim never overwrote the first's.
+    run_dir = Path(tmp_path) / result["evidence_ref"]
+    for n in (1, 2):
+        for half in ("before", "after"):
+            assert (run_dir / "screenshots" / f"escalation_{n}_human_{half}.png").exists()
+            assert (run_dir / "snapshots" / f"escalation_{n}_human_{half}.yaml").exists()
 
 
 def test_restart_from_a_non_safe_range_is_refused_before_it_reaches_the_engine(
@@ -378,6 +385,75 @@ def test_restart_from_is_offered_and_accepted_only_for_an_all_safe_range(
     _poll_result(client, sid)
 
 
+def test_restart_before_an_irreversible_step_that_already_acted_is_refused(
+    client, tmp_path, live_mockapp,
+) -> None:
+    # s0 safe, s1 irreversible: s1's act() runs, its settle then fails, and the engine
+    # escalates it anyway (trigger (c)). A restart from the safe s0 would re-run s1 -- a
+    # second real irreversible act under the same run -- so it is neither offered nor
+    # accepted.
+    never = Expect(when=Matcher(role="heading", name_match="contains", name="Nope"),
+                   outcome="continue", source="observed", verified=True)
+    artifact = Artifact(
+        schema_version=1, id="corebank.handoff_probe", version=4, name="handoff_probe",
+        description="s1 is irreversible and acts before it fails to settle", verified=False,
+        app=App(vendor_product="corebank-teller", variant="base", surface="web", entry="/search"),
+        settle=Settle(timeout_ms=300, poll_ms=50), max_duration_ms=60000,
+        inputs={}, outputs={},
+        steps=[
+            Step(id="s0", action="navigate", target=Target(path="/search"), risk="safe",
+                 expects=[Expect(when=_LOGIN_PAGE, outcome="continue", source="observed",
+                                 verified=True)]),
+            Step(id="s1", action="navigate", target=Target(path="/search"), risk="irreversible",
+                 expects=[never]),
+        ],
+        success=Success(checkpoint=Matcher(role="heading", name_match="contains", name="Nope")),
+        provenance=_provenance("r_handoff4"),
+    )
+    save(artifact, tmp_path)
+    write_registry_entry(tmp_path, artifact.id, artifact.version,
+                         RegistryEntry(status="approved"), artifact=artifact)
+    session = client.post("/sessions", json=_session_body(
+        tmp_path, live_mockapp, artifact, confirm_irreversible=True,
+        idempotency_key=f"irreversible-acted-{time.monotonic_ns()}",
+    )).json()
+    [iv] = _poll_interventions(client, session["session_id"])
+    assert iv["step_id"] == "s1"
+    assert "restart_from" not in iv["allowed_operator_actions"]
+    client.post(f"/interventions/{iv['id']}/claim", json={"operator_id": "op-1"}, headers=AUTH)
+    refused = client.post(f"/interventions/{iv['id']}/handback",
+                          json={"outcome": "restart_from", "step_id": "s0"}, headers=AUTH)
+    assert refused.status_code == 400
+    assert "safe" in refused.json()["detail"].lower()
+    _end(client, iv["id"])
+    _poll_result(client, session["session_id"])
+
+
+def test_a_second_session_with_a_live_sessions_idempotency_key_is_refused(
+    client, tmp_path, live_mockapp,
+) -> None:
+    # D34's gate is check-then-burn with nothing between; two concurrent sessions sharing a
+    # key (a client retrying after a network error) could both pass it and both act.
+    artifact = _three_step_artifact(tmp_path, s0_risk="irreversible", version=5)
+    key = f"shared-{time.monotonic_ns()}"
+    body = _session_body(tmp_path, live_mockapp, artifact, confirm_irreversible=True,
+                         idempotency_key=key)
+    first = client.post("/sessions", json=body)
+    assert first.status_code == 201
+    second = client.post("/sessions", json=body)
+    assert second.status_code == 409
+    assert key in second.json()["detail"]
+    [iv] = _poll_interventions(client, first.json()["session_id"])
+    client.post(f"/interventions/{iv['id']}/claim", json={"operator_id": "op-1"}, headers=AUTH)
+    _end(client, iv["id"])
+    _poll_result(client, first.json()["session_id"])
+    # Released at teardown: the service no longer holds the key (the engine's own D34 gate,
+    # which sees it burned, is what answers a reuse now -- before any step runs).
+    third = client.post("/sessions", json=body)
+    assert third.status_code == 201
+    assert _poll_result(client, third.json()["session_id"])["kind"] == "POLICY_BLOCKED"
+
+
 def test_delete_parks_a_claimed_session_capturing_before_it_releases_the_lease(
     client, tmp_path, live_mockapp,
 ) -> None:
@@ -396,7 +472,7 @@ def test_delete_parks_a_claimed_session_capturing_before_it_releases_the_lease(
     assert (run_dir / "screenshots" / "parked.png").exists()
     assert (run_dir / "snapshots" / "parked.yaml").exists()
     # The bracket's "before" half ran at the claim wake point, on the session's own thread.
-    assert (run_dir / "screenshots" / "human_before.png").exists()
+    assert (run_dir / "screenshots" / "escalation_1_human_before.png").exists()
 
 
 def test_an_interventions_evidence_refs_name_files_the_session_actually_wrote(

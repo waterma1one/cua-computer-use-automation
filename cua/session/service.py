@@ -53,6 +53,7 @@ from cua.session.actions import HumanActionBracket
 from cua.session.interventions import Intervention, InterventionExpired, Interventions
 from cua.session.lease import Controller, Lease, LeasedSurface
 from cua.surface.base import SurfaceError
+from cua.surface.models import EvidenceFrame
 from cua.surface.web import SessionBrowser, WebSurface, close_session_page, open_session_page
 
 __all__ = ["SessionService", "create_app"]
@@ -83,14 +84,40 @@ def _escalation_index(artifact: Artifact, step_id: str | None) -> int:
 
 def _restart_range_is_safe(artifact: Artifact, target_index: int, escalation_index: int) -> bool:
     """E7/E13, computed once, for both callers: `restart_from` a step at `target_index` re-runs
-    the range `artifact.steps[target_index:escalation_index]` -- the steps that already ran
-    once and would run again -- and is allowed only when that range is non-empty and every
-    step in it is `risk == "safe"`. `_allowed_operator_actions` asks whether *any* target
-    passes (to offer `restart_from` at all); the handback handler asks about the operator's
-    requested target (to refuse it with a 400). One predicate, so the two never drift."""
+    every step from the target through the escalating step T *inclusive* --
+    `artifact.steps[target_index:escalation_index + 1]` -- and is allowed only when the
+    target precedes T and every step in that range is `risk == "safe"`. T is in the range
+    because the engine escalates an irreversible step's `Failure` even after its `act()` ran
+    (trigger (c)), and a restart resumes the same run, whose act-site idempotency burn never
+    refuses a second act: restarting before an irreversible T would perform T twice. (A
+    deliberate re-run of a T that never acted is `Resolved`'s pre-act path, not this.) A
+    checkpoint escalation (`escalation_index == len(steps)`) has no T to include.
+    `_allowed_operator_actions` asks whether *any* target passes (to offer `restart_from` at
+    all); the handback handler asks about the operator's requested target (to refuse it with
+    a 400). One predicate, so the two never drift."""
     if not 0 <= target_index < escalation_index:
         return False
-    return all(s.risk == "safe" for s in artifact.steps[target_index:escalation_index])
+    return all(s.risk == "safe" for s in artifact.steps[target_index:escalation_index + 1])
+
+
+def _restart_range_ids(artifact: Artifact, target_index: int, escalation_index: int) -> list[str]:
+    return [s.id for s in artifact.steps[target_index:escalation_index + 1]]
+
+
+@dataclass(frozen=True)
+class _PrefixedSink:
+    """Hands `HumanActionBracket` (whose frame names are fixed, `human_before`/`human_after`)
+    a sink that prefixes each frame with its escalation's ordinal, so a second claim in the
+    same session never overwrites the first claim's bracket evidence."""
+
+    writer: EvidenceWriter
+    prefix: str
+
+    def event(self, **fields: object) -> None:
+        self.writer.event(**fields)
+
+    def frame(self, frame: EvidenceFrame, name: str) -> None:
+        self.writer.frame(frame, f"{self.prefix}_{name}")
 
 
 class _EscalationTimeout(Exception):
@@ -122,6 +149,7 @@ class _LiveSession:
     logout_path: str | None
     confirm_irreversible: bool = False
     idempotency_key: str | None = None
+    idempotency_claim: tuple[str, int, str] | None = None  # held in SessionService._live_keys
     ready: threading.Event = field(default_factory=threading.Event)
     surface: LeasedSurface | None = None          # set by _run_session, on its own thread
     writer: EvidenceWriter | None = None          # likewise
@@ -184,6 +212,12 @@ class SessionService:
         self._headless = headless
         self._sessions: dict[str, _LiveSession] = {}
         self._intervention_owner: dict[str, str] = {}  # intervention id -> session id
+        # (artifact id, version, idempotency key) held by a session still running. The
+        # engine's own D34 gate checks a key once, before any step, and burns it only at the
+        # act -- unsynchronised, so two concurrent sessions with one key could both pass it.
+        # The service is the first caller that runs replays concurrently, so it closes that
+        # window here rather than in the shared engine.
+        self._live_keys: set[tuple[str, int, str]] = set()
         self._lock = threading.Lock()
         self._local = threading.local()  # set once per session thread, read by escalate()
 
@@ -214,8 +248,9 @@ class SessionService:
         assert session.surface is not None and session.writer is not None
         surface, writer = session.surface, session.writer
 
-        label = step_id or "checkpoint"
-        frame_name = f"escalation_{len(session.order) + 1}_{label}"
+        ordinal = f"escalation_{len(session.order) + 1}"
+        frame_name = f"{ordinal}_{step_id or 'checkpoint'}"
+        bracket_sink = _PrefixedSink(writer, ordinal)
         writer.frame(surface.capture(), frame_name)  # the intervention's at-escalation evidence
 
         claim_event = threading.Event()
@@ -243,7 +278,7 @@ class SessionService:
                                 since_ms=iv.created_at, budget_ms=iv.ttl_ms):
             raise _EscalationTimeout(f"intervention {iv.id!r} was never claimed")
 
-        HumanActionBracket().before(surface, writer)  # first wake point (E16)
+        HumanActionBracket().before(surface, bracket_sink)  # first wake point (E16)
 
         assert iv.claimed_at is not None  # set by claim(), before claim_event was
         if not self._wait_phase(session, iv, handback_event,
@@ -255,7 +290,7 @@ class SessionService:
         if parked:  # DELETE /sessions/{id}'s park path -- it signals handback_event itself
             self._park(session)
 
-        HumanActionBracket().after(surface, writer)  # second wake point
+        HumanActionBracket().after(surface, bracket_sink)  # second wake point
 
         with self._lock:
             outcome = iv.handback_outcome
@@ -346,6 +381,8 @@ class SessionService:
             finally:
                 with self._lock:
                     session.lease.release()
+                    if session.idempotency_claim is not None:
+                        self._live_keys.discard(session.idempotency_claim)
                 session.result = result  # published last: a visible result means torn down
                 session.ready.set()  # in case the launch itself failed before ready was set
 
@@ -444,7 +481,17 @@ class SessionService:
             confirm_irreversible=request.confirm_irreversible,
             idempotency_key=request.idempotency_key,
         )
+        key = (None if request.idempotency_key is None
+               else (artifact.id, artifact.version, request.idempotency_key))
         with self._lock:
+            if key is not None:
+                if key in self._live_keys:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"idempotency_key {request.idempotency_key!r} is held by a "
+                               f"session of {artifact.id!r} v{artifact.version} still running")
+                self._live_keys.add(key)
+            session.idempotency_claim = key
             self._sessions[session.session_id] = session
         threading.Thread(target=self._run_session, args=(session,), daemon=True,
                          name=f"cua-{session.session_id}").start()
@@ -551,9 +598,9 @@ class SessionService:
                 raise HTTPException(
                     status_code=400,
                     detail=f"restart_from {request.step_id!r} would re-run steps "
-                           f"{[s.id for s in artifact.steps[target:escalation]]}; every step "
-                           f"re-run must be safe, and at least one must precede the "
-                           f"escalation")
+                           f"{_restart_range_ids(artifact, target, escalation)}; every step "
+                           f"re-run, the escalating step included, must be safe, and the "
+                           f"target must precede the escalation")
             return RestartFrom(step_id=request.step_id)
         raise HTTPException(
             status_code=400,
