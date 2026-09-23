@@ -442,6 +442,14 @@ class _Run:
     values: dict[str, object] = field(default_factory=dict)
     bound_by_step: dict[str, object] = field(default_factory=dict)
     steps_run: list[str] = field(default_factory=list)
+    # Fix round 1, Important #2: whether the step currently being attempted has reached
+    # `surface.act(...)` yet. Reset to `False` at the top of every `_run_step_inner` call and
+    # set `True` once `_prepare_action` has succeeded for it (the same "point of no return"
+    # `_run_step_inner` already burns the idempotency key at) -- so a `Failure` returned
+    # before that point (`_prepare_action`'s own `LOCATOR_NOT_FOUND`/`AMBIGUOUS_LOCATOR`/
+    # `PRECONDITION_FAILED`/etc.) is distinguishable, at the point it escalates, from one
+    # `act()` had already been attempted for.
+    step_acted: bool = False
 
     def fail(
         self, kind: FailureKind, step_id: str | None, expected: str, observed: str, *,
@@ -803,7 +811,14 @@ def _run_step_inner(run: _Run, step: Step) -> ReplayResult | None:
     Phase 6: this is the un-escalated step body -- exactly what `_run_step` used to be, in
     full, with none of its own D40 `_violation` checks touched. `_run_step` (below) wraps
     it and routes an escalation-worthy result through `_maybe_escalate` instead (E5).
+
+    Fix round 1, Important #2: `run.step_acted` is reset here, at the top, for every
+    attempt of this step, and set once `_prepare_action` has succeeded -- so a `Failure`
+    from `_prepare_action` itself (before `act()` is ever reached) is marked pre-act, and
+    `_maybe_escalate` can tell a human's `Resolved` "the state is fine, continue" apart from
+    a case where there is no resulting state yet to confirm.
     """
+    run.step_acted = False
     if run.clock.monotonic_ms() >= run.deadline:
         budget = run.artifact.max_duration_ms
         return run.fail(
@@ -816,6 +831,7 @@ def _run_step_inner(run: _Run, step: Step) -> ReplayResult | None:
     if isinstance(prepared, Failure):
         return prepared
     action, resolved_node = prepared
+    run.step_acted = True
 
     if step.risk == "irreversible" and run.idempotency_key is not None:
         _used_idempotency_keys.add(
@@ -899,6 +915,7 @@ def _maybe_escalate(
         return _escalate_and_continue(
             run, artifact, step_id=step.id, step_index=step_index, escalator=escalator,
             kind=outcome.kind, expected=outcome.expected, observed=outcome.observed,
+            pre_act=not run.step_acted,
         )
     return outcome
 
@@ -931,16 +948,35 @@ def _maybe_escalate_checkpoint(
 def _escalate_and_continue(
     run: _Run, artifact: Artifact, *, step_id: str | None, step_index: int,
     escalator: Escalator, kind: FailureKind, expected: str, observed: str,
+    pre_act: bool = False,
 ) -> ReplayResult | None:
     """`None` means "continue the loop from here" (used by `Resolved` after its own
     re-verification succeeds); any other return ends the whole replay. E17: the human-wait
     interval `escalator.escalate(...)` spends is excluded from `run.deadline`'s own budget --
     `run.deadline` is a plain mutable field on `_Run`, advanced by exactly however long the
     call took, so a resumed step has the same *remaining* budget it had when it paused.
+
+    Fix round 1, Important #1 (D40): `escalate()` is the window where a human drives the
+    live surface directly -- exactly the kind of blocking surface interaction every other
+    call site in this file re-checks `_violation` after. A violation the human's own drive
+    tripped must outrank whatever `HandbackOutcome` they returned, so it is checked here,
+    once, immediately after `escalate()` returns and before any `isinstance` dispatch --
+    never re-read afterward, the same pattern as every other `_violation(...)` site.
+
+    Fix round 1, Important #2: `pre_act`, `True` only when the escalating step T's own
+    `act()` was never reached (a pre-act `_prepare_action` failure on T itself, never the
+    `_resume_after` T+1 probe, which passes its own escalations through with `pre_act`
+    left at its default). `Resolved`'s meaning is "the human confirms the resulting state
+    is fine, continue" -- there is no resulting state to confirm when `act()` never ran, so
+    a `Resolved` handback in that case re-runs T instead (the same `_run_from(step_index)`
+    path `RestartFrom(step_id=T)` already takes), rather than treating T as already done.
     """
     before = run.clock.monotonic_ms()
     outcome = escalator.escalate(step_id=step_id, kind=kind, expected=expected, observed=observed)
     run.deadline += run.clock.monotonic_ms() - before
+    violated = _violation(run, step_id)
+    if violated is not None:
+        return violated
     if isinstance(outcome, CannotResolve):
         return run.fail(kind, step_id, expected, f"{observed} (operator: {outcome.note})",
                         capture=False)  # already captured once by the failure this wraps (E8)
@@ -957,7 +993,9 @@ def _escalate_and_continue(
                 capture=False,
             )
         return _run_from(run, artifact, index, escalator)
-    # Resolved: E6's two checks.
+    # Resolved.
+    if pre_act:
+        return _run_from(run, artifact, step_index, escalator)  # T never acted -- re-run it
     return _resume_after(run, artifact, step_id=step_id, step_index=step_index, escalator=escalator)
 
 
@@ -966,13 +1004,15 @@ def _resume_after(
 ) -> ReplayResult | None:
     """Spec §7.6/E6: re-verify the resume checkpoint, then (unless the triggering step, T, was
     the artifact's own last step) re-resolve T+1's own locator, before continuing at T+1. T
-    itself is never re-run -- its own `act()` already completed (both triggers that reach
-    `Resolved` presuppose this); a human confirming `Resolved` is confirming the resulting
-    state, not asking for T's action to happen a second time. `step_index` is the checkpoint
-    tail's own `len(artifact.steps)` when T was the synthetic checkpoint itself (`step_id is
-    None`), in which case `step_index == 0` never triggers (an artifact always has at least
-    one real step by the time replay reaches its checkpoint) but the branch below still holds
-    structurally.
+    itself is never re-run here -- its own `act()` already completed by the time this
+    function is reached (`_escalate_and_continue`'s `pre_act` branch, fix round 1's Important
+    #2, routes a `Resolved` for T's own pre-act failure through `_run_from(step_index)`
+    instead, before this function is ever called); a human confirming `Resolved` here is
+    confirming the resulting state, not asking for T's action to happen a second time.
+    `step_index` is the checkpoint tail's own `len(artifact.steps)` when T was the synthetic
+    checkpoint itself (`step_id is None`), in which case `step_index == 0` never triggers (an
+    artifact always has at least one real step by the time replay reaches its checkpoint) but
+    the branch below still holds structurally.
     """
     if step_index == 0:
         matchers: list[Matcher] = []

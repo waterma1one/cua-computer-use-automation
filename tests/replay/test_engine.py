@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import pytest
 
 from cua.artifact.models import (
@@ -1387,3 +1389,171 @@ def test_restart_from_an_unknown_step_id_is_a_precondition_failure() -> None:
     result = replay(artifact, {"member_id": "12345"}, surface, "supervised",
                     escalator=escalator, clock=FakeClock())
     assert isinstance(result, Failure) and result.kind == "PRECONDITION_FAILED"
+
+
+# --- Fix round 1: D40 after the human's own hand-back (Important #1) --------------------------
+
+class _ViolatingEscalator:
+    """Simulates a human's own live drive of the surface tripping the allowlist during the
+    escalation window itself -- `escalate()` sets `surface.violation` as a side effect,
+    before returning the scripted `HandbackOutcome`, exactly the risk Important #1 flagged:
+    nothing else observes this except a fresh `_violation(...)` check made right after
+    `escalate()` returns.
+    """
+
+    def __init__(self, surface: FakeSurface, reason: str, outcome: object) -> None:
+        self._surface = surface
+        self._reason = reason
+        self._outcome = outcome
+        self.calls: list[dict] = []
+
+    def escalate(self, *, step_id, kind, expected, observed):
+        self.calls.append(dict(step_id=step_id, kind=kind, expected=expected, observed=observed))
+        self._surface.violation = self._reason
+        return self._outcome
+
+
+def test_a_violation_recorded_during_the_escalation_window_outranks_resolved_manually() -> None:
+    artifact = _artifact(steps=[Step(
+        id="s1", action="click", locator=loc("Search"), risk="safe",
+        expects=[Expect(when=Matcher(role="heading", name_match="contains", name="Never "),
+                        outcome="continue", source="observed")],
+    )])
+    surface = FakeSurface(
+        frames=[[node("button", name="Search")], [node("heading", name="Member 12345")]]
+    )
+    escalator = _ViolatingEscalator(
+        surface, "the operator navigated off the allowlist", ResolvedManually()
+    )
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised",
+                    escalator=escalator, clock=FakeClock())
+    assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
+    assert "the operator navigated off the allowlist" in result.observed
+
+
+# --- Fix round 1: Resolved on a pre-act failure must genuinely re-run T (Important #2) --------
+
+@dataclass
+class _CountingActSurface(FakeSurface):
+    """Counts real `act()` calls -- the only way, from outside, to tell whether a step's
+    action was genuinely (re-)performed rather than the engine treating a pre-act failure's
+    `Resolved` handback as if the action had already happened.
+    """
+
+    act_calls: int = 0
+
+    def act(self, action):
+        self.act_calls += 1
+        return super().act(action)
+
+
+class _ObservingEscalator:
+    """Advances the surface's own observation index as a side effect of `escalate()` --
+    simulating the human's own look at the live page during the escalation window -- then
+    returns the scripted outcome. The same shape `_ViolatingEscalator` uses above, for a
+    different side effect.
+    """
+
+    def __init__(self, surface: FakeSurface, observes: int, outcome: object) -> None:
+        self._surface = surface
+        self._observes = observes
+        self._outcome = outcome
+        self.calls: list[dict] = []
+
+    def escalate(self, *, step_id, kind, expected, observed):
+        self.calls.append(dict(step_id=step_id, kind=kind, expected=expected, observed=observed))
+        for _ in range(self._observes):
+            self._surface.observe()
+        return self._outcome
+
+
+def test_resolved_on_an_irreversible_steps_pre_act_locator_failure_genuinely_re_runs_it() -> None:
+    # s1's first resolve (against frame 0, no "Post" control) fails LOCATOR_NOT_FOUND before
+    # `act()` is ever called -- risk="irreversible" escalates regardless of kind. The human's
+    # own look at the page (simulated here as two `observe()` calls during `escalate()`,
+    # advancing `_obs_index` to 2) puts "Post" in view; `Resolved` must re-run s1 from
+    # scratch (fix round 1's `pre_act` routing) rather than treat it as already done --
+    # `act_calls == 1` is the only way to see, from outside, that this actually happened:
+    # under the pre-fix behaviour `_resume_after` would trivially re-verify the (already-true)
+    # checkpoint and mark s1 as run without ever calling `act()`.
+    artifact = _irreversible_artifact()
+    surface = _CountingActSurface(frames=[
+        [node("text", name="not yet")],
+        [node("button", name="Post"), node("heading", name="Member 12345")],
+    ])
+    escalator = _ObservingEscalator(surface, observes=2, outcome=Resolved())
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised", status="approved",
+                    confirm_irreversible=True, idempotency_key="k-resolved-pre-act",
+                    escalator=escalator, clock=FakeClock())
+    assert len(escalator.calls) == 1
+    assert escalator.calls[0]["kind"] == "LOCATOR_NOT_FOUND"
+    assert escalator.calls[0]["step_id"] == "s1"
+    assert isinstance(result, ReplaySuccess)
+    assert result.steps_run == ["s1"]
+    assert surface.act_calls == 1  # ran exactly once: never on the failed pre-act resolve,
+                                    # never twice
+
+
+# --- Fix round 1: D40 pinned at the new escalation call sites (Important #3) -------------------
+
+def test_an_irreversible_steps_act_recorded_violation_never_calls_the_escalator() -> None:
+    # The existing `outcome.kind == "ALLOWLIST_VIOLATION"` exclusion in `_maybe_escalate`
+    # should already keep this from ever reaching `escalator.escalate(...)` -- pinning it.
+    artifact = _irreversible_artifact()
+    surface = FakeSurface(
+        frames=[[node("button", name="Post"), node("heading", name="Member 12345")]],
+        violation="left the allowlist",
+    )
+    escalator = FakeEscalator([])  # never called -- next() on it would raise StopIteration
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised", status="approved",
+                    confirm_irreversible=True, idempotency_key="k-violation-act",
+                    escalator=escalator, clock=FakeClock())
+    assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
+    assert escalator.calls == []
+
+
+@dataclass
+class _DelayedViolationSurface(FakeSurface):
+    """`allowlist_violation()` reports no violation for the first `trip_after` calls, then a
+    sticky one forever after -- simulates the surface freezing partway through a run, at a
+    specific, chosen call, rather than from the start (which the D40 checks upstream of
+    `_resume_after`'s own checkpoint probe would otherwise catch first).
+    """
+
+    trip_after: int = 0
+    violation_calls: int = 0
+
+    def allowlist_violation(self):
+        self.violation_calls += 1
+        if self.violation_calls > self.trip_after:
+            return "navigated off the allowlist during the resume checkpoint re-verification"
+        return None
+
+
+def test_resume_afters_own_checkpoint_probe_violation_is_never_escalated() -> None:
+    # s1's own settle times out (NO_BRANCH_MATCHED, escalates; `Settle(timeout_ms=100,
+    # poll_ms=50)` makes 3 polls). `trip_after=6` was derived empirically against this exact
+    # scenario (not hand-derived): calls 1-5 are s1's own post-act/settle/post-settle D40
+    # checks, call 6 is `_escalate_and_continue`'s own Important-#1 check right after
+    # `escalate()` returns (must still read clean here, or that site would catch it first,
+    # not the one under test) -- call 7, the first poll of `_resume_after`'s own
+    # `checkpoint_probe` settle, is where this test means the violation to first appear.
+    artifact = _artifact(
+        settle=Settle(timeout_ms=100, poll_ms=50),
+        steps=[
+            Step(id="s1", action="click", locator=loc("Search"), risk="safe",
+                 expects=[Expect(when=Matcher(role="heading", name_match="contains", name="Never "),
+                                 outcome="continue", source="observed")]),
+        ],
+    )
+    artifact.outputs = {}
+    surface = _DelayedViolationSurface(trip_after=6, frames=[
+        [node("button", name="Search")],
+        [node("heading", name="Member 12345")],
+        [node("heading", name="Member 12345")],
+    ])
+    escalator = FakeEscalator([Resolved()])
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised",
+                    escalator=escalator, clock=FakeClock())
+    assert len(escalator.calls) == 1  # never asked a second time for the same violation
+    assert isinstance(result, Failure) and result.kind == "ALLOWLIST_VIOLATION"
