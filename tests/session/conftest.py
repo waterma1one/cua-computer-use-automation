@@ -87,13 +87,15 @@ def _poll(fetch: Callable[[], Any], *, timeout_s: float = 10.0) -> Any:
 
 
 def _poll_result(client: TestClient, session_id: str) -> dict[str, Any]:
-    result: dict[str, Any] = _poll(lambda: client.get(f"/sessions/{session_id}").json()["result"])
+    result: dict[str, Any] = _poll(
+        lambda: client.get(f"/sessions/{session_id}", headers=AUTH).json()["result"])
     return result
 
 
 def _poll_interventions(client: TestClient, session_id: str, *, count: int = 1) -> list[dict]:
     def fetch() -> list[dict] | None:
-        listing: list[dict] = client.get(f"/sessions/{session_id}/interventions").json()
+        listing: list[dict] = client.get(
+            f"/sessions/{session_id}/interventions", headers=AUTH).json()
         return listing if len(listing) >= count else None
     interventions: list[dict] = _poll(fetch)
     return interventions
