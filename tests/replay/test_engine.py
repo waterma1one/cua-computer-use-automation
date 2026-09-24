@@ -1129,8 +1129,9 @@ class FakeEscalator:
         self._outcomes = iter(outcomes)
         self.calls: list[dict] = []
 
-    def escalate(self, *, step_id, kind, expected, observed):
-        self.calls.append(dict(step_id=step_id, kind=kind, expected=expected, observed=observed))
+    def escalate(self, *, step_id, kind, expected, observed, acted):
+        self.calls.append(dict(step_id=step_id, kind=kind, expected=expected, observed=observed,
+                               acted=acted))
         return next(self._outcomes)
 
 
@@ -1353,6 +1354,152 @@ def test_resolved_escalates_again_when_the_checkpoint_re_verification_fails() ->
     assert "page moved on" in result.observed
 
 
+# --- I2: the main resume path, on a genuine middle step (T has a T+1) -------------------------
+#
+# Every Resolved test above uses a last-or-only step, so none of them exercises
+# `_resume_after`'s own T+1 probe -- the code path review finding I2 caught a real bug in
+# (T+1's own probe failure re-escalated as T, and a second `Resolved` re-entered
+# `_resume_after(T)`, double-appending T to `steps_run`). These three tests are new coverage
+# for that path, not a re-trace of an existing one.
+#
+# All three share one shape: s1 settles at once; s2 (NOT the artifact's last step) escalates
+# because its own continue clause ("Refreshed" text) is absent from every frame index below 5
+# but present from index 5 onward (`FakeSurface` holds the last frame forever once its list is
+# exhausted) -- so s2's own 3-poll settle (`Settle(timeout_ms=100, poll_ms=50)`) times out
+# seeing only the withheld frame, and `_resume_after`'s own re-verification poll (which starts
+# exactly where s2's settle left off) reaches the frame where "Refreshed" is present.
+
+def _withheld_and_full_frames() -> tuple[list, list]:
+    withheld = [node("button", name="Search"), node("heading", name="Member 12345"),
+                node("button", name="Savings", value="4,218.60")]
+    full = [*withheld, node("button", name="Next"), node("text", value="Refreshed")]
+    return withheld, full
+
+
+def _middle_resume_artifact() -> Artifact:
+    return _artifact(
+        settle=Settle(timeout_ms=100, poll_ms=50),
+        steps=[
+            Step(id="s1", action="click", locator=loc("Search"), risk="safe",
+                 expects=[Expect(when=Matcher(role="heading", name_match="contains",
+                                             name="Member "), outcome="continue",
+                                 source="observed")]),
+            Step(id="s2", action="read", locator=loc("Savings"), extract="value",
+                 parse="money", into="balance", risk="safe",
+                 expects=[Expect(when=Matcher(strategy="text", name_match="contains",
+                                             name="Refreshed"), outcome="continue",
+                                 source="observed")]),
+            Step(id="s3", action="click", locator=loc("Next"), risk="safe"),
+        ],
+    )
+
+
+def test_resolved_on_a_middle_step_resumes_through_the_next_step_to_success() -> None:
+    # Acceptance criterion 7's first half, and I2's own missing case: s2 escalates, is
+    # resolved, and the run continues into T+1 (s3) and all the way to Success -- proving
+    # `_resume_after`'s own T+1 probe and continuation, never exercised anywhere before.
+    withheld, full = _withheld_and_full_frames()
+    artifact = _middle_resume_artifact()
+    surface = FakeSurface(frames=[*([withheld] * 5), full])
+    escalator = FakeEscalator([Resolved()])
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised",
+                    escalator=escalator, clock=FakeClock())
+    assert isinstance(result, ReplaySuccess)
+    assert result.outputs == {"balance": "4218.60"}
+    assert result.steps_run == ["s1", "s2", "s3"]  # each step exactly once
+    assert len(escalator.calls) == 1
+    assert escalator.calls[0]["step_id"] == "s2"  # s2's own settle timeout, not s3's
+
+
+class _AdvancingEscalator:
+    """A `FakeEscalator` that also advances the surface's own observation index by
+    `advance` calls to `observe()`, as a side effect of `escalate()`, before returning the
+    next scripted outcome -- the same shape `_ObservingEscalator` (fix round 1) already
+    uses, generalised to a script of `(advance, outcome)` pairs so a single test can give a
+    different advance for each of several escalations.
+    """
+
+    def __init__(self, surface: FakeSurface, script: list[tuple[int, object]]) -> None:
+        self._surface = surface
+        self._script = iter(script)
+        self.calls: list[dict] = []
+
+    def escalate(self, *, step_id, kind, expected, observed, acted):
+        self.calls.append(dict(step_id=step_id, kind=kind, expected=expected, observed=observed,
+                               acted=acted))
+        advance, outcome = next(self._script)
+        for _ in range(advance):
+            self._surface.observe()
+        return outcome
+
+
+def test_resolved_after_a_t_plus_one_not_found_re_runs_only_t_plus_one_once() -> None:
+    # I2's own reproduction, inverted into a passing test: s2 resolves cleanly, but s3 (T+1)
+    # is not yet on the page at the moment `_resume_after`'s own probe checks it --
+    # `LOCATOR_NOT_FOUND`, escalating as s3's own id with `pre_act=True` (the fix), not s2's.
+    # A second `Resolved` must re-run s3 from scratch (never re-enter `_resume_after` against
+    # s2 a second time -- the double-append the pre-fix code produced) and reach Success with
+    # every step id appearing exactly once.
+    withheld = [node("button", name="Search"), node("heading", name="Member 12345"),
+                node("button", name="Savings", value="4,218.60")]
+    mid = [*withheld, node("text", value="Refreshed")]  # s2's own clause, but no "Next" yet
+    full = [*mid, node("button", name="Next")]
+    artifact = _middle_resume_artifact()
+    surface = FakeSurface(frames=[*([withheld] * 5), *([mid] * 2), full])
+    escalator = _AdvancingEscalator(surface, script=[
+        (0, Resolved()),   # s2's own escalation -- no side effect
+        (2, Resolved()),   # s3's not-found escalation -- "looks at the page", Next appears
+    ])
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised",
+                    escalator=escalator, clock=FakeClock())
+    assert isinstance(result, ReplaySuccess)
+    assert result.steps_run == ["s1", "s2", "s3"]  # each step exactly once -- I2's own bug
+                                                    # would have produced ["s1", "s2", "s2", "s3"]
+    assert len(escalator.calls) == 2
+    assert escalator.calls[0]["step_id"] == "s2"
+    assert escalator.calls[1]["step_id"] == "s3"  # attributed to T+1, not T (I2's own fix)
+    assert escalator.calls[1]["kind"] == "LOCATOR_NOT_FOUND"
+    assert escalator.calls[1]["acted"] is False  # I3: s3 never reached act() at this point
+
+
+class _TimeAdvancingEscalator:
+    """Simulates a long human wait: advances the injected `FakeClock` by `advance_ms`, as a
+    side effect of `escalate()`, before returning the scripted outcome. Proves E17: the
+    elapsed time `escalate()` itself consumes is added back onto `run.deadline`, so a step
+    loop resumed after a long wait sees the same *remaining* budget it had when it paused,
+    not the original deadline blown by the human's own clock time.
+    """
+
+    def __init__(self, clock: FakeClock, advance_ms: int, outcome: object) -> None:
+        self._clock = clock
+        self._advance_ms = advance_ms
+        self._outcome = outcome
+        self.calls: list[dict] = []
+
+    def escalate(self, *, step_id, kind, expected, observed, acted):
+        self.calls.append(dict(step_id=step_id, kind=kind, expected=expected, observed=observed,
+                               acted=acted))
+        self._clock.sleep_ms(self._advance_ms)
+        return self._outcome
+
+
+def test_e17_the_deadline_advances_by_however_long_the_escalation_wait_actually_took() -> None:
+    withheld, full = _withheld_and_full_frames()
+    artifact = _middle_resume_artifact()
+    artifact.max_duration_ms = 300  # far less than the escalation wait below
+    surface = FakeSurface(frames=[*([withheld] * 5), full])
+    clock = FakeClock()
+    escalator = _TimeAdvancingEscalator(clock, advance_ms=5000, outcome=Resolved())
+    result = replay(artifact, {"member_id": "12345"}, surface, "supervised",
+                    escalator=escalator, clock=clock)
+    # Without E17's extension, s3's own deadline check (run.clock now ~5100ms, the original
+    # 300ms deadline unmoved) would return DURATION_EXCEEDED before s3 ever resolved its
+    # locator. With it, s3 still has the same ~200ms of remaining budget it had when s2
+    # paused, and the run reaches Success.
+    assert isinstance(result, ReplaySuccess)
+    assert result.steps_run == ["s1", "s2", "s3"]
+
+
 # --- ResolvedManually ------------------------------------------------------------------------
 
 def test_resolved_manually_ends_the_run_as_an_assisted_success_with_no_outputs() -> None:
@@ -1456,8 +1603,9 @@ class _ViolatingEscalator:
         self._outcome = outcome
         self.calls: list[dict] = []
 
-    def escalate(self, *, step_id, kind, expected, observed):
-        self.calls.append(dict(step_id=step_id, kind=kind, expected=expected, observed=observed))
+    def escalate(self, *, step_id, kind, expected, observed, acted):
+        self.calls.append(dict(step_id=step_id, kind=kind, expected=expected, observed=observed,
+                               acted=acted))
         self._surface.violation = self._reason
         return self._outcome
 
@@ -1509,8 +1657,9 @@ class _ObservingEscalator:
         self._outcome = outcome
         self.calls: list[dict] = []
 
-    def escalate(self, *, step_id, kind, expected, observed):
-        self.calls.append(dict(step_id=step_id, kind=kind, expected=expected, observed=observed))
+    def escalate(self, *, step_id, kind, expected, observed, acted):
+        self.calls.append(dict(step_id=step_id, kind=kind, expected=expected, observed=observed,
+                               acted=acted))
         for _ in range(self._observes):
             self._surface.observe()
         return self._outcome

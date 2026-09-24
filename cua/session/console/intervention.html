@@ -6,6 +6,8 @@
 <table border="1" cellpadding="5" cellspacing="0">
   <tr><td><b>Goal</b></td><td>{{ iv.goal }}</td></tr>
   <tr><td><b>Reason</b></td><td>{{ iv.reason_code }}</td></tr>
+  <tr><td><b>Action already ran</b></td>
+      <td>{{ "yes" if iv.acted else "no -- a \"Resolved\" handback will run it" }}</td></tr>
   <tr><td><b>Expected</b></td><td>{{ iv.expected }}</td></tr>
   <tr><td><b>Observed</b></td><td>{{ iv.observed }}</td></tr>
   <tr><td><b>Screenshot</b></td><td>{{ iv.screenshot_ref }}</td></tr>

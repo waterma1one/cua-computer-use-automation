@@ -243,6 +243,7 @@ class SessionService:
 
     def escalate(
         self, *, step_id: str | None, kind: FailureKind, expected: str, observed: str,
+        acted: bool,
     ) -> HandbackOutcome:
         """E16's two-phase wait: a claim phase bounded by `ttl_ms` from creation, then (once
         claimed) a resolve phase bounded by `claim_ttl_ms` from the claim -- mirroring Task
@@ -251,6 +252,13 @@ class SessionService:
         at the last moment and an expiry can never both win. Every `session.surface`/
         `session.writer` touch below runs on the session's own thread -- the one calling this
         method -- never crossing to an HTTP-handler thread (E15).
+
+        I3: `acted` is the engine's own `Escalator.escalate` widening -- whether the
+        escalating step's `act()` has already run. Recorded on the `Intervention` itself
+        (`_allowed_operator_actions` decides what an operator may choose; this decides what
+        they see about what choosing `resolved` actually does) so the console and
+        `GET /sessions/{id}/interventions` can tell an operator, before they click
+        "resolved", whether doing so re-runs an action that has not happened yet.
         """
         session = self._current_session()
         assert session.surface is not None and session.writer is not None
@@ -259,7 +267,21 @@ class SessionService:
         ordinal = f"escalation_{len(session.order) + 1}"
         frame_name = f"{ordinal}_{step_id or 'checkpoint'}"
         bracket_sink = _PrefixedSink(writer, ordinal)
-        writer.frame(surface.capture(), frame_name)  # the intervention's at-escalation evidence
+        # C1: a pending native dialog blocks `capture()` (`page.screenshot()`) until
+        # Playwright's own default timeout -- the same guard `cua.replay.engine._fail` and
+        # `HumanActionBracket._capture` already apply. Without it, an escalation that fires
+        # while a dialog is pending raises `SurfaceError` here, escapes `escalate()` and
+        # `replay()`, and `_run_session`'s catch-all turns the whole run into `SESSION_LOST`
+        # with no intervention ever created.
+        try:
+            message = surface.pending_dialog()
+            if message is not None:
+                writer.event(step_id=step_id, kind="capture_skipped",
+                             reason="a native dialog is pending")
+            else:
+                writer.frame(surface.capture(), frame_name)  # at-escalation evidence
+        except SurfaceError as exc:
+            writer.event(step_id=step_id, kind="capture_failed", reason=str(exc))
 
         claim_event = threading.Event()
         handback_event = threading.Event()
@@ -274,7 +296,7 @@ class SessionService:
                     snapshot_ref=f"{writer.evidence_ref()}/snapshots/{frame_name}.yaml",
                     allowed_operator_actions=self._allowed_operator_actions(
                         session.artifact, step_id),
-                    ttl_ms=session.ttl_ms, claim_ttl_ms=session.claim_ttl_ms,
+                    ttl_ms=session.ttl_ms, claim_ttl_ms=session.claim_ttl_ms, acted=acted,
                 )
                 session.events[iv.id] = (claim_event, handback_event)
                 session.order.append(iv.id)
