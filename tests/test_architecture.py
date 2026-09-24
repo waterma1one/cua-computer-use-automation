@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 FORBIDDEN = ("playwright", "selenium")
-PURE_PACKAGES = ("artifact", "replay", "policy", "catalog", "observability")
+PURE_PACKAGES = ("artifact", "replay", "policy", "catalog", "observability", "session")
 
 
 def test_only_surface_may_import_a_browser_driver() -> None:
@@ -127,6 +127,24 @@ def test_the_surface_never_imports_the_policy_package() -> None:
         source = text.read_text().lower()
         assert "import cua.policy" not in source, f"{name} imports cua.policy"
         assert "from cua.policy" not in source, f"{name} imports cua.policy"
+
+
+def test_replay_may_not_import_the_session_package() -> None:
+    """Global constraints (phase 6): `cua/replay/` may not import `cua.session` -- the
+    dependency runs one way, exactly as it already does for `cua.observability`'s
+    `EvidenceSink` (D19's own precedent). `cua/replay/engine.py` declares a local,
+    structural `Escalator` protocol instead; `cua.session.service` satisfies it without
+    either module importing the other.
+
+    An import statement only, not any mention of the name: `cua/replay/engine.py` and
+    `cua/replay/result.py` both talk *about* `cua.session` in prose (docstrings explaining
+    why the coupling runs the other way), and that prose is not a violation.
+    """
+    root = Path("cua") / "replay"
+    for path in root.rglob("*.py"):
+        text = path.read_text()
+        assert "import cua.session" not in text, f"{path} imports cua.session"
+        assert "from cua.session" not in text, f"{path} imports cua.session"
 
 
 def test_human_action_is_only_constructed_by_record_human_action() -> None:
