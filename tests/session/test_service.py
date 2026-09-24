@@ -12,6 +12,7 @@ the test that opened it by more than a moment.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -424,6 +425,40 @@ def test_an_interventions_evidence_refs_name_files_the_session_actually_wrote(
     client.post(f"/interventions/{iv['id']}/claim", json={"operator_id": "op-1"}, headers=AUTH)
     _end(client, iv["id"])
     _poll_result(client, session["session_id"])
+
+
+def test_the_run_log_durably_records_the_intervention_lifecycle_and_the_result(
+    client, tmp_path, live_mockapp,
+) -> None:
+    # I4: spec §7.7 -- operator identity recorded on claim, interventions sequenced in the
+    # run log -- and the same run.json/artifact.yaml/result.json triple `cua replay` writes,
+    # so `Success(assistance="human")` and every other outcome survive the process instead
+    # of living only in the in-memory `Intervention`/`_LiveSession` this test also checks.
+    artifact = _artifact_that_always_escalates(tmp_path)
+    session = client.post("/sessions", json=_session_body(tmp_path, live_mockapp, artifact)).json()
+    sid = session["session_id"]
+    iv_id = _poll_interventions(client, sid)[0]["id"]
+    client.post(f"/interventions/{iv_id}/claim", json={"operator_id": "op-durable"}, headers=AUTH)
+    client.post(f"/interventions/{iv_id}/handback", json={"outcome": "resolved_manually"},
+               headers=AUTH)
+    result = _poll_result(client, sid)
+    assert result["assistance"] == "human"
+
+    run_dir = Path(tmp_path) / result["evidence_ref"]
+    assert (run_dir / "run.json").exists()
+    assert (run_dir / "artifact.yaml").exists()
+    written_result = json.loads((run_dir / "result.json").read_text())
+    assert written_result["assistance"] == "human"
+
+    events = [json.loads(line) for line in (run_dir / "trace.jsonl").read_text().splitlines()]
+    kinds = [e["kind"] for e in events]
+    assert "intervention_created" in kinds
+    assert "intervention_claimed" in kinds
+    assert "intervention_handed_back" in kinds
+    claimed = next(e for e in events if e["kind"] == "intervention_claimed")
+    assert claimed["operator_id"] == "op-durable"
+    handed_back = next(e for e in events if e["kind"] == "intervention_handed_back")
+    assert handed_back["outcome"] == "resolved_manually"
 
 
 def test_two_concurrent_sessions_each_resolve_against_their_own_interventions(

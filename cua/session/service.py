@@ -303,10 +303,21 @@ class SessionService:
                 self._intervention_owner[iv.id] = session.session_id
         if parked:  # a park request that arrived before this escalation opened
             self._park(session)
+        # I4: a durable, sequenced record that a human intervention opened -- spec §7.7's
+        # own phrase -- written on the session's own thread, the same thread that will
+        # write every other event this escalation produces.
+        writer.event(kind="intervention_created", intervention_id=iv.id, step_id=step_id,
+                     reason_code=kind, acted=acted)
 
         if not self._wait_phase(session, iv, claim_event,
                                 since_ms=iv.created_at, budget_ms=iv.ttl_ms):
             raise _EscalationTimeout(f"intervention {iv.id!r} was never claimed")
+
+        with self._lock:
+            claimed_by = iv.claimed_by
+        # I4: spec §7.7's "operator identity is recorded on claim" -- durable, not just
+        # the in-memory `claimed_by` `claim()` (an HTTP-handler thread) already sets.
+        writer.event(kind="intervention_claimed", intervention_id=iv.id, operator_id=claimed_by)
 
         HumanActionBracket().before(surface, bracket_sink)  # first wake point (E16)
 
@@ -326,6 +337,10 @@ class SessionService:
             outcome = iv.handback_outcome
         if outcome is None:
             raise _EscalationTimeout(f"intervention {iv.id!r} handback recorded no outcome")
+        # I4: the run log's own record that this intervention resolved, and how -- spec
+        # §7.7's "interventions are sequenced in the run log".
+        writer.event(kind="intervention_handed_back", intervention_id=iv.id,
+                     outcome=_OUTCOME_NAMES[type(outcome)])
         return outcome
 
     def _wait_phase(
@@ -381,6 +396,16 @@ class SessionService:
             session.agent_token = token
             session.surface = LeasedSurface(web_surface, session.lease, token)
             session.writer = EvidenceWriter(session.root)
+            # I4: the same run.json/artifact.yaml pair `cua replay` (`cua/cli.py`) writes,
+            # in the same order, before the replay itself starts -- so a session that never
+            # reaches `write_result` below (a crash before any step) still leaves an audit
+            # trail naming what it was asked to do.
+            session.writer.write_run(
+                goal=session.artifact.description, capability=session.artifact.id,
+                inputs=session.inputs, input_specs=session.artifact.inputs,
+                policy_mode=session.artifact.provenance.policy_mode,
+            )
+            session.writer.write_artifact(session.artifact)
             session.ready.set()  # POST /sessions' own handler is waiting on this
             if parked:  # parked (or abandoned by a timed-out POST) before the replay began
                 self._park(session)
@@ -413,6 +438,16 @@ class SessionService:
                     session.lease.release()
                     if session.idempotency_claim is not None:
                         self._live_keys.discard(session.idempotency_claim)
+                if session.writer is not None:
+                    # I4: the same result.json `cua replay` writes, on the session's own
+                    # thread -- `Success(assistance="human")` and every other outcome this
+                    # phase can produce survive the process, not just this object's memory.
+                    session.writer.write_result(
+                        result, redacted_outputs={
+                            name for name, spec in session.artifact.outputs.items()
+                            if spec.redact
+                        },
+                    )
                 session.result = result  # published last: a visible result means torn down
                 session.ready.set()  # in case the launch itself failed before ready was set
 
