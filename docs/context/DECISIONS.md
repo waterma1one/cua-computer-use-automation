@@ -928,3 +928,32 @@ step is also the artifact's only or last step) pass unmodified under either read
 in both fixtures the predecessor's clause and `success.checkpoint` coincide by construction —
 which is exactly why the discrepancy went undetected through Task 4's own review and Task 8's
 close. Task 9 adds the discriminating test this gap needed.
+
+## D47 — Phase 10 (assisted fallback) is cut, per D5's own pre-agreed order
+The repository owner asked to wrap up the remaining project quickly. D5 named exactly this
+contingency in advance: "Agreed cut order if time tightens: assisted fallback first, then
+stability scoring, both documented in REPORT.md as designed but not built. The capability
+catalog and cross-tenant reuse are not cut." Invoking it now is executing a decision already
+made, not a new one.
+**Decision:** the `10-assisted-fallback.md` phase plan is not implemented. Its design (already
+written as a contract card, D5 tier 3: off by default, single step only, allowlist-checked,
+never on risky actions, recorded as evidence, replay result marked assisted so it is never
+reported as a clean deterministic replay) moves into REPORT.md §7 as designed-but-not-built,
+citing that file directly rather than re-deriving the design in prose.
+**What stays:** phases 7 (discovery loop), 8 (the real discovery run), 9 (catalog + approval
+gate + stability score — D5's tier 1 and tier 2 stretch goals are not cut), and 11
+(README/REPORT/evidence writeup) are all still required deliverables per `RULES.md` §3's
+table and the plan's own gate column. "Quickly" is read as *build these four phases thin but
+real* (RULES.md §5: "prefer a thin but real version of every required capability over a
+polished subset"), not as cutting further into the core path — D5 already drew that line at
+assisted fallback specifically so the four required phases would not be the next thing cut
+if time ran short.
+**Next candidate if more time pressure appears:** D5's own second-in-line cut is the
+stability score specifically (not all of phase 9) — approval gating stays either way, since
+`requires_human_approval` is load-bearing in the registry (D30) independent of stretch-goal
+status.
+**Cost accepted:** the brief's "at most one or two stretch goals" framing is already exceeded
+by the three that remain (capability catalog, cross-tenant reuse, approval gating + stability
+score) — D5 accepted that cost when it tiered four instead of picking one or two; this
+decision does not revisit that, only executes the cut D5 already reserved for exactly this
+moment.
