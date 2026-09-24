@@ -314,6 +314,12 @@ class SessionService:
             raise _EscalationTimeout(f"intervention {iv.id!r} was never claimed")
 
         with self._lock:
+            parked = session.parked
+        if parked:  # I6: `park()` woke `claim_event` itself -- no real claim happened, so
+            self._park(session)  # `iv.claimed_at` is still None; park here, before the
+                                 # assert below would otherwise trip on that.
+
+        with self._lock:
             claimed_by = iv.claimed_by
         # I4: spec §7.7's "operator identity is recorded on claim" -- durable, not just
         # the in-memory `claimed_by` `claim()` (an HTTP-handler thread) already sets.
@@ -596,15 +602,34 @@ class SessionService:
         return {"session_id": session.session_id, "lease_token": session.agent_token}
 
     def park(self, session_id: str) -> dict[str, Any]:
-        """Signals the park; never touches the `Page` (E15). If the session is inside a
-        claimed intervention's resolve phase, it wakes and parks at once; in a claim phase it
-        parks the moment an operator claims (there is no human window to park before then);
-        between escalations it parks at its next one."""
+        """Signals the park; never touches the `Page` (E15). I6: three preemption points,
+        covering wherever the session's own thread currently is --
+
+        - mid-action, between escalations (or before the first one ever fires): the lease
+          is rebound to `"none"` here, under the lock, so the agent's `LeasedSurface`
+          raises `LeaseError` on its very next `act`/`act_on_index` (D40 is still checked
+          first, inside the engine's/`_ending_failure`'s existing `SurfaceError`
+          translation -- this adds no second, competing check). This is what used to be a
+          pure no-op: `parked` alone was never read until the *next* escalation.
+        - sitting in an unclaimed intervention's claim-phase wait: `claim_event` is woken
+          too, so this wait no longer only ends by a real claim or its own `ttl_ms`.
+          `escalate()`'s own guard, right after that wait, checks `parked` before assuming
+          the wake was a real claim (`iv.claimed_at` would still be `None`).
+        - sitting in a claimed intervention's resolve-phase wait: `handback_event` is
+          woken, as before -- `escalate()`'s own post-wait check catches it there.
+
+        Whichever point actually applies, the session's own thread captures a frame and
+        releases the lease itself (`_park`, then `_run_session`'s `finally`) -- this method
+        never touches the `Page` and never releases the lease a second time; rebinding it
+        here only pre-empts an in-flight `act()`, it does not tear the session down.
+        """
         session = self._session(session_id)
         with self._lock:
             session.parked = True
+            session.lease.release()
             if session.order:
-                _claim_event, handback_event = session.events[session.order[-1]]
+                claim_event, handback_event = session.events[session.order[-1]]
+                claim_event.set()
                 handback_event.set()
         return {"session_id": session_id, "parked": True}
 
