@@ -35,7 +35,14 @@ from cua.observability import EvidenceWriter
 from cua.policy.config import load_policy
 from cua.replay.settle import SYSTEM_CLOCK
 from cua.session.lease import Lease, LeasedSurface
-from cua.session.service import SessionService, _HandbackRequest, _LiveSession
+from cua.session.service import (
+    SessionService,
+    _EscalationTimeout,
+    _HandbackRequest,
+    _intervention_json,
+    _LiveSession,
+)
+from cua.surface.models import EvidenceFrame
 from tests.session.conftest import (
     _LOGIN_PAGE,
     AUTH,
@@ -494,6 +501,75 @@ def _offline_session(tmp_path, reason: str | None, *, secret: str = "") -> _Live
                                     lease.acquire("agent"))
     session.writer = EvidenceWriter(Path(tmp_path))
     return session
+
+
+class _DialogPendingSurface:
+    """Just enough of a `Surface` for `escalate()`'s own capture guard (C1): a pending
+    dialog, and a `capture()` that fails the test outright if it is ever called while one
+    is pending -- a real `WebSurface.capture()` would instead block on `page.screenshot()`
+    until Playwright's own ~30s default timeout and then raise `SurfaceError`, which is
+    exactly the bug this guards against, so failing loudly here is the point.
+    """
+
+    def pending_dialog(self) -> str | None:
+        return "Unexpected dialog"
+
+    def capture(self):  # pragma: no cover -- must never be reached
+        raise AssertionError("capture() must not be called while a dialog is pending")
+
+
+def test_escalate_with_a_pending_dialog_creates_an_intervention_instead_of_raising(
+    tmp_path,
+) -> None:
+    # C1: `escalate()` used to call `writer.frame(surface.capture(), ...)` unconditionally.
+    # A pending dialog blocks `capture()` until Playwright's own timeout, which raised
+    # `SurfaceError` here, escaped `escalate()` and `replay()`, and turned the whole run
+    # into `SESSION_LOST` with no intervention ever created. `_offline_session`'s
+    # `ttl_ms=1`/`claim_ttl_ms=1` make the claim phase expire at once, so this test proves
+    # the fix without waiting on a real Playwright timeout: an intervention is created (the
+    # escalation reached the human-facing half of `escalate()` at all), and the only
+    # exception that comes out is the ordinary claim-phase expiry -- never a `SurfaceError`,
+    # and never by way of `_DialogPendingSurface.capture()`, which would fail the test
+    # directly if the guard were missing.
+    service = SessionService(operator_token=TOKEN)
+    session = _offline_session(tmp_path, None)
+    session.surface = _DialogPendingSurface()  # type: ignore[assignment]
+    service._local.session = session
+    with pytest.raises(_EscalationTimeout):
+        service.escalate(step_id="s1", kind="NO_BRANCH_MATCHED", expected="e", observed="o",
+                         acted=True)
+    [iv] = session.interventions.list_all()
+    assert iv.step_id == "s1"
+    assert iv.status == "expired"  # never claimed -- the claim-phase ttl elapsed, as scripted
+
+
+class _NoDialogSurface:
+    """Just enough of a `Surface` for `escalate()`'s own capture: no dialog pending, and a
+    `capture()` that returns a real (empty) `EvidenceFrame`."""
+
+    def pending_dialog(self) -> str | None:
+        return None
+
+    def capture(self) -> EvidenceFrame:
+        return EvidenceFrame(generation=0, image_png=None, snapshot_yaml="")
+
+
+def test_the_acted_flag_reaches_the_created_intervention_and_its_json(tmp_path) -> None:
+    # I3: `escalate()`'s own `acted` parameter -- the engine's widening of `Escalator.
+    # escalate`, negating whatever it computed as `pre_act` -- is recorded on the
+    # `Intervention` itself, not just implied by its `reason_code`, so an operator (via
+    # `GET /sessions/{id}/interventions`, `_intervention_json` here) can tell whether
+    # choosing "resolved" re-runs an action that has not happened yet.
+    service = SessionService(operator_token=TOKEN)
+    session = _offline_session(tmp_path, None)
+    session.surface = _NoDialogSurface()  # type: ignore[assignment]
+    service._local.session = session
+    with pytest.raises(_EscalationTimeout):
+        service.escalate(step_id="s1", kind="LOCATOR_NOT_FOUND", expected="e", observed="o",
+                         acted=False)
+    [iv] = session.interventions.list_all()
+    assert iv.acted is False
+    assert _intervention_json(iv)["acted"] is False
 
 
 @pytest.mark.parametrize("kind", ["ESCALATION_TIMEOUT", "SESSION_LOST"])

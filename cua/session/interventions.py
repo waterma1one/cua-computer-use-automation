@@ -45,6 +45,13 @@ class Intervention:
     created_at: int
     ttl_ms: int
     claim_ttl_ms: int
+    # I3: whether the escalating step's `act()` had already run when this intervention was
+    # opened. `True` unless the caller says otherwise -- the common case (a post-act
+    # settle timeout, an irreversible step whose action already ran) -- so a `resolved`
+    # handback re-verifies rather than re-performs an action, by default. `False` only for
+    # a pre-act escalation (the step's own locator/precondition failed before `act()` was
+    # ever reached), where a `resolved` handback re-runs the step from scratch instead.
+    acted: bool = True
     claimed_by: str | None = None
     claimed_at: int | None = None
     status: InterventionStatus = "open"
@@ -65,7 +72,7 @@ class Interventions:
         self, *, run_id: str, goal: str, capability_id: str, version: int,
         step_id: str | None, reason_code: FailureKind, expected: str, observed: str,
         screenshot_ref: str, snapshot_ref: str, allowed_operator_actions: list[str],
-        ttl_ms: int, claim_ttl_ms: int,
+        ttl_ms: int, claim_ttl_ms: int, acted: bool = True,
     ) -> Intervention:
         iv = Intervention(
             id=f"iv-{secrets.token_hex(4)}", run_id=run_id, goal=goal,
@@ -74,6 +81,7 @@ class Interventions:
             screenshot_ref=screenshot_ref, snapshot_ref=snapshot_ref,
             allowed_operator_actions=allowed_operator_actions,
             created_at=self.clock.monotonic_ms(), ttl_ms=ttl_ms, claim_ttl_ms=claim_ttl_ms,
+            acted=acted,
         )
         self._by_id[iv.id] = iv
         return iv

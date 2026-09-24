@@ -166,12 +166,21 @@ class Escalator(Protocol):
 
     def escalate(
         self, *, step_id: str | None, kind: FailureKind, expected: str, observed: str,
+        acted: bool,
     ) -> HandbackOutcome:
         """Blocks until a human hands the intervention back (or it expires -- a caller's own
         `escalate()` implementation is responsible for turning an expiry into whichever
         `HandbackOutcome` it prefers to model that as, or for raising in a way `replay()`'s
         caller can translate to `ESCALATION_TIMEOUT`; this protocol does not constrain that
-        choice)."""
+        choice).
+
+        I3: `acted` tells the caller whether the escalating step's own `act()` has already
+        run -- `False` only for a pre-act escalation (`_escalate_and_continue`'s `pre_act`,
+        negated). `Resolved`'s meaning differs on each side of that line (re-verify an
+        action that happened, versus re-run one that has not), and a human deciding how to
+        resolve an intervention needs to know which one they are looking at before they
+        choose -- an operator who chooses `resolved` on a pre-act failure of an irreversible
+        step causes that action to actually run."""
         ...
 
 
@@ -963,16 +972,23 @@ def _escalate_and_continue(
     once, immediately after `escalate()` returns and before any `isinstance` dispatch --
     never re-read afterward, the same pattern as every other `_violation(...)` site.
 
-    Fix round 1, Important #2: `pre_act`, `True` only when the escalating step T's own
-    `act()` was never reached (a pre-act `_prepare_action` failure on T itself, never the
-    `_resume_after` T+1 probe, which passes its own escalations through with `pre_act`
-    left at its default). `Resolved`'s meaning is "the human confirms the resulting state
-    is fine, continue" -- there is no resulting state to confirm when `act()` never ran, so
-    a `Resolved` handback in that case re-runs T instead (the same `_run_from(step_index)`
-    path `RestartFrom(step_id=T)` already takes), rather than treating T as already done.
+    Fix round 1, Important #2 / I2: `pre_act` is `True` whenever the step named by `step_id`
+    (at `step_index`) has not itself reached `act()` -- a pre-act `_prepare_action` failure
+    on the step being attempted, whether that is a step's own first attempt (T) or
+    `_resume_after`'s own probe of the next step after a resume (T+1, review finding I2:
+    the probe escalates as T+1's own id, `pre_act=True`, not T's -- passing T's id here
+    used to misattribute the failure and, on a second `Resolved`, re-enter `_resume_after`
+    against T a second time, double-appending it to `steps_run`). `Resolved`'s meaning is
+    "the human confirms the resulting state is fine, continue" -- there is no resulting
+    state to confirm when `act()` never ran, so a `Resolved` handback in that case re-runs
+    the named step instead (`_run_from(step_index)`, the same path `RestartFrom` already
+    takes), rather than treating it as already done. I3: also becomes the negation of the
+    `acted` field threaded through to `escalator.escalate(...)`, so the operator sees the
+    same distinction the engine is making here.
     """
     before = run.clock.monotonic_ms()
-    outcome = escalator.escalate(step_id=step_id, kind=kind, expected=expected, observed=observed)
+    outcome = escalator.escalate(step_id=step_id, kind=kind, expected=expected, observed=observed,
+                                 acted=not pre_act)  # I3: acted is pre_act's own negation
     run.deadline += run.clock.monotonic_ms() - before
     violated = _violation(run, step_id)
     if violated is not None:
@@ -1057,18 +1073,26 @@ def _resume_after(
             violated = _violation(run, next_step.id)
             if violated is not None:
                 return violated
-            return _escalate_and_continue(run, artifact, step_id=step_id, step_index=step_index,
-                                          escalator=escalator, kind="SESSION_LOST",
+            # I2: T+1's own probe failure escalates as T+1, pre_act=True -- T+1 never
+            # reached `act()`, so a `Resolved` on it must re-run T+1 from scratch (the
+            # normal pre-act path, `_escalate_and_continue`'s own dispatch), not re-enter
+            # this function against T a second time (which used to double-append T to
+            # `steps_run` and misattribute the failure to T instead of T+1).
+            return _escalate_and_continue(run, artifact, step_id=next_step.id,
+                                          step_index=next_index, escalator=escalator,
+                                          kind="SESSION_LOST",
                                           expected="the surface resolves the next step's locator",
-                                          observed=str(exc))
+                                          observed=str(exc), pre_act=True)
         if resolution.kind != "unique":
             violated = _violation(run, next_step.id)  # review finding #7: this site was missing
             if violated is not None:                  # the D40 guard in the contract card's draft
                 return violated
             kind, expected, observed = _resolution_failure_parts(resolution, next_step.locator)
-            return _escalate_and_continue(run, artifact, step_id=step_id, step_index=step_index,
-                                          escalator=escalator, kind=kind, expected=expected,
-                                          observed=observed)
+            # I2, same fix: T+1's own resolution failure, not T's.
+            return _escalate_and_continue(run, artifact, step_id=next_step.id,
+                                          step_index=next_index, escalator=escalator,
+                                          kind=kind, expected=expected, observed=observed,
+                                          pre_act=True)
 
     return _run_from(run, artifact, next_index, escalator)
 
