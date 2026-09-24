@@ -704,20 +704,37 @@ def create_app(*, operator_token: str, headless: bool = True) -> FastAPI:
     app = FastAPI()
     templates = Jinja2Templates(directory=str(Path(__file__).parent / "console"))
 
+    # I5: every route in this router touches session state or evidence an unauthenticated
+    # caller must not read or change -- starting a headed browser, killing any session,
+    # reading the same intervention data the console gates. `_require_operator` is the one
+    # implementation of this check (D28); every route below reuses it rather than
+    # duplicating it.
     @app.post("/sessions", status_code=201)
-    def post_session(request: _CreateSessionRequest) -> dict[str, str]:
+    def post_session(
+        request: _CreateSessionRequest, authorization: str | None = Header(default=None),
+    ) -> dict[str, str]:
+        service._require_operator(authorization)
         return service.create_session(request)
 
     @app.delete("/sessions/{session_id}", status_code=202)
-    def delete_session(session_id: str) -> dict[str, Any]:
+    def delete_session(
+        session_id: str, authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        service._require_operator(authorization)
         return service.park(session_id)
 
     @app.get("/sessions/{session_id}")
-    def get_session(session_id: str) -> dict[str, Any]:
+    def get_session(
+        session_id: str, authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        service._require_operator(authorization)
         return service.get_session(session_id)
 
     @app.get("/sessions/{session_id}/interventions")
-    def get_interventions(session_id: str) -> list[dict[str, Any]]:
+    def get_interventions(
+        session_id: str, authorization: str | None = Header(default=None),
+    ) -> list[dict[str, Any]]:
+        service._require_operator(authorization)
         return service.list_interventions(session_id)
 
     @app.post("/interventions/{iv_id}/claim")

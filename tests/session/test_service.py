@@ -113,7 +113,7 @@ def test_post_sessions_returns_a_session_id_and_a_lease_token(
 ) -> None:
     artifact = _artifact_that_always_escalates(tmp_path)
     response = client.post("/sessions", json=_session_body(
-        tmp_path, live_mockapp, artifact, ttl_ms=500, claim_ttl_ms=1000))
+        tmp_path, live_mockapp, artifact, ttl_ms=500, claim_ttl_ms=1000), headers=AUTH)
     assert response.status_code == 201
     body = response.json()
     assert "session_id" in body and "lease_token" in body
@@ -126,19 +126,22 @@ def test_an_unclaimed_intervention_expires_and_the_run_fails_escalation_timeout(
 ) -> None:
     artifact = _artifact_that_always_escalates(tmp_path)
     response = client.post("/sessions", json=_session_body(
-        tmp_path, live_mockapp, artifact, ttl_ms=300, claim_ttl_ms=1000))
+        tmp_path, live_mockapp, artifact, ttl_ms=300, claim_ttl_ms=1000), headers=AUTH)
     session_id = response.json()["session_id"]
     result = _poll_result(client, session_id)
     assert result["kind"] == "ESCALATION_TIMEOUT"
-    [iv] = client.get(f"/sessions/{session_id}/interventions").json()
+    [iv] = client.get(f"/sessions/{session_id}/interventions", headers=AUTH).json()
     assert iv["status"] == "expired"
     # The finished session released its lease, after its thread tore the browser down.
-    assert client.get(f"/sessions/{session_id}").json()["controller"] == "none"
+    assert client.get(f"/sessions/{session_id}", headers=AUTH).json()["controller"] == "none"
 
 
 def test_claim_requires_the_operator_token(client, tmp_path, live_mockapp) -> None:
     artifact = _artifact_that_always_escalates(tmp_path)
-    session = client.post("/sessions", json=_session_body(tmp_path, live_mockapp, artifact)).json()
+    session = client.post(
+        "/sessions", json=_session_body(tmp_path, live_mockapp, artifact),
+        headers=AUTH,
+    ).json()
     iv_id = _poll_interventions(client, session["session_id"])[0]["id"]
     unauthorized = client.post(f"/interventions/{iv_id}/claim", json={"operator_id": "op-1"})
     assert unauthorized.status_code == 401
@@ -150,7 +153,8 @@ def test_claim_requires_the_operator_token(client, tmp_path, live_mockapp) -> No
     assert authorized.status_code == 200
     assert authorized.json()["claimed_by"] == "op-1"
     # §7.4 "take control": a claim transfers the lease to the operator.
-    assert client.get(f"/sessions/{session['session_id']}").json()["controller"] == "operator"
+    response = client.get(f"/sessions/{session['session_id']}", headers=AUTH)
+    assert response.json()["controller"] == "operator"
     again = client.post(f"/interventions/{iv_id}/claim", json={"operator_id": "op-2"},
                         headers=AUTH)
     assert again.status_code == 409
@@ -160,7 +164,10 @@ def test_claim_requires_the_operator_token(client, tmp_path, live_mockapp) -> No
 
 def test_handback_requires_the_operator_token(client, tmp_path, live_mockapp) -> None:
     artifact = _artifact_that_always_escalates(tmp_path)
-    session = client.post("/sessions", json=_session_body(tmp_path, live_mockapp, artifact)).json()
+    session = client.post(
+        "/sessions", json=_session_body(tmp_path, live_mockapp, artifact),
+        headers=AUTH,
+    ).json()
     iv_id = _poll_interventions(client, session["session_id"])[0]["id"]
     client.post(f"/interventions/{iv_id}/claim", json={"operator_id": "op-1"}, headers=AUTH)
     refused = client.post(f"/interventions/{iv_id}/handback", json={"outcome": "resolved"})
@@ -173,7 +180,10 @@ def test_a_claimed_interventions_handback_resolved_manually_ends_the_run_assiste
     client, tmp_path, live_mockapp,
 ) -> None:
     artifact = _artifact_that_always_escalates(tmp_path)
-    session = client.post("/sessions", json=_session_body(tmp_path, live_mockapp, artifact)).json()
+    session = client.post(
+        "/sessions", json=_session_body(tmp_path, live_mockapp, artifact),
+        headers=AUTH,
+    ).json()
     iv_id = _poll_interventions(client, session["session_id"])[0]["id"]
     client.post(f"/interventions/{iv_id}/claim", json={"operator_id": "op-1"}, headers=AUTH)
     handback = client.post(
@@ -189,7 +199,10 @@ def test_cannot_resolve_ends_the_run_as_a_failure_carrying_the_operators_note(
     client, tmp_path, live_mockapp,
 ) -> None:
     artifact = _artifact_that_always_escalates(tmp_path)
-    session = client.post("/sessions", json=_session_body(tmp_path, live_mockapp, artifact)).json()
+    session = client.post(
+        "/sessions", json=_session_body(tmp_path, live_mockapp, artifact),
+        headers=AUTH,
+    ).json()
     iv_id = _poll_interventions(client, session["session_id"])[0]["id"]
     client.post(f"/interventions/{iv_id}/claim", json={"operator_id": "op-1"}, headers=AUTH)
     no_note = client.post(f"/interventions/{iv_id}/handback",
@@ -211,16 +224,19 @@ def test_resolved_transfers_the_lease_back_to_the_agent_and_the_run_resumes(
     # still inside the SAME `replay()` call, now holding the lease again (E18: `rebind`, not a
     # reconstructed wrapper nothing points to).
     artifact = _artifact_that_always_escalates(tmp_path)
-    session = client.post("/sessions", json=_session_body(tmp_path, live_mockapp, artifact)).json()
+    session = client.post(
+        "/sessions", json=_session_body(tmp_path, live_mockapp, artifact),
+        headers=AUTH,
+    ).json()
     sid = session["session_id"]
     first = _poll_interventions(client, sid)[0]["id"]
     client.post(f"/interventions/{first}/claim", json={"operator_id": "op-1"}, headers=AUTH)
-    assert client.get(f"/sessions/{sid}").json()["controller"] == "operator"
+    assert client.get(f"/sessions/{sid}", headers=AUTH).json()["controller"] == "operator"
     response = client.post(f"/interventions/{first}/handback", json={"outcome": "resolved"},
                            headers=AUTH)
     assert response.status_code == 200
     listing = _poll_interventions(client, sid, count=2)
-    assert client.get(f"/sessions/{sid}").json()["controller"] == "agent"
+    assert client.get(f"/sessions/{sid}", headers=AUTH).json()["controller"] == "agent"
     assert listing[0]["status"] == "returned"
     assert listing[1]["status"] == "open"
     second = listing[1]["id"]
@@ -271,7 +287,7 @@ def test_restart_from_a_non_safe_range_is_refused_before_it_reaches_the_engine(
     session = client.post("/sessions", json=_session_body(
         tmp_path, live_mockapp, artifact, confirm_irreversible=True,
         idempotency_key=f"restart-probe-{time.monotonic_ns()}",
-    )).json()
+    ), headers=AUTH).json()
     [iv] = _poll_interventions(client, session["session_id"])
     assert iv["step_id"] == "s1"
     assert "restart_from" not in iv["allowed_operator_actions"]
@@ -285,9 +301,10 @@ def test_restart_from_a_non_safe_range_is_refused_before_it_reaches_the_engine(
     assert response.status_code == 400
     assert "safe" in response.json()["detail"].lower()
     # Refused before anything changed: still claimed, the operator still holds the lease.
-    [still] = client.get(f"/sessions/{session['session_id']}/interventions").json()
+    [still] = client.get(f"/sessions/{session['session_id']}/interventions", headers=AUTH).json()
     assert still["status"] == "claimed"
-    assert client.get(f"/sessions/{session['session_id']}").json()["controller"] == "operator"
+    response = client.get(f"/sessions/{session['session_id']}", headers=AUTH)
+    assert response.json()["controller"] == "operator"
     _end(client, iv_id)
     _poll_result(client, session["session_id"])
 
@@ -300,7 +317,7 @@ def test_restart_from_is_offered_and_accepted_only_for_an_all_safe_range(
     session = client.post("/sessions", json=_session_body(
         tmp_path, live_mockapp, artifact, confirm_irreversible=True,
         idempotency_key=f"restart-range-{time.monotonic_ns()}",
-    )).json()
+    ), headers=AUTH).json()
     sid = session["session_id"]
     [iv] = _poll_interventions(client, sid)
     assert iv["step_id"] == "s2"
@@ -319,7 +336,7 @@ def test_restart_from_is_offered_and_accepted_only_for_an_all_safe_range(
     # The restart re-runs s1 then s2, which escalates again -- on the agent's own lease.
     listing = _poll_interventions(client, sid, count=2)
     assert listing[1]["step_id"] == "s2"
-    assert client.get(f"/sessions/{sid}").json()["controller"] == "agent"
+    assert client.get(f"/sessions/{sid}", headers=AUTH).json()["controller"] == "agent"
     client.post(f"/interventions/{listing[1]['id']}/claim", json={"operator_id": "op-1"},
                 headers=AUTH)
     _end(client, listing[1]["id"])
@@ -355,7 +372,7 @@ def test_restart_before_an_irreversible_step_that_already_acted_is_refused(
     session = client.post("/sessions", json=_session_body(
         tmp_path, live_mockapp, artifact, confirm_irreversible=True,
         idempotency_key=f"irreversible-acted-{time.monotonic_ns()}",
-    )).json()
+    ), headers=AUTH).json()
     [iv] = _poll_interventions(client, session["session_id"])
     assert iv["step_id"] == "s1"
     assert "restart_from" not in iv["allowed_operator_actions"]
@@ -377,9 +394,9 @@ def test_a_second_session_with_a_live_sessions_idempotency_key_is_refused(
     key = f"shared-{time.monotonic_ns()}"
     body = _session_body(tmp_path, live_mockapp, artifact, confirm_irreversible=True,
                          idempotency_key=key)
-    first = client.post("/sessions", json=body)
+    first = client.post("/sessions", json=body, headers=AUTH)
     assert first.status_code == 201
-    second = client.post("/sessions", json=body)
+    second = client.post("/sessions", json=body, headers=AUTH)
     assert second.status_code == 409
     assert key in second.json()["detail"]
     [iv] = _poll_interventions(client, first.json()["session_id"])
@@ -388,7 +405,7 @@ def test_a_second_session_with_a_live_sessions_idempotency_key_is_refused(
     _poll_result(client, first.json()["session_id"])
     # Released at teardown: the service no longer holds the key (the engine's own D34 gate,
     # which sees it burned, is what answers a reuse now -- before any step runs).
-    third = client.post("/sessions", json=body)
+    third = client.post("/sessions", json=body, headers=AUTH)
     assert third.status_code == 201
     assert _poll_result(client, third.json()["session_id"])["kind"] == "POLICY_BLOCKED"
 
@@ -397,16 +414,19 @@ def test_delete_parks_a_claimed_session_capturing_before_it_releases_the_lease(
     client, tmp_path, live_mockapp,
 ) -> None:
     artifact = _artifact_that_always_escalates(tmp_path)
-    session = client.post("/sessions", json=_session_body(tmp_path, live_mockapp, artifact)).json()
+    session = client.post(
+        "/sessions", json=_session_body(tmp_path, live_mockapp, artifact),
+        headers=AUTH,
+    ).json()
     sid = session["session_id"]
     iv_id = _poll_interventions(client, sid)[0]["id"]
     client.post(f"/interventions/{iv_id}/claim", json={"operator_id": "op-1"}, headers=AUTH)
-    response = client.delete(f"/sessions/{sid}")
+    response = client.delete(f"/sessions/{sid}", headers=AUTH)
     assert response.status_code == 202
     result = _poll_result(client, sid)
     assert result["kind"] == "ESCALATION_TIMEOUT"
     assert "parked" in result["observed"]
-    assert client.get(f"/sessions/{sid}").json()["controller"] == "none"
+    assert client.get(f"/sessions/{sid}", headers=AUTH).json()["controller"] == "none"
     run_dir = Path(tmp_path) / result["evidence_ref"]
     assert (run_dir / "screenshots" / "parked.png").exists()
     assert (run_dir / "snapshots" / "parked.yaml").exists()
@@ -418,7 +438,10 @@ def test_an_interventions_evidence_refs_name_files_the_session_actually_wrote(
     client, tmp_path, live_mockapp,
 ) -> None:
     artifact = _artifact_that_always_escalates(tmp_path)
-    session = client.post("/sessions", json=_session_body(tmp_path, live_mockapp, artifact)).json()
+    session = client.post(
+        "/sessions", json=_session_body(tmp_path, live_mockapp, artifact),
+        headers=AUTH,
+    ).json()
     [iv] = _poll_interventions(client, session["session_id"])
     assert (Path(tmp_path) / iv["screenshot_ref"]).exists()
     assert (Path(tmp_path) / iv["snapshot_ref"]).exists()
@@ -435,7 +458,10 @@ def test_the_run_log_durably_records_the_intervention_lifecycle_and_the_result(
     # so `Success(assistance="human")` and every other outcome survive the process instead
     # of living only in the in-memory `Intervention`/`_LiveSession` this test also checks.
     artifact = _artifact_that_always_escalates(tmp_path)
-    session = client.post("/sessions", json=_session_body(tmp_path, live_mockapp, artifact)).json()
+    session = client.post(
+        "/sessions", json=_session_body(tmp_path, live_mockapp, artifact),
+        headers=AUTH,
+    ).json()
     sid = session["session_id"]
     iv_id = _poll_interventions(client, sid)[0]["id"]
     client.post(f"/interventions/{iv_id}/claim", json={"operator_id": "op-durable"}, headers=AUTH)
@@ -468,8 +494,14 @@ def test_two_concurrent_sessions_each_resolve_against_their_own_interventions(
     # so two sessions escalating at once must each block on, and be released by, only their
     # own intervention.
     artifact = _artifact_that_always_escalates(tmp_path)
-    a = client.post("/sessions", json=_session_body(tmp_path, live_mockapp, artifact)).json()
-    b = client.post("/sessions", json=_session_body(tmp_path, live_mockapp, artifact)).json()
+    a = client.post(
+        "/sessions", json=_session_body(tmp_path, live_mockapp, artifact),
+        headers=AUTH,
+    ).json()
+    b = client.post(
+        "/sessions", json=_session_body(tmp_path, live_mockapp, artifact),
+        headers=AUTH,
+    ).json()
     [iv_a] = _poll_interventions(client, a["session_id"])
     [iv_b] = _poll_interventions(client, b["session_id"])
     assert iv_a["id"] != iv_b["id"]
@@ -479,18 +511,50 @@ def test_two_concurrent_sessions_each_resolve_against_their_own_interventions(
                 headers=AUTH)
     assert _poll_result(client, b["session_id"])["assistance"] == "human"
     # Session A is untouched by B's whole lifecycle: still waiting, still unclaimed.
-    assert client.get(f"/sessions/{a['session_id']}").json()["result"] is None
-    [still_a] = client.get(f"/sessions/{a['session_id']}/interventions").json()
+    assert client.get(f"/sessions/{a['session_id']}", headers=AUTH).json()["result"] is None
+    [still_a] = client.get(f"/sessions/{a['session_id']}/interventions", headers=AUTH).json()
     assert still_a["status"] == "open"
     client.post(f"/interventions/{iv_a['id']}/claim", json={"operator_id": "op-a"}, headers=AUTH)
     _end(client, iv_a["id"])
     assert "test cleanup" in _poll_result(client, a["session_id"])["observed"]
 
 
+def test_every_sessions_route_requires_the_operator_token(
+    client, tmp_path, live_mockapp,
+) -> None:
+    # I5: POST /sessions, DELETE /sessions/{id}, GET /sessions/{id}, and
+    # GET /sessions/{id}/interventions needed no token at all -- only claim/handback and the
+    # console checked one. Every route in this router now reuses `_require_operator`, the
+    # same helper claim/handback already used, rather than a second implementation of the
+    # same check (D28).
+    artifact = _artifact_that_always_escalates(tmp_path)
+    body = _session_body(tmp_path, live_mockapp, artifact)
+
+    assert client.post("/sessions", json=body).status_code == 401
+    assert client.post("/sessions", json=body,
+                       headers={"Authorization": "Bearer not-the-token"}).status_code == 401
+
+    created = client.post("/sessions", json=body, headers=AUTH)
+    assert created.status_code == 201
+    sid = created.json()["session_id"]
+
+    assert client.get(f"/sessions/{sid}").status_code == 401
+    assert client.get(f"/sessions/{sid}", headers=AUTH).status_code == 200
+
+    assert client.get(f"/sessions/{sid}/interventions").status_code == 401
+    assert client.get(f"/sessions/{sid}/interventions", headers=AUTH).status_code == 200
+
+    assert client.delete(f"/sessions/{sid}").status_code == 401  # never parks -- checked below
+    response = client.delete(f"/sessions/{sid}", headers=AUTH)
+    assert response.status_code == 202
+    assert response.json() == {"session_id": sid, "parked": True}
+    _poll_result(client, sid)
+
+
 def test_unknown_ids_are_404(client) -> None:
-    assert client.get("/sessions/nope").status_code == 404
-    assert client.get("/sessions/nope/interventions").status_code == 404
-    assert client.delete("/sessions/nope").status_code == 404
+    assert client.get("/sessions/nope", headers=AUTH).status_code == 404
+    assert client.get("/sessions/nope/interventions", headers=AUTH).status_code == 404
+    assert client.delete("/sessions/nope", headers=AUTH).status_code == 404
     assert client.post("/interventions/nope/claim", json={"operator_id": "op-1"},
                        headers=AUTH).status_code == 404
     assert client.post("/interventions/nope/handback", json={"outcome": "resolved"},
@@ -502,10 +566,10 @@ def test_a_bad_policy_or_a_missing_artifact_is_refused_before_any_session_starts
 ) -> None:
     artifact = _artifact_that_always_escalates(tmp_path)
     missing_policy = client.post("/sessions", json=_session_body(
-        tmp_path, live_mockapp, artifact, policy_path=str(tmp_path / "absent.yaml")))
+        tmp_path, live_mockapp, artifact, policy_path=str(tmp_path / "absent.yaml")), headers=AUTH)
     assert missing_policy.status_code == 400
     missing_artifact = client.post("/sessions", json=_session_body(
-        tmp_path, live_mockapp, artifact, version=99))
+        tmp_path, live_mockapp, artifact, version=99), headers=AUTH)
     assert missing_artifact.status_code == 400
 
 

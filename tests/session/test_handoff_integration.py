@@ -184,18 +184,19 @@ def test_escalate_claim_resolve_and_resume_to_a_real_success(
     artifact = _navigate_only_artifact("/member/12345?fault=not_found", [_MEMBER],
                                        timeout_ms=1500)
     save(artifact, tmp_path)
-    created = client.post("/sessions", json=_session_body(tmp_path, live_mockapp, artifact))
+    created = client.post("/sessions", json=_session_body(tmp_path, live_mockapp, artifact),
+                          headers=AUTH)
     assert created.status_code == 201
     sid = created.json()["session_id"]
 
     [iv] = _poll_interventions(client, sid)
     assert (iv["step_id"], iv["reason_code"], iv["status"]) == ("s1", "NO_BRANCH_MATCHED", "open")
-    assert client.get(f"/sessions/{sid}").json()["controller"] == "agent"
+    assert client.get(f"/sessions/{sid}", headers=AUTH).json()["controller"] == "agent"
 
     claimed = client.post(f"/interventions/{iv['id']}/claim", json={"operator_id": "op-1"},
                           headers=AUTH)
     assert claimed.status_code == 200
-    assert client.get(f"/sessions/{sid}").json()["controller"] == "operator"
+    assert client.get(f"/sessions/{sid}", headers=AUTH).json()["controller"] == "operator"
     operator.wait()
     # Criterion 1, live: inside the human window the automation's own surface was refused.
     assert operator.agent_refused is not None
@@ -209,11 +210,11 @@ def test_escalate_claim_resolve_and_resume_to_a_real_success(
     assert set(result) == {"outputs", "steps_run", "evidence_ref", "assistance"}, result
     assert result["assistance"] == "none"  # E4: the existing field, as Task 4/6 check it
     assert result["steps_run"] == ["s1"]
-    [returned] = client.get(f"/sessions/{sid}/interventions").json()
+    [returned] = client.get(f"/sessions/{sid}/interventions", headers=AUTH).json()
     assert returned["status"] == "returned"
     assert returned["claimed_by"] == "op-1"
     assert returned["handback_outcome"] == {"outcome": "resolved"}
-    assert client.get(f"/sessions/{sid}").json()["controller"] == "none"  # torn down
+    assert client.get(f"/sessions/{sid}", headers=AUTH).json()["controller"] == "none"  # torn down
     run_dir = Path(tmp_path) / result["evidence_ref"]
     for half in ("before", "after"):  # the human window is bracketed on both sides
         assert (run_dir / "screenshots" / f"escalation_1_human_{half}.png").exists()
@@ -242,14 +243,15 @@ def test_an_unclaimed_escalation_times_out_and_the_session_tears_down_with_a_log
     monkeypatch.setattr(service_module, "close_session_page", close_and_remember)
     artifact = _login_then_member_not_found(tmp_path)
     created = client.post("/sessions", json=_session_body(
-        tmp_path, live_mockapp, artifact, inputs=_CREDENTIALS, ttl_ms=300, claim_ttl_ms=1000))
+        tmp_path, live_mockapp, artifact, inputs=_CREDENTIALS, ttl_ms=300, claim_ttl_ms=1000),
+        headers=AUTH)
     sid = created.json()["session_id"]
 
     result = _poll_result(client, sid)
     assert result["kind"] == "ESCALATION_TIMEOUT"
-    [iv] = client.get(f"/sessions/{sid}/interventions").json()
+    [iv] = client.get(f"/sessions/{sid}/interventions", headers=AUTH).json()
     assert (iv["step_id"], iv["status"], iv["claimed_by"]) == ("s5", "expired", None)
-    assert client.get(f"/sessions/{sid}").json()["controller"] == "none"
+    assert client.get(f"/sessions/{sid}", headers=AUTH).json()["controller"] == "none"
     assert teardown["logout_path"] == "/logout"
     assert teardown["cookie"], "the session never held a signed-in mock-app session"
 
@@ -295,7 +297,7 @@ def test_restart_from_replays_the_named_range_and_reaches_success(
     ))
     created = client.post("/sessions", json=_session_body(
         tmp_path, live_mockapp, artifact, confirm_irreversible=True,
-        idempotency_key=f"live-restart-{tmp_path.name}"))
+        idempotency_key=f"live-restart-{tmp_path.name}"), headers=AUTH)
     assert created.status_code == 201
     sid = created.json()["session_id"]
 
@@ -313,5 +315,5 @@ def test_restart_from_replays_the_named_range_and_reaches_success(
     assert result["assistance"] == "none"
     # Only the named range was replayed: s0 started once, s1 and s2 twice each.
     assert _steps_started(tmp_path, result) == ["s0", "s1", "s2", "s1", "s2"]
-    [returned] = client.get(f"/sessions/{sid}/interventions").json()
+    [returned] = client.get(f"/sessions/{sid}/interventions", headers=AUTH).json()
     assert returned["handback_outcome"] == {"outcome": "restart_from", "step_id": "s1"}
