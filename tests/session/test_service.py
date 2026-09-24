@@ -103,6 +103,32 @@ def _three_step_artifact(tmp_path, *, s0_risk: str, version: int) -> Artifact:
     return artifact
 
 
+def _slow_then_normal_artifact(tmp_path, *, version: int) -> Artifact:
+    """s0's own response is deliberately slow (paired with a monkeypatched
+    `MOCKAPP_SLOW_FAULT_MS`); s1 follows immediately after. Both settle on the same
+    login-page checkpoint and the run reaches `Success` on its own -- there is no
+    escalation anywhere in this artifact, so nothing ever calls `escalate()`."""
+    search = Expect(when=_LOGIN_PAGE, outcome="continue", source="observed", verified=True)
+    artifact = Artifact(
+        schema_version=1, id="corebank.handoff_probe", version=version, name="handoff_probe",
+        description="s0 is slow; both steps settle cleanly and the run never escalates",
+        verified=False,
+        app=App(vendor_product="corebank-teller", variant="base", surface="web", entry="/search"),
+        settle=Settle(timeout_ms=2000, poll_ms=50), max_duration_ms=60000,
+        inputs={}, outputs={},
+        steps=[
+            Step(id="s0", action="navigate", target=Target(path="/search?fault=slow"),
+                 risk="safe", expects=[search]),
+            Step(id="s1", action="navigate", target=Target(path="/search"), risk="safe",
+                 expects=[search]),
+        ],
+        success=Success(checkpoint=_LOGIN_PAGE),
+        provenance=_provenance("r_handoff_park"),
+    )
+    save(artifact, tmp_path)
+    return artifact
+
+
 def _end(client: TestClient, iv_id: str) -> None:
     client.post(f"/interventions/{iv_id}/handback",
                 json={"outcome": "cannot_resolve", "note": "test cleanup"}, headers=AUTH)
@@ -432,6 +458,56 @@ def test_delete_parks_a_claimed_session_capturing_before_it_releases_the_lease(
     assert (run_dir / "snapshots" / "parked.yaml").exists()
     # The bracket's "before" half ran at the claim wake point, on the session's own thread.
     assert (run_dir / "screenshots" / "escalation_1_human_before.png").exists()
+
+
+def test_parking_a_session_with_no_pending_escalation_still_stops_it(
+    client, tmp_path, live_mockapp, monkeypatch,
+) -> None:
+    # I6: between escalations -- here, an artifact with no escalation anywhere in it, which
+    # would otherwise reach Success on its own -- DELETE used to be a pure no-op: `parked`
+    # was set but nothing ever read it again, and the run simply finished. `park()` now
+    # rebinds the lease to "none" under the lock, so the agent's own next act() raises
+    # LeaseError instead: s0's slow response (a monkeypatched MOCKAPP_SLOW_FAULT_MS) gives
+    # this DELETE a wide, deterministic window before s1's own act() is ever attempted.
+    monkeypatch.setenv("MOCKAPP_SLOW_FAULT_MS", "300")
+    artifact = _slow_then_normal_artifact(tmp_path, version=6)
+    session = client.post("/sessions", json=_session_body(tmp_path, live_mockapp, artifact),
+                          headers=AUTH).json()
+    sid = session["session_id"]
+    response = client.delete(f"/sessions/{sid}", headers=AUTH)
+    assert response.status_code == 202
+    assert response.json() == {"session_id": sid, "parked": True}
+    result = _poll_result(client, sid)
+    assert "kind" in result  # a Failure -- Success carries no `kind` field at all
+    assert result["kind"] in ("SESSION_LOST", "ESCALATION_TIMEOUT")
+    assert client.get(f"/sessions/{sid}/interventions", headers=AUTH).json() == []
+    assert client.get(f"/sessions/{sid}", headers=AUTH).json()["controller"] == "none"
+
+
+def test_parking_an_unclaimed_intervention_stops_it_without_waiting_for_its_ttl(
+    client, tmp_path, live_mockapp,
+) -> None:
+    # I6: parking during an unclaimed intervention used to do nothing until an operator
+    # claimed it or its own ttl_ms elapsed -- here, a full minute, well past `_poll_result`'s
+    # own 10s budget, so this test would time out on the old behaviour rather than pass
+    # slowly. `park()` now wakes the claim-phase wait itself, and `escalate()`'s own guard
+    # right after that wait parks cleanly instead of assuming a real claim happened.
+    artifact = _artifact_that_always_escalates(tmp_path)
+    session = client.post("/sessions", json=_session_body(
+        tmp_path, live_mockapp, artifact, ttl_ms=60_000, claim_ttl_ms=60_000),
+        headers=AUTH).json()
+    sid = session["session_id"]
+    iv_id = _poll_interventions(client, sid)[0]["id"]
+    response = client.delete(f"/sessions/{sid}", headers=AUTH)
+    assert response.status_code == 202
+    assert response.json() == {"session_id": sid, "parked": True}
+    result = _poll_result(client, sid)
+    assert result["kind"] == "ESCALATION_TIMEOUT"
+    assert "parked" in result["observed"]
+    [iv] = client.get(f"/sessions/{sid}/interventions", headers=AUTH).json()
+    assert iv["id"] == iv_id
+    assert iv["status"] == "open"  # never claimed -- park pre-empted it, not a real claim
+    assert client.get(f"/sessions/{sid}", headers=AUTH).json()["controller"] == "none"
 
 
 def test_an_interventions_evidence_refs_name_files_the_session_actually_wrote(
