@@ -34,3 +34,15 @@ def test_fake_client_raises_when_the_script_is_exhausted() -> None:
     client = FakeClient(script=[])
     with pytest.raises(AssertionError, match="script exhausted"):
         client.step([], [])
+
+
+def test_fake_client_records_a_snapshot_of_each_call() -> None:
+    client = FakeClient(script=[Completion(text="a"), Completion(text="b")])
+    messages = [Message(role="user", text="first")]
+    tools: list[ToolDef] = []
+    client.step(messages, tools)
+    messages.append(Message(role="model", text="later"))
+    client.step(messages, tools)
+
+    assert client.calls[0][0] == [Message(role="user", text="first")]
+    assert len(client.calls[1][0]) == 2
