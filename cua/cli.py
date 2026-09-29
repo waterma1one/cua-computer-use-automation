@@ -27,6 +27,7 @@ from typing import NoReturn, cast, get_args
 
 import typer
 import uvicorn
+from dotenv import load_dotenv
 
 from cua.artifact.models import Artifact, InputSpec
 from cua.artifact.store import RegistryEntry, load, read_registry
@@ -39,6 +40,8 @@ from cua.replay.engine import validate_inputs
 from cua.replay.result import Failure, Mode, mint_run_id
 from cua.session.service import create_app as create_session_app
 from cua.surface.web import WebSurface, launch_page
+
+load_dotenv()
 
 app = typer.Typer()
 
