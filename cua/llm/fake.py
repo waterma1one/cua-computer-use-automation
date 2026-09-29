@@ -23,7 +23,7 @@ class FakeClient:
     _next: int = field(default=0, repr=False)
 
     def step(self, messages: list[Message], tools: list[ToolDef]) -> ToolCall | Completion:
-        self.calls.append((messages, tools))
+        self.calls.append((list(messages), list(tools)))
         if self._next >= len(self.script):
             raise AssertionError("FakeClient script exhausted")
         result = self.script[self._next]
