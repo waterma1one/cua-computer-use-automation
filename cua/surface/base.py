@@ -17,6 +17,7 @@ from cua.surface.models import (
     ActionResult,
     EvidenceFrame,
     Locator,
+    Node,
     Observation,
     Resolution,
 )
@@ -93,17 +94,30 @@ class Surface(Protocol):
         """
         ...
 
-    def act_on_index(self, generation: int, index: int, action: str) -> ActionResult:
+    def act_on_index(
+        self, generation: int, index: int, action: str, value: str | None = None,
+    ) -> ActionResult:
         """The discovery-time entry point (spec §3.1): acts on a node named by index from a
         previously returned Observation, rather than a caller-built Locator.
 
         `generation` must match the generation of the Observation `index` was drawn from; a
-        mismatch (a stale index from a page that has since changed, or a fabricated future
-        generation) is rejected -- by raising `StaleObservationError` -- rather than
-        executed. R25: this stale-index rejection is a promise the protocol itself makes,
-        not an implementation detail of any one concrete surface, so phase 3's compiler and
-        phase 4's replay engine can type against `Surface` for this too, without ever
-        importing `cua.surface.web` (the only module allowed to import Playwright).
+        mismatch is rejected -- by raising `StaleObservationError` -- rather than executed.
+        `value` (phase 7, E3) carries a typed value for `fill`/`select`/`press_key`; every
+        other kind ignores it. A concrete surface refuses (`ActionResult(ok=False, ...)`)
+        rather than guesses when one of those three kinds is asked for with no value.
+        """
+        ...
+
+    def expand(self) -> Observation:
+        """Discovery-only (spec §3.6): re-observes with more of the page than the most
+        recent `observe()` call's budget showed. Never recorded, never replayable."""
+        ...
+
+    def raw_snapshot(self) -> list[Node]:
+        """The complete, unfiltered node population underlying the most recent `observe()`
+        or `act_on_index()` call -- what locator synthesis already reasons about internally,
+        exposed so a caller (the discovery loop) can capture it for offline locator
+        re-verification later (spec §8.3 step 3). Empty before the first `observe()`.
         """
         ...
 

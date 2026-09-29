@@ -6,7 +6,15 @@ import pytest
 
 from cua.session.lease import Lease, LeasedSurface, LeaseError
 from cua.surface.base import Surface, SurfaceError
-from cua.surface.models import Action, ActionResult, EvidenceFrame, Locator, Observation, Resolution
+from cua.surface.models import (
+    Action,
+    ActionResult,
+    EvidenceFrame,
+    Locator,
+    Node,
+    Observation,
+    Resolution,
+)
 
 
 class FakeSurface:
@@ -14,7 +22,7 @@ class FakeSurface:
 
     def __init__(self) -> None:
         self.acts: list[Action] = []
-        self.act_on_indexes: list[tuple[int, int, str]] = []
+        self.act_on_indexes: list[tuple[int, int, str, str | None]] = []
         self.observes = 0
         self.violation: str | None = None
 
@@ -35,9 +43,17 @@ class FakeSurface:
     def pending_dialog(self) -> str | None:
         return None
 
-    def act_on_index(self, generation: int, index: int, action: str) -> ActionResult:
-        self.act_on_indexes.append((generation, index, action))
+    def act_on_index(
+        self, generation: int, index: int, action: str, value: str | None = None
+    ) -> ActionResult:
+        self.act_on_indexes.append((generation, index, action, value))
         return ActionResult(ok=True, action=Action(kind="click", locator=None), read_value=None)
+
+    def expand(self) -> Observation:
+        return self.observe()
+
+    def raw_snapshot(self) -> list[Node]:
+        return []
 
     def allowlist_violation(self) -> str | None:
         return self.violation

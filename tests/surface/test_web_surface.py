@@ -314,6 +314,47 @@ def test_act_on_index_refuses_kinds_it_cannot_supply_a_value_for(surface, kind: 
     assert "act_on_index" in result.read_value
 
 
+def test_act_on_index_fills_when_given_a_value(surface) -> None:
+    obs = surface.observe()
+    target = next(n for n in obs.nodes if n.role == "textbox" and n.name == "Member ID")
+    result = surface.act_on_index(obs.generation, target.index, "fill", value="12345")
+    assert result.ok
+    assert result.action.value == "12345"
+    assert result.action.locator is not None
+
+
+def test_act_on_index_still_refuses_fill_with_no_value(surface) -> None:
+    obs = surface.observe()
+    target = next(n for n in obs.nodes if n.role == "textbox" and n.name == "Member ID")
+    result = surface.act_on_index(obs.generation, target.index, "fill")
+    assert result.ok is False
+    assert "act_on_index" in (result.read_value or "")
+
+
+def test_expand_widens_the_budget_and_reobserves(surface) -> None:
+    small = WebSurface(surface.page, budget=ObservationBudget(max_nodes=1))
+    first = small.observe()
+    assert first.truncated is True
+    expanded = small.expand()
+    assert expanded.generation != first.generation
+    assert len(expanded.nodes) >= len(first.nodes)
+
+
+def test_raw_snapshot_returns_the_unfiltered_population(surface) -> None:
+    obs = surface.observe()
+    raw = surface.raw_snapshot()
+    assert len(raw) >= len(obs.nodes)
+    # every model-facing node's identity is present among the raw population
+    raw_ids = {(n.role, n.name, tuple((s.kind, s.name) for s in n.surface_path)) for n in raw}
+    for n in obs.nodes:
+        assert (n.role, n.name, tuple((s.kind, s.name) for s in n.surface_path)) in raw_ids
+
+
+def test_raw_snapshot_before_any_observe_is_empty(browser) -> None:
+    fresh = WebSurface(browser.new_page())
+    assert fresh.raw_snapshot() == []
+
+
 # Fix round 1, Important 4: a live probe on a real multi-frame observation showed indices
 # with gaps (filtering happens after index assignment, and nothing renumbered), even
 # though Task 2's parser contract -- and the brief's "continuous indices" description of

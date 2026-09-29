@@ -29,7 +29,15 @@ from dataclasses import dataclass
 from typing import Literal
 
 from cua.surface.base import Surface, SurfaceError
-from cua.surface.models import Action, ActionResult, EvidenceFrame, Locator, Observation, Resolution
+from cua.surface.models import (
+    Action,
+    ActionResult,
+    EvidenceFrame,
+    Locator,
+    Node,
+    Observation,
+    Resolution,
+)
 
 __all__ = ["Controller", "Lease", "LeaseError", "LeasedSurface"]
 
@@ -95,9 +103,17 @@ class LeasedSurface:
         self._require_lease()
         return self._surface.act(action)
 
-    def act_on_index(self, generation: int, index: int, action: str) -> ActionResult:
+    def act_on_index(
+        self, generation: int, index: int, action: str, value: str | None = None,
+    ) -> ActionResult:
         self._require_lease()
-        return self._surface.act_on_index(generation, index, action)
+        return self._surface.act_on_index(generation, index, action, value)
+
+    def expand(self) -> Observation:
+        return self._surface.expand()
+
+    def raw_snapshot(self) -> list[Node]:
+        return self._surface.raw_snapshot()
 
     def observe(self) -> Observation:
         return self._surface.observe()
