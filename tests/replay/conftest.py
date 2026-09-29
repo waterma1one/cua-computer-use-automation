@@ -66,8 +66,17 @@ class FakeSurface:
     def capture(self) -> EvidenceFrame:
         return EvidenceFrame(generation=self._obs_index, image_png=None, snapshot_yaml="")
 
-    def act_on_index(self, generation: int, index: int, action: str) -> ActionResult:
+    def act_on_index(
+        self, generation: int, index: int, action: str, value: str | None = None
+    ) -> ActionResult:
         raise NotImplementedError("FakeSurface is replay-only")
+
+    def expand(self) -> Observation:
+        return self.observe()
+
+    def raw_snapshot(self) -> list[Node]:
+        i = min(max(self._obs_index - 1, 0), len(self.frames) - 1)
+        return self.frames[i]
 
     def pending_dialog(self) -> str | None:
         i = min(self._dialog_index, len(self.dialog_messages) - 1)

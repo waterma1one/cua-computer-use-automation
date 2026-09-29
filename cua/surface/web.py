@@ -67,10 +67,9 @@ _NEVER_OBSERVED = -1
 # to turn it into an honest ActionResult rather than eating the default 30s timeout.
 _NAVIGATION_TIMEOUT_MS = 5_000
 
-# act_on_index's `action: str` parameter (fixed by the brief; not ours to widen) has
-# nowhere to carry a value. Silently defaulting one of these to "" or None would perform
-# the wrong action -- e.g. blanking a field -- while still reporting `ok=True`, which is
-# the single worst outcome this system can produce. Refuse instead of guessing.
+# act_on_index refuses these three kinds outright only when called with no value (phase 7,
+# E3): silently defaulting one to "" or None would perform the wrong action -- e.g. blanking
+# a field -- while still reporting success. A real value now executes for real.
 _VALUE_REQUIRED_KINDS: frozenset[str] = frozenset({"fill", "select", "press_key"})
 
 # Roles that are always kept in an Observation regardless of whether they carry an
@@ -637,7 +636,9 @@ class WebSurface:
 
     # ---- discovery-time entry point --------------------------------------------
 
-    def act_on_index(self, generation: int, index: int, action: str) -> ActionResult:
+    def act_on_index(
+        self, generation: int, index: int, action: str, value: str | None = None,
+    ) -> ActionResult:
         """The discovery-time counterpart to `act()`: the model names an index from an
         `Observation` it was just handed, rather than building a `Locator` itself.
 
@@ -660,12 +661,10 @@ class WebSurface:
         Executed through `act()`, so there is exactly one implementation of "perform an
         action" underneath both entry points.
 
-        This entry point's `action` parameter is a bare kind string with no way to carry
-        a `value` -- the brief pins this signature, and widening it is phase 3's call to
-        make, not this task's. `fill`, `select`, and `press_key` all need a value to do
-        anything meaningful; asked for one of them here, this refuses rather than
-        defaulting to an empty or absent value, which would silently perform the wrong
-        action (e.g. blank a field) while still reporting success.
+        `value` (phase 7, E3) carries the typed value for `fill`/`select`/`press_key`. Asked
+        for one of those three with no value, this refuses rather than defaulting to an
+        empty or absent value, which would silently perform the wrong action (e.g. blank a
+        field) while still reporting success.
         """
         self._refuse_if_frozen()
         if generation != self._generation:
@@ -673,13 +672,13 @@ class WebSurface:
                 f"observation generation {generation} does not match the current "
                 f"generation {self._generation}"
             )
-        if action in _VALUE_REQUIRED_KINDS:
+        if action in _VALUE_REQUIRED_KINDS and value is None:
             placeholder = Action(kind=cast(ActionKind, action), locator=None, value=None)
             return ActionResult(
                 ok=False,
                 action=placeholder,
                 read_value=(
-                    f"act_on_index cannot supply a value for {action!r}; use the "
+                    f"act_on_index has no value for {action!r}; pass value=... or use the "
                     "locator-driven act() instead"
                 ),
             )
@@ -687,8 +686,18 @@ class WebSurface:
             raise ValueError(f"no node with index {index} in the current observation")
         raw_node = self._last_raw_for_observed[index]
         locator = synthesize(raw_node, self._last_raw_nodes)
-        built = Action(kind=cast(ActionKind, action), locator=locator, value=None)
+        built = Action(kind=cast(ActionKind, action), locator=locator, value=value)
         return self.act(built)
+
+    def expand(self) -> Observation:
+        # E3: a real, stated-limit behaviour -- widens the whole budget and re-observes,
+        # rather than a true per-node subtree fetch. Doubling is arbitrary but monotonic and
+        # bounded by nothing worse than the page's own real node count.
+        self.budget = ObservationBudget(max_nodes=self.budget.max_nodes * 2)
+        return self.observe()
+
+    def raw_snapshot(self) -> list[Node]:
+        return list(self._last_raw_nodes)
 
 
 def _typed_as_a_surface(page: Page) -> Surface:
