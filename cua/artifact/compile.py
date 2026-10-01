@@ -13,7 +13,7 @@ page.
 from __future__ import annotations
 
 import re
-from typing import Literal, cast
+from typing import Literal, cast, get_args
 
 from cua.agent.loop import DeclaredInput, Trace, TraceStep
 from cua.artifact.models import (
@@ -32,12 +32,20 @@ from cua.artifact.models import (
     Success,
     Target,
 )
-from cua.artifact.validate import validate
+from cua.artifact.validate import origin_of, validate
+from cua.policy.allowlist import navigation_guard
+from cua.policy.config import PolicyConfig
 from cua.policy.risk import classify
+from cua.replay.engine import EvidenceSink
+from cua.replay.engine import replay as run_replay
+from cua.replay.result import Failure
+from cua.replay.result import Success as ReplaySuccess
+from cua.surface.base import SurfaceError
 from cua.surface.locators import resolve_against
-from cua.surface.models import ActionKind, Node, Observation, Unique, is_protected_name
+from cua.surface.models import Action, ActionKind, Node, Observation, Unique, is_protected_name
+from cua.surface.web import WebSurface, launch_page
 
-__all__ = ["CompileError", "compile"]
+__all__ = ["CompileError", "compile", "self_verify"]
 
 
 class CompileError(ValueError):
@@ -198,3 +206,71 @@ def compile(
     if errors:
         raise CompileError("; ".join(f"{f.code}: {f.message}" for f in errors))
     return artifact
+
+
+def _same_origin_policy(base_url: str) -> PolicyConfig:
+    """The allowlist self-verification uses when the caller supplies none: the one origin
+    being verified against, every path, every action. Never the engine's permissive
+    default (D43) -- navigation off that origin is still refused by the guard."""
+    origin = origin_of(base_url)
+    if origin is None:
+        raise CompileError(f"self-verification needs an http(s) base URL, got {base_url!r}")
+    return PolicyConfig(
+        allowed_origins=[origin], allowed_paths=["/"],
+        allowed_actions=list(get_args(ActionKind)),
+    )
+
+
+def self_verify(
+    artifact: Artifact, base_url: str, inputs: dict[str, object], *,
+    policy: PolicyConfig | None = None, evidence: EvidenceSink | None = None,
+) -> Artifact:
+    """Spec §8.3 step 7 (E11): one real replay through a brand-new `WebSurface` -- a fresh
+    session, never the page discovery was left on. The only code that may return an
+    artifact with `verified=True`, and only after `Success`. Any other outcome raises
+    `CompileError`; the input artifact is never mutated and never saved here.
+
+    The replay is policy-enforced exactly as `cua replay` does it: the effective allowlist
+    (`policy`, narrowed by the artifact's own `policy`) gates actions and, through the
+    surface's navigation guard, every application-initiated navigation. A candidate has no
+    registry entry, so it replays at status `draft`: a risky or irreversible step is
+    refused rather than self-approved.
+    """
+    deployment = policy if policy is not None else _same_origin_policy(base_url)
+    errors = [f for f in validate(artifact, deployment) if f.level == "error"]
+    if errors:
+        raise CompileError(
+            "self-verification refused an invalid artifact: "
+            + "; ".join(f"{f.code}: {f.message}" for f in errors)
+        )
+    effective = deployment.narrowed_by(artifact.policy)
+    entry = artifact.app.entry
+    if not effective.permits_path(entry):
+        raise CompileError(
+            f"self-verification refused: entry path {entry!r} is not permitted by the policy"
+        )
+    with launch_page(base_url) as page:
+        surface = WebSurface(page, navigation_guard=navigation_guard(effective))
+        # Discovery starts on `app.entry`; the engine replays steps against whatever page
+        # the surface is on, so a fresh session is put where discovery began.
+        try:
+            opened = surface.act(Action(kind="navigate", value=entry))
+        except SurfaceError as exc:
+            raise CompileError(f"self-verification could not open entry {entry!r}: {exc}") from exc
+        if not opened.ok:
+            raise CompileError(f"self-verification could not open entry {entry!r}")
+        result = run_replay(
+            artifact, inputs, surface, "embedded", deployment=effective,
+            status="draft", evidence=evidence,
+        )
+    if isinstance(result, ReplaySuccess):
+        return artifact.model_copy(update={"verified": True})
+    if isinstance(result, Failure):
+        raise CompileError(
+            f"self-verification failed at step {result.step_id!r}: expected "
+            f"{result.expected!r}, observed {result.observed!r} (kind={result.kind})"
+        )
+    raise CompileError(
+        f"self-verification ended in a business outcome ({result.code!r}); a capability "
+        "whose own discovered path does not replay cleanly is not ready to be verified"
+    )
