@@ -22,11 +22,14 @@ the same shape `mockapp/__main__.py` uses for the mock app.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import json
 import os
 import re
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import NoReturn, cast, get_args
+from typing import Any, NoReturn, cast, get_args
 
 import typer
 import uvicorn
@@ -38,7 +41,16 @@ from cua.artifact.compile import CompileError, self_verify
 from cua.artifact.compile import compile as compile_artifact
 from cua.artifact.models import App, Artifact, FailureKind, InputSpec, Provenance, Settle
 from cua.artifact.store import RegistryEntry, load, read_registry, save, write_registry_entry
-from cua.artifact.validate import validate
+from cua.artifact.validate import DeploymentAllowlist, validate
+from cua.catalog.invoke import IdempotencyLedger, InterventionRequested
+from cua.catalog.invoke import invoke as run_invoke
+from cua.catalog.registry import (
+    CatalogRefusal,
+    list_capabilities,
+    load_gated,
+    resolve_version,
+)
+from cua.catalog.registry import approve as approve_capability
 from cua.llm.base import LLMClient, usage_of
 from cua.llm.gemini import LLMError, load_gemini_client_from_env
 from cua.llm.pricing import estimate_cost_usd
@@ -49,14 +61,18 @@ from cua.policy.config import PolicyConfig, load_policy
 from cua.replay.engine import replay as run_replay
 from cua.replay.engine import validate_inputs
 from cua.replay.result import CannotResolve, Failure, HandbackOutcome, Mode, mint_run_id
+from cua.replay.settle import SYSTEM_CLOCK
+from cua.session.interventions import Interventions
 from cua.session.service import create_app as create_session_app
-from cua.surface.base import StaleObservationError, SurfaceError
+from cua.surface.base import StaleObservationError, Surface, SurfaceError
 from cua.surface.models import Action
 from cua.surface.web import WebSurface, launch_page
 
 load_dotenv()
 
 app = typer.Typer()
+catalog_app = typer.Typer(help="Discover and invoke approved capabilities.")
+app.add_typer(catalog_app, name="catalog")
 
 
 @app.callback()
@@ -304,6 +320,115 @@ def replay(
     typer.echo(result.model_dump_json())
     if isinstance(result, Failure):
         raise typer.Exit(code=1)
+
+
+@catalog_app.command("list")
+def catalog_list(
+    root: Path = typer.Option(..., "--root", help="Artifact store root."),  # noqa: B008
+) -> None:
+    """Prints every capability's tool definition as JSON. Needs no API key."""
+    typer.echo(json.dumps([
+        {
+            "id": t.id, "version": t.version, "status": t.status,
+            "irreversible": t.irreversible, "allowlist_checked": t.allowlist_checked,
+            "schema": t.schema,
+        }
+        for t in list_capabilities(root)
+    ], indent=2))
+
+
+@catalog_app.command("invoke")
+def catalog_invoke(
+    artifact_id: str,
+    root: Path = typer.Option(..., "--root", help="Artifact store root."),  # noqa: B008
+    base_url: str = typer.Option(..., "--base-url", help="Base URL of the target app."),
+    policy_path: Path = typer.Option(  # noqa: B008
+        ..., "--policy", help="Deployment policy YAML (see policy.example.yaml)."
+    ),
+    evidence_root: Path = typer.Option(  # noqa: B008
+        Path("."), "--evidence-root", help="Where evidence/<run_id>/ is written."
+    ),
+    input_pairs: list[str] = typer.Option(  # noqa: B008
+        [], "--input", help="KEY=VALUE, repeatable."
+    ),
+    version: int | None = typer.Option(None, "--version", help="Default: latest approved."),  # noqa: B008
+    confirm_irreversible: bool = typer.Option(
+        False, "--confirm-irreversible", help="Caller's confirmation of an irreversible step."
+    ),
+    idempotency_key: str | None = typer.Option(  # noqa: B008
+        None, "--idempotency-key", help="Caller's key; a repeat inside 24h is refused."
+    ),
+) -> None:
+    """Invokes an approved capability (draft: refused, exit 2). An irreversible capability
+    is not executed: an intervention request is printed and the exit code is 1 (D64).
+    The refusal ledger and interventions live in this process only (D34, D65).
+    """
+    try:
+        policy = load_policy(policy_path)
+        resolved = resolve_version(root, artifact_id, version)
+        artifact, _findings = load_gated(root, artifact_id, resolved)
+    except (FileNotFoundError, ValueError, CatalogRefusal) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    writer = EvidenceWriter(evidence_root)
+    raw_inputs = _parse_pairs(input_pairs, artifact.inputs)
+    if isinstance(raw_inputs, Failure):
+        _refuse(writer, raw_inputs)
+    coerced = _coerce_inputs(raw_inputs, artifact.inputs)
+    if isinstance(coerced, Failure):
+        _refuse(writer, coerced)
+    input_failure = validate_inputs(artifact, coerced)
+    if input_failure is not None:
+        _refuse(writer, input_failure)
+
+    @contextlib.contextmanager
+    def surface_factory(effective: DeploymentAllowlist) -> Iterator[Surface]:
+        # Evidence is written only once a run will really execute, never for a refusal.
+        writer.write_run(
+            goal=artifact.description, capability=artifact.id, inputs=dict(raw_inputs),
+            input_specs=artifact.inputs, policy_mode=artifact.provenance.policy_mode,
+        )
+        writer.write_artifact(artifact)
+        with launch_page(base_url) as page:
+            yield WebSurface(page, navigation_guard=navigation_guard(effective))
+
+    try:
+        outcome = run_invoke(
+            root, artifact_id, coerced, deployment=policy, surface_factory=surface_factory,
+            interventions=Interventions(clock=SYSTEM_CLOCK),
+            ledger=IdempotencyLedger(SYSTEM_CLOCK), confirm_irreversible=confirm_irreversible,
+            idempotency_key=idempotency_key, version=resolved, evidence=writer,
+        )
+    except CatalogRefusal as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    if isinstance(outcome, InterventionRequested):
+        typer.echo(json.dumps(dataclasses.asdict(cast(Any, outcome.intervention))))
+        raise typer.Exit(code=1)
+    writer.write_result(
+        outcome, redacted_outputs={n for n, spec in artifact.outputs.items() if spec.redact},
+    )
+    typer.echo(outcome.model_dump_json())
+    if isinstance(outcome, Failure):
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def approve(
+    artifact_id: str,
+    version: int,
+    root: Path = typer.Option(..., "--root", help="Artifact store root."),  # noqa: B008
+    approver: str = typer.Option(..., "--approver", help="Who is approving."),
+) -> None:
+    """Approves one capability version for invocation (spec 6.2). Never automatic."""
+    try:
+        entry = approve_capability(root, artifact_id, version, approver)
+    except (FileNotFoundError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(entry.model_dump_json())
 
 
 _OPERATOR_TOKEN_ENV = "CUA_OPERATOR_TOKEN"

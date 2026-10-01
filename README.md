@@ -79,3 +79,22 @@ under `strict` policy: discovery holds the action, records the escalation (event
 The discovery escalator is non-interactive and declines; a real operator handback is
 replay-only. The escalation demonstration is `run-20261001185610-0bdc`. `evidence/GREP-CHECK.md`
 records the leak check and lists every run, failures included.
+
+## Catalog demo path
+
+Saved artifacts are discoverable and gated by approval. None of these commands needs an API key.
+
+```bash
+PYTHONPATH=. .venv/bin/python -c "from cua.cli import app; app()" catalog list --root .
+PYTHONPATH=. .venv/bin/python -c "from cua.cli import app; app()" approve \
+  mockcu.lookup_member_savings_balance 1 --root . --approver <your-name>
+PYTHONPATH=. .venv/bin/python -c "from cua.cli import app; app()" catalog invoke \
+  mockcu.lookup_member_savings_balance --root . --base-url http://127.0.0.1:8811 \
+  --policy <policy-file> --input username=teller --input password=teller-demo-pw \
+  --input member_id=12345
+```
+
+`catalog invoke` refuses a draft (exit 2, the message names `cua approve`). An irreversible
+capability is never executed: an intervention request is printed and the exit code is 1. The
+idempotency ledger (24h) and interventions are in-memory and per process, and the ledger
+protects our side only. Only unassisted successful runs count toward the stability score.
