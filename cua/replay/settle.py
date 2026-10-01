@@ -12,7 +12,7 @@ backed by the real `time` module for actual replay.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from typing import Protocol, cast, runtime_checkable
 
@@ -33,6 +33,7 @@ __all__ = [
     "TimedOut",
     "Violated",
     "settle",
+    "settle_observation",
 ]
 
 
@@ -268,3 +269,31 @@ def settle(
             return TimedOut(observation=observation)
 
         clock.sleep_ms(settle_spec.poll_ms)
+
+
+def settle_observation(
+    surface: Surface, before: Hashable, digest: Callable[[Observation], Hashable], *,
+    clock: Clock = SYSTEM_CLOCK, poll_ms: int, timeout_ms: int,
+) -> Observation:
+    """The observation a state-changing action actually produced, for a caller that has no
+    `expects` to settle against (the discovery loop). An action can return before its
+    effect lands -- a click that starts a navigation returns while the old page is still
+    showing -- so the first observation afterwards may be stale.
+
+    Polls `surface.observe()` through `clock` until the page's `digest` differs from
+    `before` and two consecutive observations agree, then returns the second. If the page
+    never changes (an action with no visible effect), the last observation is returned once
+    `timeout_ms` has elapsed. A recorded allowlist violation stops polling at once; the
+    caller checks for it. Exceptions from `observe()` propagate to the caller.
+    """
+    deadline = clock.monotonic_ms() + timeout_ms
+    current = surface.observe()
+    while True:
+        if surface.allowlist_violation() is not None or clock.monotonic_ms() >= deadline:
+            return current
+        clock.sleep_ms(poll_ms)
+        fresh = surface.observe()
+        fresh_digest = digest(fresh)
+        if fresh_digest != before and fresh_digest == digest(current):
+            return fresh
+        current = fresh
