@@ -10,6 +10,7 @@ from cua.artifact.compile import compile as compile_artifact
 from cua.artifact.models import (
     App,
     FromInput,
+    FromStep,
     InputSpec,
     LiteralValue,
     OutputSpec,
@@ -230,3 +231,18 @@ def test_compile_refuses_an_out_of_range_checkpoint_index() -> None:
             settle=Settle(timeout_ms=1000, poll_ms=50), max_duration_ms=60000,
             outputs={"balance": OutputSpec(type="string")}, provenance=_provenance(),
         )
+
+
+def test_compile_promotes_a_value_matching_an_earlier_local_read_to_from_step() -> None:
+    steps = [
+        _read_step(0, "Account Type", "Savings", None),
+        _fill_step(0, "Savings", "Notes"),
+    ]
+    artifact = compile_artifact(
+        _trace(steps), id="x", version=1, name="x", description="x", app=_target(),
+        settle=Settle(timeout_ms=1000, poll_ms=50), max_duration_ms=60000, outputs={},
+        provenance=_provenance(),
+    )
+    assert artifact.steps[0].id == "s1"
+    assert artifact.steps[0].into == "_s1"
+    assert artifact.steps[1].value == FromStep(from_step="s1")
