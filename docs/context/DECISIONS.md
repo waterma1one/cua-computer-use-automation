@@ -1031,3 +1031,21 @@ a flow that reads several outputs off one static page.
 the working tree, where it could be committed by accident.
 **Cost accepted:** the two commands differ, and evidence is not next to the repo unless the
 operator passes `--evidence-root`.
+
+## D56 — The model is told input names and types `{{name}}` placeholders, never values
+The first live run showed the model inventing credentials because nothing told it declared
+inputs existed. The system prompt now lists each declared input by name, says whether it is
+sensitive, and tells the model to type `{{name}}` as the whole `value` of `fill`, `select` or
+`press_key`. A non-sensitive input also shows its example value; a sensitive one never does.
+The loop substitutes the real value only at the `Surface` call. The model's history, the
+tool-result echoes, the trace steps and the evidence events carry the placeholder, and any
+sensitive value in a surface error or a read result is replaced by its placeholder first.
+`compile` promotes a placeholder to `from_input` by name, and a literal equal to a declared
+value still promotes (the sensitive input wins when two share a value).
+**Why:** the secret never reaches the model provider, which is the spirit of D15 and D42
+(a credential is not worth its shape anywhere) taken to the one place they could not cover.
+**Cost accepted:** the model can type a placeholder into a free-text field it should not
+(the field then receives the real secret, and the compiler records `from_input` as asked); an
+undeclared or embedded placeholder is a failed turn; and a sensitive value is masked in
+evidence only by matching the declared secret (D52), so a secret the page echoes in a
+transformed form, or in an observation of a field not named as protected, is not caught.
