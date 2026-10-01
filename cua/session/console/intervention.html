@@ -17,37 +17,17 @@
 <br>
 
 {% if iv.status == "open" %}
-<!-- Claiming and handing back are done through the JSON API
-     (POST /interventions/{id}/claim, /handback, both bearer-token-authed); this form
-     is not yet wired to a route of its own -- the same documented-dead-target idiom
-     mockapp/templates/nav.html's /servicing link already uses. -->
-<form method="post" action="/console/interventions/{{ iv.id }}/claim">
-<table border="0" cellpadding="6" cellspacing="0">
-  <tr>
-    <td><font size="2">Operator</font></td>
-    <td><input type="text" name="operator_id" size="16" title="Operator"></td>
-  </tr>
-  <tr><td colspan="2"><input type="submit" value="Claim"></td></tr>
-</table>
-</form>
+<p><font size="2">Claim with
+<code>POST /interventions/{{ iv.id }}/claim</code> body <code>{"operator_id": "..."}</code>
+(bearer token). The lease moves to the operator and you may use the live browser.</font></p>
 {% endif %}
 
 {% if iv.status == "claimed" %}
-<form method="post" action="/console/interventions/{{ iv.id }}/handback">
-<table border="0" cellpadding="6" cellspacing="0">
-  <tr><td><input type="radio" name="outcome" value="resolved" title="Resolved"> Resolved</td></tr>
-  <tr><td><input type="radio" name="outcome" value="resolved_manually" title="Resolved manually"> Resolved manually</td></tr>
-  <tr>
-    <td><input type="radio" name="outcome" value="restart_from" title="Restart from"> Restart from
-    step <input type="text" name="step_id" size="12" title="Step ID"></td>
-  </tr>
-  <tr>
-    <td><input type="radio" name="outcome" value="cannot_resolve" title="Cannot resolve"> Cannot resolve
-    <input type="text" name="note" size="24" title="Note"></td>
-  </tr>
-  <tr><td><input type="submit" value="Hand back"></td></tr>
-</table>
-</form>
+<p><font size="2">Hand back with
+<code>POST /interventions/{{ iv.id }}/handback</code> body
+<code>{"outcome": "resolved" | "resolved_manually" | "restart_from" | "cannot_resolve"}</code>
+(<code>restart_from</code> also takes <code>step_id</code>, <code>cannot_resolve</code> a
+<code>note</code>).</font></p>
 {% endif %}
 
 <br><a href="/console">Back to interventions</a>
