@@ -22,7 +22,7 @@ from pathlib import Path
 from cua.artifact.models import Artifact, InputSpec
 from cua.artifact.store import dump_yaml
 from cua.observability.log import RunLog
-from cua.policy.redact import RedactingWriter, mask_field, redact_leaves
+from cua.policy.redact import RedactingWriter, mask_field, redact, redact_leaves
 from cua.replay.result import ReplayResult, mint_run_id
 from cua.surface.models import EvidenceFrame
 from cua.surface.snapshot import scrub_protected_values
@@ -64,6 +64,11 @@ class EvidenceWriter:
         """`text` with this writer's declared secrets masked (for messages shown to the
         operator as well as for files)."""
         return mask_secrets(text, self._secrets)
+
+    def scrub(self, text: str) -> str:
+        """`mask` plus the shape-preserving pattern filter: for free text from a page or
+        an error (an observed value can be an SSN), shown to the operator or written."""
+        return redact(self.mask(text))
 
     def _mask_secrets(self, value: object) -> object:
         if isinstance(value, str):
@@ -127,6 +132,35 @@ class EvidenceWriter:
             "policy_mode": policy_mode,
         }
         self._writer.put_text(self._run_dir() / "run.json", json.dumps(data, indent=2))
+
+    def write_discovery_run(
+        self, *, goal: str, capability: dict[str, str], inputs: dict[str, object],
+        input_specs: dict[str, InputSpec], policy_mode: str, base_url: str, model: str,
+        tokens: dict[str, int], estimated_cost_usd: float | None, cost_note: str | None,
+        step_count: int, started_at: str, ended_at: str,
+    ) -> None:
+        """Writes a discovery run's `run.json`: the replay fields (sensitive inputs masked
+        exactly as `write_run` does) plus model, token counts, cost, step count and
+        timestamps. Counts only -- never a prompt or a key."""
+        data = {
+            "goal": goal, "capability": capability,
+            "inputs": {
+                name: _REDACTION_MARKER if input_specs[name].sensitive else value
+                for name, value in inputs.items()
+            },
+            "policy_mode": policy_mode, "base_url": base_url, "model": model,
+            "tokens": tokens, "estimated_cost_usd": estimated_cost_usd,
+            "cost_note": cost_note, "step_count": step_count,
+            "started_at": started_at, "ended_at": ended_at,
+        }
+        masked = self._mask_secrets(data)
+        self._writer.put_text(self._run_dir() / "run.json", json.dumps(masked, indent=2))
+
+    def write_discovery_result(self, data: dict[str, object]) -> None:
+        """Writes a discovery run's `result.json`: every string is secret-masked and then
+        pattern-filtered on the way to disk."""
+        masked = redact_leaves(self._mask_secrets(data))
+        self._writer.put_text(self._run_dir() / "result.json", json.dumps(masked, indent=2))
 
     def write_result(
         self, result: ReplayResult, *, redacted_outputs: Iterable[str] = (),
