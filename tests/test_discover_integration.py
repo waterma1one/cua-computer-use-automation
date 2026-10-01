@@ -138,3 +138,32 @@ def test_self_verify_replays_with_a_different_value_than_discovery_used(
     artifact, _ = load("corebank.find", 1, tmp_path / "store")
     assert artifact.verified is True
     assert "12345" not in artifact.model_dump_json()
+
+
+def _login_script() -> list[ToolCall]:
+    return [
+        ToolCall(id="1", name="fill", args={"index": 12, "value": DEFAULT_LOGIN_USER}),
+        ToolCall(id="2", name="fill", args={"index": 16, "value": DEFAULT_LOGIN_PASSWORD}),
+        ToolCall(id="3", name="click", args={"index": 19}),
+        ToolCall(id="4", name="finish", args={"summary": "in", "checkpoint_index": 15}),
+    ]
+
+
+def test_a_secret_in_the_goal_is_refused_at_save_and_nothing_is_written(
+    monkeypatch, tmp_path, live_mockapp,
+) -> None:
+    monkeypatch.setattr(cli_module, "load_gemini_client_from_env",
+                        lambda: FakeClient(script=_login_script()))
+    store = tmp_path / "store"
+    result = runner.invoke(app, [
+        "discover", "--goal", f"Log in with password {DEFAULT_LOGIN_PASSWORD}.",
+        "--root", str(store), "--base-url", live_mockapp,
+        "--policy", _policy(tmp_path, live_mockapp),
+        "--evidence-root", str(tmp_path / "ev"), "--id", "corebank.login", "--name", "login",
+        "--input", f"user={DEFAULT_LOGIN_USER}",
+        "--secret-input", f"password={DEFAULT_LOGIN_PASSWORD}",
+    ])
+    assert result.exit_code == 1
+    assert "declared secret" in result.output
+    assert DEFAULT_LOGIN_PASSWORD not in result.output
+    assert not (store / "artifacts").exists() or not list((store / "artifacts").rglob("*.yaml"))

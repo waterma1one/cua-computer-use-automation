@@ -329,6 +329,20 @@ def serve(
 
 # Discovery evidence can hold page content from a real application, so unlike `replay` its
 # default lives in the user's cache directory, not the current working tree.
+def _refuse_secret_in_artifact(artifact: Artifact, writer: EvidenceWriter) -> None:
+    """Raises `ValueError` if the serialised artifact holds any declared secret value.
+
+    Covers the description (the operator's `--goal`), literals and navigate paths in one
+    check; the message never carries the secret itself.
+    """
+    text = artifact.model_dump_json()
+    if writer.mask(text) != text:
+        raise ValueError(
+            "discovery refused: the artifact contains a declared secret input value "
+            "(for example in --goal); nothing was saved"
+        )
+
+
 _DISCOVER_EVIDENCE_ROOT = Path.home() / ".cache" / "cua"
 
 
@@ -458,10 +472,12 @@ def discover(
             settle=Settle(timeout_ms=5000, poll_ms=200), max_duration_ms=60000, outputs={},
             provenance=provenance,
         )
+        _refuse_secret_in_artifact(artifact, writer)
         verified = self_verify(
             artifact, base_url, inputs=dict(verify_values),
             policy=policy, evidence=writer,
         )
+        _refuse_secret_in_artifact(verified, writer)
         path = save(verified, root)
     except (CompileError, FileExistsError, ValueError) as exc:
         typer.echo(writer.mask(" ".join(str(exc).split())), err=True)
