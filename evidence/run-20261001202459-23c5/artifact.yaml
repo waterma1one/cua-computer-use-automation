@@ -1,0 +1,322 @@
+schema_version: 1
+id: mockcu.lookup_member_savings_balance
+version: 2
+name: Look up member savings balance
+description: Log in using the declared username and password inputs, then look up
+  the member whose id is the declared member_id input and read that member's current
+  savings balance.
+verified: true
+app:
+  vendor_product: mockcu
+  variant: b
+  surface: web
+  entry: /
+settle:
+  timeout_ms: 5000
+  poll_ms: 200
+max_duration_ms: 60000
+inputs:
+  username:
+    type: string
+    required: true
+    sensitive: false
+  member_id:
+    type: string
+    required: true
+    sensitive: false
+  password:
+    type: string
+    required: true
+    sensitive: true
+outputs:
+  balance:
+    type: number
+    format: money
+    redact: false
+steps:
+- id: s1
+  action: navigate
+  target:
+    path: /
+  risk: safe
+  expects: []
+- id: s2
+  action: fill
+  locator:
+    strategy: role_name
+    role: textbox
+    name: User
+    name_match: exact
+    surface_path:
+    - kind: window
+      name: main
+    - kind: frame
+      name: content
+    require:
+      visible: true
+      enabled: true
+    fallbacks: []
+    rationale: role 'textbox' with accessible name 'User' is unique on this surface.
+    confidence: high
+  value:
+    from_input: username
+  risk: safe
+  expects:
+  - when:
+      strategy: role_name
+      role: textbox
+      name: Password
+      name_match: exact
+    outcome: continue
+    source: observed
+    verified: true
+- id: s3
+  action: fill
+  locator:
+    strategy: role_name
+    role: textbox
+    name: Password
+    name_match: exact
+    surface_path:
+    - kind: window
+      name: main
+    - kind: frame
+      name: content
+    require:
+      visible: true
+      enabled: true
+    fallbacks: []
+    rationale: role 'textbox' with accessible name 'Password' is unique on this surface.
+    confidence: high
+  value:
+    from_input: password
+  risk: safe
+  expects:
+  - when:
+      strategy: role_name
+      role: button
+      name: Sign in
+      name_match: exact
+    outcome: continue
+    source: observed
+    verified: true
+- id: s4
+  action: click
+  locator:
+    strategy: role_name
+    role: button
+    name: Sign in
+    name_match: exact
+    surface_path:
+    - kind: window
+      name: main
+    - kind: frame
+      name: content
+    require:
+      visible: true
+      enabled: true
+    fallbacks: []
+    rationale: role 'button' with accessible name 'Sign in' is unique on this surface.
+    confidence: high
+  risk: safe
+  expects:
+  - when:
+      strategy: role_name
+      role: textbox
+      name: Member ID
+      name_match: exact
+    outcome: continue
+    source: observed
+    verified: true
+  - when:
+      strategy: role_name
+      role: textbox
+      name: Account Holder ID
+      name_match: exact
+    outcome: continue
+    source: authored
+    verified: true
+- id: s5
+  action: fill
+  locator:
+    strategy: role_name
+    role: textbox
+    name: Account Holder ID
+    name_match: exact
+    surface_path:
+    - kind: window
+      name: main
+    - kind: frame
+      name: content
+    require:
+      visible: true
+      enabled: true
+    fallbacks: []
+    rationale: role 'textbox' with accessible name 'Member ID' is unique on this surface.
+    confidence: high
+  value:
+    from_input: member_id
+  risk: safe
+  expects:
+  - when:
+      strategy: role_name
+      role: button
+      name: Search
+      name_match: exact
+    outcome: continue
+    source: observed
+    verified: true
+- id: s6
+  action: click
+  locator:
+    strategy: role_name
+    role: button
+    name: Search
+    name_match: exact
+    surface_path:
+    - kind: window
+      name: main
+    - kind: frame
+      name: content
+    require:
+      visible: true
+      enabled: true
+    fallbacks: []
+    rationale: role 'button' with accessible name 'Search' is unique on this surface.
+    confidence: high
+  risk: safe
+  expects:
+  - when:
+      strategy: role_name
+      role: cell
+      name: You are not authorized to view this record
+      name_match: exact
+    outcome: business
+    code: MEMBER_RESTRICTED
+    source: authored
+    verified: true
+  - when:
+      strategy: role_name
+      role: cell
+      name: No member found
+      name_match: exact
+    outcome: business
+    code: MEMBER_NOT_FOUND
+    source: authored
+    verified: true
+  - when:
+      strategy: role_name
+      role: cell
+      name: Savings
+      name_match: exact
+    outcome: continue
+    source: observed
+    verified: true
+  - when:
+      strategy: role_name
+      role: combobox
+      name: Branch
+      name_match: exact
+    outcome: continue
+    source: authored
+    verified: true
+- id: s6a
+  action: select
+  locator:
+    strategy: role_name
+    role: combobox
+    name: Branch
+    name_match: exact
+    surface_path:
+    - kind: window
+      name: main
+    - kind: frame
+      name: content
+    require:
+      visible: true
+      enabled: true
+    fallbacks: []
+    rationale: role 'combobox' with accessible name 'Branch' on variant B's branch
+      screen.
+    confidence: high
+  value:
+    literal: Main
+  risk: safe
+  expects:
+  - when:
+      strategy: role_name
+      role: button
+      name: Continue
+      name_match: exact
+    outcome: continue
+    source: authored
+    verified: true
+- id: s6b
+  action: click
+  locator:
+    strategy: role_name
+    role: button
+    name: Continue
+    name_match: exact
+    surface_path:
+    - kind: window
+      name: main
+    - kind: frame
+      name: content
+    require:
+      visible: true
+      enabled: true
+    fallbacks: []
+    rationale: role 'button' with accessible name 'Continue' on variant B's branch
+      screen.
+    confidence: high
+  risk: safe
+  expects:
+  - when:
+      strategy: role_name
+      role: cell
+      name: Savings
+      name_match: exact
+    outcome: continue
+    source: authored
+    verified: true
+- id: s7
+  action: read
+  locator:
+    strategy: role_name
+    role: cell
+    name_match: any
+    surface_path:
+    - kind: window
+      name: main
+    - kind: frame
+      name: content
+    ordinal: 6
+    require:
+      visible: true
+      enabled: true
+    fallbacks: []
+    rationale: deliberately ignores the node's text, which is a value read at discovery
+      and varies per input; using its position (6) among the 'cell' controls on this
+      surface instead. This should be reviewed -- positional locators are fragile
+      against reordering.
+    confidence: low
+  risk: safe
+  expects: []
+  extract: text
+  parse: money
+  into: balance
+success:
+  checkpoint:
+    strategy: role_name
+    role: cell
+    name: Savings
+    name_match: exact
+recovery: []
+provenance:
+  discovered_at: '2026-10-01T18:25:17.044274Z'
+  model: gemini-3.5-flash-lite
+  policy_mode: strict
+  provider_retention: training_permitted
+  run_id: run-20261001182355-ba57
+  trace_ref: evidence/run-20261001182355-ba57/trace.jsonl

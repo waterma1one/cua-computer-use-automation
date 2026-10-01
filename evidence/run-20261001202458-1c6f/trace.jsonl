@@ -1,0 +1,6 @@
+{"kind": "step_started", "step_id": "s1", "action": "navigate", "risk": "safe"}
+{"kind": "step_started", "step_id": "s2", "action": "fill", "risk": "safe"}
+{"kind": "step_started", "step_id": "s3", "action": "fill", "risk": "safe"}
+{"kind": "step_started", "step_id": "s4", "action": "click", "risk": "safe"}
+{"kind": "step_started", "step_id": "s5", "action": "fill", "risk": "safe"}
+{"kind": "step_started", "step_id": "s6", "action": "click", "risk": "safe"}

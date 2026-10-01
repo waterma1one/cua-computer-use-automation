@@ -1,0 +1,34 @@
+- document:
+  - iframe
+  - iframe
+- document:
+  - table:
+    - rowgroup:
+      - row "Meridian Credit Union":
+        - cell "Meridian Credit Union"
+      - row "Member Search":
+        - cell "Member Search":
+          - link "Member Search":
+            - /url: /search
+      - row "Account Servicing":
+        - cell "Account Servicing":
+          - link "Account Servicing":
+            - /url: /servicing
+- document:
+  - table:
+    - rowgroup:
+      - row "Sign in":
+        - cell "Sign in"
+      - row "Invalid username or password":
+        - cell "Invalid username or password"
+      - row "User":
+        - cell "User"
+        - cell:
+          - textbox "User"
+      - row "Password":
+        - cell "Password"
+        - cell:
+          - textbox "Password"
+      - row "Sign in":
+        - cell "Sign in":
+          - button "Sign in"

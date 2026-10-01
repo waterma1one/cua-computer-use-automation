@@ -1,0 +1,8 @@
+{"kind": "step_started", "step_id": "s1", "action": "navigate", "risk": "safe"}
+{"kind": "step_started", "step_id": "s2", "action": "fill", "risk": "safe"}
+{"kind": "step_started", "step_id": "s3", "action": "fill", "risk": "safe"}
+{"kind": "step_started", "step_id": "s4", "action": "click", "risk": "safe"}
+{"kind": "intervention_created", "intervention_id": "iv-b12b69a5", "step_id": "s4", "reason_code": "NO_BRANCH_MATCHED", "acted": true}
+{"kind": "intervention_claimed", "intervention_id": "iv-b12b69a5", "operator_id": "op-1"}
+{"kind": "intervention_handed_back", "intervention_id": "iv-b12b69a5", "outcome": "resolved"}
+{"kind": "intervention_created", "intervention_id": "iv-2dc3f934", "step_id": "s4", "reason_code": "NO_BRANCH_MATCHED", "acted": true}
