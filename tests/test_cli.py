@@ -910,6 +910,11 @@ class _OkSurface:
     def __init__(self, page, *, navigation_guard) -> None:
         pass
 
+    def capture(self):
+        from cua.surface.models import EvidenceFrame
+
+        return EvidenceFrame(generation=0, snapshot_yaml="- page")
+
     def act(self, action):
         from types import SimpleNamespace
 
@@ -989,6 +994,11 @@ def test_discover_reports_an_entry_allowlist_violation_first(monkeypatch, tmp_pa
 
         def allowlist_violation(self) -> str:
             return "origin http://evil is not allowed"
+
+        def capture(self):
+            from cua.surface.models import EvidenceFrame
+
+            return EvidenceFrame(generation=0, snapshot_yaml="- page")
 
     def _must_not_run(*_a, **_k):
         raise AssertionError("discovery must not run after a refused entry")
