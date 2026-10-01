@@ -31,6 +31,6 @@ Supporting runs:
 - The human in the escalation run is a script (`scripts/handoff_demo.py`). The service, engine, lease,
   HTTP routes and browser are the production ones; only the operator's hands are scripted. In `cua serve`
   the operator uses a headed browser.
-- The handoff run's result says `assistance: none` although a human acted. This is a known gap (D66):
-  a `resolved` handback resumes automatically, and only `resolved_manually` is marked `human`.
+- The recorded handoff run says `assistance: none` although a human acted: it predates the D70 fix.
+  The engine now reports `human` after any handback; the run was not regenerated.
 - No cost figure: no price is on file for the model (token counts are exact).

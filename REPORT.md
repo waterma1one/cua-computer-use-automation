@@ -108,8 +108,9 @@ is torn down with a logout attempt.
 What the lease binds, stated honestly: it is an agent-side mutex and an audit record. It stops the
 automation from acting under a person; it does not stop the person acting. The operator console is
 a read-only view with token auth, and claim and hand back go through the JSON API (D69); the human's hands are the one mocked piece in the demo
-(`scripts/handoff_demo.py`). Known gap (D66): after a `resolved` handback the engine reports
-`assistance: none`, so a human-assisted run can be counted clean in the stability score.
+(`scripts/handoff_demo.py`). After any handback the run reports
+`assistance: human` and is excluded from the stability score (D70; the committed escalation evidence
+predates this and still records `none`).
 
 ## 6. Safety
 
@@ -150,7 +151,7 @@ Cut, in the order agreed up front:
 - No cost figure for discovery: no price is on file for the model. Token counts are exact.
 - Desktop surface, multi-tenant plumbing, cross-process idempotency, and the console's TLS and buttons are
   designed, not built. The console's `?token=` bootstrap is acceptable on loopback only.
-- The unfinished edges are listed in `docs/context/DECISIONS.md` (D44, D52, D66).
+- The unfinished edges are listed in `docs/context/DECISIONS.md` (D44, D52).
 
 Next, in order: persist idempotency and the registry; make `resolved` handbacks count as assisted;
 let discovery propose outputs and business clauses; generate an overlay from a failed replay; then a

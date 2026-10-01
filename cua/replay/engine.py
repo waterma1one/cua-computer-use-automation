@@ -459,6 +459,9 @@ class _Run:
     # `PRECONDITION_FAILED`/etc.) is distinguishable, at the point it escalates, from one
     # `act()` had already been attempted for.
     step_acted: bool = False
+    # D66: set once a human has driven the live session and handed back (any outcome that lets
+    # the run go on), so the final `Success` reports `assistance="human"` instead of `"none"`.
+    human_assisted: bool = False
 
     def fail(
         self, kind: FailureKind, step_id: str | None, expected: str, observed: str, *,
@@ -996,6 +999,7 @@ def _escalate_and_continue(
     if isinstance(outcome, CannotResolve):
         return run.fail(kind, step_id, expected, f"{observed} (operator: {outcome.note})",
                         capture=False)  # already captured once by the failure this wraps (E8)
+    run.human_assisted = True  # D66: every outcome from here on is a human-assisted run
     if isinstance(outcome, ResolvedManually):
         return Success(outputs={}, steps_run=run.steps_run, evidence_ref=run.sink.evidence_ref(),
                        assistance="human")  # E4: the EXISTING field, never a new one
@@ -1132,7 +1136,8 @@ def _run_from(
             f"no step bound {missing}", capture=True,
         )
     outputs = {key: value for key, value in run.values.items() if not key.startswith("_")}
-    return Success(outputs=outputs, steps_run=run.steps_run, evidence_ref=run.sink.evidence_ref())
+    return Success(outputs=outputs, steps_run=run.steps_run, evidence_ref=run.sink.evidence_ref(),
+                   assistance="human" if run.human_assisted else "none")
 
 
 def replay(

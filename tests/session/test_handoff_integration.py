@@ -208,7 +208,7 @@ def test_escalate_claim_resolve_and_resume_to_a_real_success(
     result = _poll_result(client, sid)
 
     assert set(result) == {"outputs", "steps_run", "evidence_ref", "assistance"}, result
-    assert result["assistance"] == "none"  # E4: the existing field, as Task 4/6 check it
+    assert result["assistance"] == "human"  # D66: a human drove the session (E4: existing field)
     assert result["steps_run"] == ["s1"]
     [returned] = client.get(f"/sessions/{sid}/interventions", headers=AUTH).json()
     assert returned["status"] == "returned"
@@ -312,7 +312,7 @@ def test_restart_from_replays_the_named_range_and_reaches_success(
     result = _poll_result(client, sid)
 
     assert set(result) == {"outputs", "steps_run", "evidence_ref", "assistance"}, result
-    assert result["assistance"] == "none"
+    assert result["assistance"] == "human"
     # Only the named range was replayed: s0 started once, s1 and s2 twice each.
     assert _steps_started(tmp_path, result) == ["s0", "s1", "s2", "s1", "s2"]
     [returned] = client.get(f"/sessions/{sid}/interventions", headers=AUTH).json()

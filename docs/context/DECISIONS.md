@@ -1160,3 +1160,10 @@ JSON API (`POST /interventions/{id}/claim`, `/handback`); the intervention page 
 the body, instead of rendering forms that 404. Wiring cookie-authed POSTs would add an
 operator-identity concept the shared-token design does not have. **Cost accepted:** an operator needs
 `curl` or a client, not a button.
+
+## D70 — A handback now marks the run `assistance: human` (closes D66's gap)
+`_Run.human_assisted` is set once an escalation returns any outcome other than `CannotResolve`;
+the final `Success` reports `assistance="human"` when it is set. `Resolved` and `RestartFrom`
+runs therefore bump `assisted_replays` and no longer count toward the stability score. The two
+handoff integration tests that asserted `"none"` were updated. Evidence runs recorded before this
+change still say `assistance: none` for the escalation run; they were not regenerated.
