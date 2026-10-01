@@ -154,6 +154,12 @@ class RegistryEntry(BaseModel):
     successes: int = 0
     score: float | None = None
     requires_human_approval: bool = True
+    # D66: approval and assisted-run bookkeeping. Defaulted so a registry.json written
+    # before these fields existed still loads.
+    approver: str | None = None
+    approved_at: str | None = None
+    sandbox_discovered: bool = False
+    assisted_replays: int = 0
 
 
 def _artifact_dir(root: Path, artifact_id: str) -> Path:
