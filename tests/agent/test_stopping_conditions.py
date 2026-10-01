@@ -81,7 +81,7 @@ def test_dead_end_detected_on_a_repeating_digest() -> None:
 
 def test_a_changing_observation_is_not_a_dead_end() -> None:
     frames = [[node("button", "X", index=0), node("cell", str(i), index=1)] for i in range(6)]
-    surface = FakeSurface(frames=frames)
+    surface = FakeSurface(frames=frames, advance_on_act=True)  # each click changes the page
     llm = FakeClient(script=[ToolCall(id=str(i), name="click", args={"index": 0})
                              for i in range(5)])
     trace = discover("goal", _target(), surface, _policy(), llm,

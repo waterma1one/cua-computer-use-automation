@@ -26,7 +26,7 @@ from cua.llm.gemini import LLMError
 from cua.policy.config import PolicyConfig
 from cua.policy.risk import classify
 from cua.replay.engine import EvidenceSink
-from cua.replay.settle import SYSTEM_CLOCK, Clock
+from cua.replay.settle import SYSTEM_CLOCK, Clock, settle_observation
 from cua.surface.base import StaleObservationError, Surface, SurfaceError
 from cua.surface.models import Action, ActionKind, ActionResult, Locator, Node, Observation
 
@@ -67,12 +67,19 @@ class DiscoveryLimits:
     provider errors) neither advance nor reset it -- they belong to the failure counter. A
     successful `read` is the same: it is expected to leave the page alone, so a flow reading
     several outputs from one static page is not mistaken for a stuck loop.
+
+    `settle_timeout_ms` and `settle_poll_ms` bound the wait after a successful
+    state-changing action (everything except `read` and `wait_for`): the loop polls until
+    the page has changed and holds still for one poll, or the timeout passes. An action with
+    no visible effect therefore costs the full timeout.
     """
 
     max_steps: int = 40
     max_duration_ms: int = 300_000
     dead_end_repeats: int = 3
     max_consecutive_failures: int = 3
+    settle_timeout_ms: int = 2_000
+    settle_poll_ms: int = 100
 
 
 @dataclass(frozen=True)
@@ -143,6 +150,9 @@ def _declared_arg_types() -> dict[str, dict[str, str]]:
 
 
 _ARG_TYPES: dict[str, dict[str, str]] = _declared_arg_types()
+
+# Tools whose success leaves the page as it was, so the loop observes once without settling.
+_NON_MUTATING_TOOLS: frozenset[str] = frozenset({"read", "wait_for"})
 
 # Arguments that name a position in the current observation.
 _INDEX_ARGS: frozenset[str] = frozenset({"index", "checkpoint_index"})
@@ -262,13 +272,24 @@ def discover(
         return violation_stop() or stop("consecutive_failures",
                                         f"surface error while {doing}: {exc}")
 
-    def refresh(*, counts: bool = True) -> Trace | None:
+    def refresh(*, counts: bool = True, settle: bool = False) -> Trace | None:
         """Re-observe after a turn. Returns a stopping `Trace` if the surface cannot be
-        observed, `None` once `observation` is current."""
+        observed, `None` once `observation` is current. `settle=True` (after a successful
+        state-changing action) waits, through the injected clock, for the action's effect
+        to land instead of adopting the first observation, which can still show the page
+        the action left (a click returns before the navigation it started commits)."""
         try:
-            fresh = surface.observe()
+            if settle:
+                fresh = settle_observation(
+                    surface, _digest(observation), _digest, clock=active_clock,
+                    poll_ms=active_limits.settle_poll_ms,
+                    timeout_ms=active_limits.settle_timeout_ms)
+            else:
+                fresh = surface.observe()
         except (StaleObservationError, SurfaceError) as exc:
             return surface_stop(exc, "re-observing")
+        if (halt := violation_stop()) is not None:
+            return halt
         reobserve(fresh, counts=counts)
         return None
 
@@ -393,7 +414,8 @@ def discover(
             observation=acted_on, raw_nodes=raw_nodes,
         ))
         sink.event(kind="action", step=step_num, tool=call.name, ok=True)
-        if (halt := refresh(counts=call.name != "read")) is not None:
+        if (halt := refresh(counts=call.name != "read",
+                            settle=call.name not in _NON_MUTATING_TOOLS)) is not None:
             return halt
 
     return stop("max_steps", f"reached {active_limits.max_steps}")
