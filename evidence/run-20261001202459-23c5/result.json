@@ -1,0 +1,18 @@
+{
+  "outputs": {
+    "balance": "4218.60"
+  },
+  "steps_run": [
+    "s1",
+    "s2",
+    "s3",
+    "s4",
+    "s5",
+    "s6",
+    "s6a",
+    "s6b",
+    "s7"
+  ],
+  "evidence_ref": "evidence/run-20261001202459-23c5",
+  "assistance": "none"
+}

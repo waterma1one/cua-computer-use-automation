@@ -1,0 +1,7 @@
+{
+  "kind": "NO_BRANCH_MATCHED",
+  "step_id": "s4",
+  "expected": "one of: continue on role_name role='textbox' name='Member ID' (exact)",
+  "observed": "observed: Lakeshore Federal; Lakeshore Federal; Member Search; Member Search; Member Search; Account Servicing; Account Servicing; Account Servicing; Member Search; Member Search; Account Holder ID; Account Holder ID; Account Holder ID; Search; Search; Search; an unnamed textbox",
+  "evidence_ref": "evidence/run-20261001202501-6da2"
+}

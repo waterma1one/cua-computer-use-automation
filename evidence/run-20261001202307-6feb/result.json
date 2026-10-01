@@ -1,0 +1,7 @@
+{
+  "kind": "ESCALATION_TIMEOUT",
+  "step_id": null,
+  "expected": "an intervention is claimed and handed back within its ttl",
+  "observed": "intervention 'iv-2dc3f934' was never claimed",
+  "evidence_ref": "evidence/run-20261001202307-6feb"
+}

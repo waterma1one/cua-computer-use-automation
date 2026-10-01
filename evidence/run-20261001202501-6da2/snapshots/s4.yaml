@@ -1,0 +1,33 @@
+- document:
+  - iframe
+  - iframe
+- document:
+  - table:
+    - rowgroup:
+      - row "Lakeshore Federal":
+        - cell "Lakeshore Federal"
+      - row "Member Search":
+        - cell "Member Search":
+          - link "Member Search":
+            - /url: /search
+      - row "Account Servicing":
+        - cell "Account Servicing":
+          - link "Account Servicing":
+            - /url: /servicing
+- document:
+  - table:
+    - rowgroup:
+      - row "Member Search":
+        - cell "Member Search"
+      - row "Account Holder ID":
+        - cell "Account Holder ID"
+        - cell:
+          - textbox "Account Holder ID"
+      - row "Search":
+        - cell "Search":
+          - button "Search"
+  - table:
+    - rowgroup:
+      - row:
+        - cell:
+          - textbox

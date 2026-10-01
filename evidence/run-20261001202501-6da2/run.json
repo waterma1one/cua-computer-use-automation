@@ -1,0 +1,10 @@
+{
+  "goal": "Log in using the declared username and password inputs, then look up the member whose id is the declared member_id input and read that member's current savings balance.",
+  "capability": "mockcu.lookup_member_savings_balance",
+  "inputs": {
+    "username": "teller",
+    "password": "[REDACTED]",
+    "member_id": "12345"
+  },
+  "policy_mode": "strict"
+}
