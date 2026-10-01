@@ -50,3 +50,29 @@ The same applies to anything other than `base` or `b`: `python -m mockapp <typo>
 one line naming what you typed and the valid variants, and exits, instead of crashing.
 
 No API key or network access is required to run either variant.
+
+## Discovery demo path
+
+`cua discover` is the only command that needs a model API key (`GEMINI_API_KEY` in `.env`).
+Replay, the catalog and the operator console run without one.
+
+Start the mock app (above), then copy `policy.example.yaml` to a scratch file, change its
+origin to `http://127.0.0.1:8811` and keep `policy_mode: strict`. From the repository root:
+
+```bash
+set -a; . ./.env; set +a
+PYTHONPATH=. .venv/bin/python -c "from cua.cli import app; app()" discover \
+  --goal "Log in using the declared username and password inputs, then look up the member whose id is the declared member_id input and read that member's current savings balance." \
+  --root . --base-url http://127.0.0.1:8811 --policy <policy-file> --evidence-root . \
+  --id mockcu.lookup_member_savings_balance --name "Look up member savings balance" \
+  --input username=teller --secret-input password=teller-demo-pw --input member_id=12345 \
+  --verify-input member_id=22222
+```
+
+The model sees `{{password}}`-style placeholders, never the secret. The artifact is compiled
+from the executed trace, then replayed in a fresh session with the `--verify-input` values; it
+is saved as `artifacts/<id>/v1.yaml` only if that replay passes. Evidence goes to
+`evidence/<run_id>/` (`run.json` with token counts, `result.json`, `artifact.yaml`,
+`trace.jsonl`, screenshots, snapshots). A goal that needs the irreversible Post is refused
+under `strict` policy and the run ends with outcome `refused`. `evidence/GREP-CHECK.md`
+records the leak check and lists every run, failures included.

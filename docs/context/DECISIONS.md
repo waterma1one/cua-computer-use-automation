@@ -1049,3 +1049,46 @@ value still promotes (the sensitive input wins when two share a value).
 undeclared or embedded placeholder is a failed turn; and a sensitive value is masked in
 evidence only by matching the declared secret (D52), so a secret the page echoes in a
 transformed form, or in an observation of a field not named as protected, is not caught.
+
+## D57 — Compiled matchers and locators never pin a value read during discovery
+A read target's own text is the value discovery saw (member 12345's balance), so pinning it
+makes the capability work for one input only. The compiler now (a) emits no matcher from a node
+holding a read value, (b) swaps such a `expects` or success checkpoint for the nearest
+value-independent node (no read value, no digit, no declared input example value; label roles
+first, then non-controls, then controls), and (c) locates a value-bearing read target by role and
+ordinal.
+**Why:** live self-verify with a second member failed three different ways before this
+(`expects`, checkpoint, locator).
+**Cost accepted:** a digit-free name can still be input-specific, and ordinal locators are
+fragile to layout change (they are marked `confidence: low` for review). An `expects` before a
+read must still exist or replay does not wait for the next page (run 8).
+
+## D58 — `name_match: "any"` added to the locator vocabulary, never to `Matcher`
+`Locator` accepts `any` (role required, no name) so a result cell can be found by role and
+position. `Matcher` rejects it because settle also checks matchers against dialog text, where it
+would match every message.
+**Why:** D57(c) needs a name-free locator. **Cost accepted:** the vocabulary was deliberately
+closed (no regex); this widens it by one value.
+
+## D59 — Discovery `read` returns a non-input node's accessible name
+`act(read)` returned `node.value`, which is `None` for a table cell, so discovery never saw the
+value and the compiler could not tell a read happened. Input-like roles still return `value`
+(an empty field reads `None`, I4); protected nodes always read `None`.
+**Why:** replay's `extract` already reads `node.name` for `text`.
+
+## D60 — Every `cua discover` run writes the full evidence set, token counts included
+`run.json` (tokens, estimated cost), `result.json`, `artifact.yaml` when saved, and a screenshot
+plus redacted snapshot per executed step, written in a `finally` so refusals and failures keep
+evidence. Failure messages go through the same mask as the evidence (a mock SSN had reached
+stderr).
+**Cost accepted:** `estimated_cost_usd` is `null` for models with no price on file, including
+the default `gemini-3.5-flash-lite`; token counts are exact.
+
+## D61 — Escalation at Post is the strict-policy refusal, shown with a separate probe
+Under `policy_mode: strict` the loop refuses any non-`safe` action before the surface
+(`policy_refused`, then `give_up`, outcome `refused`). With the plan's wording the model stops at
+the review page on its own and never tries Post, so the saved `open_subaccount` artifact does not
+itself demonstrate escalation. Run `run-20261001182705-3573`, whose goal required pressing Post,
+did: refused at step 8, no `POST /subaccount/post` reached the mock app.
+**Open for the owner:** whether this satisfies criterion 3 or discovery should call a real
+escalation path.
