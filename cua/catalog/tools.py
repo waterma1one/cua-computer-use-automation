@@ -8,6 +8,8 @@ from typing import Any
 from cua.artifact.models import Artifact, RegistryStatus
 from cua.artifact.store import has_irreversible_step
 
+__all__ = ["ToolDefinition", "build_tool_definition", "has_irreversible_step"]
+
 
 @dataclass(frozen=True)
 class ToolDefinition:
