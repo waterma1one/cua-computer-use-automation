@@ -77,5 +77,5 @@ is saved as `artifacts/<id>/v1.yaml` only if that replay passes. Evidence goes t
 under `strict` policy: discovery holds the action, records the escalation (event, frame,
 `result.json`), never performs it, and the run ends with outcome `escalated` and nothing saved.
 The discovery escalator is non-interactive and declines; a real operator handback is
-replay-only. `evidence/GREP-CHECK.md`
+replay-only. The escalation demonstration is `run-20261001185610-0bdc`. `evidence/GREP-CHECK.md`
 records the leak check and lists every run, failures included.

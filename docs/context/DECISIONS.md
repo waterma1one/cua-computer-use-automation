@@ -1085,6 +1085,7 @@ stderr).
 the default `gemini-3.5-flash-lite`; token counts are exact.
 
 ## D61 — Escalation at Post is the strict-policy refusal, shown with a separate probe
+**Superseded by D62.**
 Under `policy_mode: strict` the loop refuses any non-`safe` action before the surface
 (`policy_refused`, then `give_up`, outcome `refused`). With the plan's wording the model stops at
 the review page on its own and never tries Post, so the saved `open_subaccount` artifact does not
