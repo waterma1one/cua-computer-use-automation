@@ -480,7 +480,7 @@ def discover(
         _refuse_secret_in_artifact(verified, writer)
         path = save(verified, root)
     except (CompileError, FileExistsError, ValueError) as exc:
-        typer.echo(writer.mask(" ".join(str(exc).split())), err=True)
+        typer.echo(" ".join(writer.mask(str(exc)).split()), err=True)
         raise typer.Exit(code=1) from exc
     write_registry_entry(
         root, verified.id, verified.version, RegistryEntry(status="draft"), artifact=verified,
