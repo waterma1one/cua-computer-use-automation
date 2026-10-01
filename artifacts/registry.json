@@ -1,0 +1,20 @@
+{
+  "mockcu.lookup_member_savings_balance": {
+    "1": {
+      "replays": 0,
+      "requires_human_approval": true,
+      "score": null,
+      "status": "draft",
+      "successes": 0
+    }
+  },
+  "mockcu.open_subaccount": {
+    "1": {
+      "replays": 0,
+      "requires_human_approval": true,
+      "score": null,
+      "status": "draft",
+      "successes": 0
+    }
+  }
+}

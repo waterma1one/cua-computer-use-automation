@@ -1,0 +1,32 @@
+- document:
+  - iframe
+  - iframe
+- document:
+  - table:
+    - rowgroup:
+      - row "Meridian Credit Union":
+        - cell "Meridian Credit Union"
+      - row "Member Search":
+        - cell "Member Search":
+          - link "Member Search":
+            - /url: /search
+      - row "Account Servicing":
+        - cell "Account Servicing":
+          - link "Account Servicing":
+            - /url: /servicing
+- document:
+  - table:
+    - rowgroup:
+      - row "Sign in":
+        - cell "Sign in"
+      - row "User teller":
+        - cell "User"
+        - cell "teller":
+          - textbox "User": teller
+      - row "Password":
+        - cell "Password"
+        - cell:
+          - textbox "Password"
+      - row "Sign in":
+        - cell "Sign in":
+          - button "Sign in"

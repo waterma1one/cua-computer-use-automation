@@ -1,0 +1,7 @@
+{"kind": "action", "step": 1, "tool": "fill", "ok": true}
+{"kind": "action", "step": 2, "tool": "fill", "ok": true}
+{"kind": "action", "step": 3, "tool": "click", "ok": true}
+{"kind": "action", "step": 4, "tool": "fill", "ok": true}
+{"kind": "action", "step": 5, "tool": "click", "ok": true}
+{"kind": "action", "step": 6, "tool": "read", "ok": true}
+{"kind": "discovery_stop", "reason": "finish", "detail": "Successfully logged in, looked up member {{member_id}}, and read their current savings balance: 4,218.60", "step_count": 6}

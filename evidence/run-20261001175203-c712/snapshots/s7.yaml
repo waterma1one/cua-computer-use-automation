@@ -1,0 +1,36 @@
+- document:
+  - iframe
+  - iframe
+- document:
+  - table:
+    - rowgroup:
+      - row "Meridian Credit Union":
+        - cell "Meridian Credit Union"
+      - row "Member Search":
+        - cell "Member Search":
+          - link "Member Search":
+            - /url: /search
+      - row "Account Servicing":
+        - cell "Account Servicing":
+          - link "Account Servicing":
+            - /url: /servicing
+- document:
+  - text: Member 22222 Priya Raghunathan SSN ***-**-7742 Acct ********7431
+  - table:
+    - rowgroup:
+      - row "Type Number Balance":
+        - cell "Type"
+        - cell "Number"
+        - cell "Balance"
+        - cell
+      - row "Savings ********7431-01 89,410.22 Select":
+        - cell "Savings"
+        - cell "********7431-01"
+        - cell "89,410.22"
+        - cell "Select":
+          - button "Select"
+  - link "Print statement":
+    - /url: /statement/22222
+    - img "Print statement"
+  - link "Open sub-account":
+    - /url: /subaccount/new?mid=22222

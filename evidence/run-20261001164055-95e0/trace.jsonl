@@ -1,0 +1,8 @@
+{"kind": "action", "step": 1, "tool": "fill", "ok": true}
+{"kind": "action", "step": 2, "tool": "fill", "ok": true}
+{"kind": "action", "step": 3, "tool": "click", "ok": true}
+{"kind": "action", "step": 4, "tool": "fill", "ok": true}
+{"kind": "action", "step": 5, "tool": "fill", "ok": true}
+{"kind": "action", "step": 6, "tool": "fill", "ok": true}
+{"kind": "action", "step": 7, "tool": "fill", "ok": true}
+{"kind": "discovery_stop", "reason": "dead_end", "detail": "observation unchanged across 3 consecutive turns", "step_count": 7}

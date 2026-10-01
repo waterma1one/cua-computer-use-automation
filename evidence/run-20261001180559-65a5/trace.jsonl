@@ -1,0 +1,13 @@
+{"kind": "action", "step": 1, "tool": "fill", "ok": true}
+{"kind": "action", "step": 2, "tool": "fill", "ok": true}
+{"kind": "action", "step": 3, "tool": "click", "ok": true}
+{"kind": "action", "step": 4, "tool": "fill", "ok": true}
+{"kind": "action", "step": 5, "tool": "click", "ok": true}
+{"kind": "action", "step": 6, "tool": "read", "ok": true}
+{"kind": "discovery_stop", "reason": "finish", "detail": "Logged in, looked up member {{member_id}}, and read their savings balance as 4,218.60.", "step_count": 6}
+{"kind": "step_started", "step_id": "s1", "action": "navigate", "risk": "safe"}
+{"kind": "step_started", "step_id": "s2", "action": "fill", "risk": "safe"}
+{"kind": "step_started", "step_id": "s3", "action": "fill", "risk": "safe"}
+{"kind": "step_started", "step_id": "s4", "action": "click", "risk": "safe"}
+{"kind": "step_started", "step_id": "s5", "action": "fill", "risk": "safe"}
+{"kind": "step_started", "step_id": "s6", "action": "click", "risk": "safe"}

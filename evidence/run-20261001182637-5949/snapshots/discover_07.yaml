@@ -1,0 +1,23 @@
+- document:
+  - iframe
+  - iframe
+- document:
+  - table:
+    - rowgroup:
+      - row "Meridian Credit Union":
+        - cell "Meridian Credit Union"
+      - row "Member Search":
+        - cell "Member Search":
+          - link "Member Search":
+            - /url: /search
+      - row "Account Servicing":
+        - cell "Account Servicing":
+          - link "Account Servicing":
+            - /url: /servicing
+- document:
+  - text: Confirm new sub-account Member 12345 a new Savings account will be opened. This cannot be undone.
+  - table:
+    - rowgroup:
+      - row "Post":
+        - cell "Post":
+          - button "Post"

@@ -1,0 +1,9 @@
+{
+  "outcome": "refused",
+  "stop_reason": "give_up",
+  "stop_detail": "The final Post button click is classified as irreversible under policy_mode=strict, so it cannot be executed.",
+  "verified": false,
+  "artifact": null,
+  "failure_message": null,
+  "step_count": 7
+}

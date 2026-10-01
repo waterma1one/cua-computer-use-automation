@@ -1,0 +1,25 @@
+{
+  "goal": "Log in using the declared username and password inputs, then open a new savings sub-account for the member whose id is the declared member_id input and reach the confirmation screen.",
+  "capability": {
+    "id": "mockcu.open_subaccount",
+    "name": "Open sub-account"
+  },
+  "inputs": {
+    "username": "teller",
+    "member_id": "12345",
+    "password": "[REDACTED]"
+  },
+  "policy_mode": "strict",
+  "base_url": "http://127.0.0.1:8811",
+  "model": "gemini-3.5-flash-lite",
+  "tokens": {
+    "prompt": 10206,
+    "completion": 164,
+    "total": 10370
+  },
+  "estimated_cost_usd": null,
+  "cost_note": "no price on file for model 'gemini-3.5-flash-lite'; token counts are exact",
+  "step_count": 7,
+  "started_at": "2026-10-01T18:26:37.685251+00:00",
+  "ended_at": "2026-10-01T18:26:51.195570+00:00"
+}

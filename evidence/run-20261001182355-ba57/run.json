@@ -1,0 +1,25 @@
+{
+  "goal": "Log in using the declared username and password inputs, then look up the member whose id is the declared member_id input and read that member's current savings balance.",
+  "capability": {
+    "id": "mockcu.lookup_member_savings_balance",
+    "name": "Look up member savings balance"
+  },
+  "inputs": {
+    "username": "teller",
+    "member_id": "12345",
+    "password": "[REDACTED]"
+  },
+  "policy_mode": "strict",
+  "base_url": "http://127.0.0.1:8811",
+  "model": "gemini-3.5-flash-lite",
+  "tokens": {
+    "prompt": 9095,
+    "completion": 162,
+    "total": 9257
+  },
+  "estimated_cost_usd": null,
+  "cost_note": "no price on file for model 'gemini-3.5-flash-lite'; token counts are exact",
+  "step_count": 6,
+  "started_at": "2026-10-01T18:23:55.412227+00:00",
+  "ended_at": "2026-10-01T18:25:18.884188+00:00"
+}

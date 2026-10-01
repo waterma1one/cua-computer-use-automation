@@ -1,0 +1,9 @@
+{
+  "outcome": "failed",
+  "stop_reason": "finish",
+  "stop_detail": "Successfully logged in, searched for member 12345, opened a new savings sub-account, and reached the confirmation screen.",
+  "verified": false,
+  "artifact": null,
+  "failure_message": "artifacts/mockcu.open_subaccount/v1.yaml already exists; artifacts/<id>/v<version>.yaml is immutable -- write a new version instead of overwriting this one",
+  "step_count": 7
+}
