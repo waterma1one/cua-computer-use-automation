@@ -14,6 +14,7 @@ backoff belongs to the caller that owns the real client, not here.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from dataclasses import dataclass, replace
@@ -468,5 +469,9 @@ def discover(
         if (halt := refresh(counts=call.name != "read",
                             settle=call.name not in _NON_MUTATING_TOOLS)) is not None:
             return halt
+        if evidence is not None:
+            # Best-effort: a frame is evidence, never a reason to end the run.
+            with contextlib.suppress(StaleObservationError, SurfaceError):
+                sink.frame(surface.capture(), f"discover_{step_num:02d}")
 
     return stop("max_steps", f"reached {active_limits.max_steps}")
