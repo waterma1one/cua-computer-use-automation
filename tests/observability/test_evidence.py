@@ -211,3 +211,13 @@ def test_event_and_frame_never_write_a_declared_secret(tmp_path) -> None:
     texts = [p.read_text() for p in tmp_path.rglob("*") if p.is_file()]
     assert texts and all("s3cr3t-value" not in t for t in texts)
     assert any("[REDACTED]" in t for t in texts)
+
+
+def test_overlapping_secrets_are_masked_longest_first(tmp_path) -> None:
+    from cua.observability.evidence import EvidenceWriter, mask_secrets
+
+    assert mask_secrets("pw=hunter22", ["hunter", "hunter22", "", "hunter"]) == "pw=[REDACTED]"
+    writer = EvidenceWriter(tmp_path, secrets=["hunter", "hunter22"])
+    writer.event(kind="act", value="hunter22")
+    text = next(tmp_path.rglob("trace.jsonl")).read_text()
+    assert "22" not in text.replace("[REDACTED]", "")

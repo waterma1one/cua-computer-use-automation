@@ -431,18 +431,20 @@ def discover(
             violation = _violation(surface)
 
     if violation is not None:
-        typer.echo(f"discovery refused: allowlist violation: {violation}; nothing was saved",
-                   err=True)
+        typer.echo(writer.mask(
+            f"discovery refused: allowlist violation: {violation}; nothing was saved"
+        ), err=True)
         raise typer.Exit(code=1)
     if trace is None:
-        typer.echo(f"discovery could not open entry {target.entry!r}; nothing was saved",
-                   err=True)
+        typer.echo(writer.mask(
+            f"discovery could not open entry {target.entry!r}; nothing was saved"
+        ), err=True)
         raise typer.Exit(code=1)
     if trace.stop_reason != "finish":
-        typer.echo(
+        typer.echo(writer.mask(
             f"discovery did not finish (stop_reason={trace.stop_reason!r}: "
-            f"{trace.stop_detail}); nothing was saved", err=True,
-        )
+            f"{trace.stop_detail}); nothing was saved"
+        ), err=True)
         raise typer.Exit(code=1)
 
     provenance = Provenance(
@@ -462,7 +464,7 @@ def discover(
         )
         path = save(verified, root)
     except (CompileError, FileExistsError, ValueError) as exc:
-        typer.echo(" ".join(str(exc).split()), err=True)
+        typer.echo(writer.mask(" ".join(str(exc).split())), err=True)
         raise typer.Exit(code=1) from exc
     write_registry_entry(
         root, verified.id, verified.version, RegistryEntry(status="draft"), artifact=verified,
