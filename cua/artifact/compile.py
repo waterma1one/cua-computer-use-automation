@@ -88,8 +88,31 @@ def _holds_read_value(node: Node, read_values: frozenset[str]) -> bool:
 
 
 # Roles that label a region rather than carry its data; their text does not change with
-# the member (or other input) being looked up.
+# the member (or other input) being looked up. Preferred checkpoint fallback.
 _LABEL_ROLES = frozenset({"heading", "columnheader", "rowheader", "label"})
+
+# Roles that are controls, not part of the page's content: a link or button is a poor proof
+# that the right page loaded, so they are used only when nothing else qualifies.
+_CONTROL_ROLES = frozenset({
+    "button", "link", "menuitem", "tab", "checkbox", "radio", "switch", "combobox",
+    "textbox", "searchbox", "option",
+})
+
+
+def _is_value_independent(
+    node: Node, read_values: frozenset[str], input_examples: frozenset[str],
+) -> bool:
+    """Mechanical test for text that should not vary with the data looked up: non-empty,
+    holds no read value, no digit at all (ids, account masks, SSNs and balances all carry
+    digits) and no declared input's example value. Limit: a digit-free name can still be
+    input-specific (e.g. a person's name that is not a declared input)."""
+    text = node.name or node.value
+    if not text or _holds_read_value(node, read_values):
+        return False
+    texts = [t for t in (node.name, node.value) if t]
+    if any(ch.isdigit() for t in texts for ch in t):
+        return False
+    return not any(ex in t for t in texts for ex in input_examples)
 
 _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 
@@ -195,6 +218,7 @@ def _compile_step(
 def _compile_checkpoint(
     final_observation: Observation, checkpoint_index: int,
     read_values: frozenset[str] = frozenset(),
+    input_examples: frozenset[str] = frozenset(),
 ) -> Matcher:
     nodes = final_observation.nodes
     if not (0 <= checkpoint_index < len(nodes)):
@@ -205,20 +229,31 @@ def _compile_checkpoint(
     chosen = nodes[checkpoint_index]
     if not _holds_read_value(chosen, read_values):
         return _matcher_from_node(chosen)
-    # The checkpoint cell holds a discovered value, which differs per input. A matcher has no
-    # role-only form (a None name matches only nameless nodes), so fall back to the nearest
-    # preceding label-like node whose text is value-independent.
-    candidates = [
+    # The checkpoint holds a discovered value, which differs per input. A matcher has no
+    # role-only form (a None name matches only nameless nodes), so fall back to a
+    # value-independent node. Preference: label-role nodes; then any other non-control node;
+    # then controls. Within a tier, the nearest preceding the checkpoint, else the first.
+    independent = [
         n for n in nodes
-        if n.role in _LABEL_ROLES and n.name and not _holds_read_value(n, read_values)
+        if (n.name or n.value) and _is_value_independent(n, read_values, input_examples)
     ]
-    before = [n for n in candidates if n.index <= chosen.index]
-    pick = before[-1] if before else (candidates[0] if candidates else None)
+    tiers = (
+        [n for n in independent if n.role in _LABEL_ROLES],
+        [n for n in independent if n.role not in _LABEL_ROLES and n.role not in _CONTROL_ROLES],
+        [n for n in independent if n.role in _CONTROL_ROLES],
+    )
+    pick = None
+    for candidates in tiers:
+        if candidates:
+            before = [n for n in candidates if n.index <= chosen.index]
+            pick = before[-1] if before else candidates[0]
+            break
     if pick is None:
         raise CompileError(
             f"finish's checkpoint (node {checkpoint_index}) holds a read value, which would "
             "pin one input's data into the artifact, and the final observation has no "
-            "value-independent heading or label to use instead"
+            "value-independent node (non-empty, digit-free, free of read values and input "
+            "examples) to use instead"
         )
     return _matcher_from_node(pick)
 
@@ -267,6 +302,7 @@ def compile(
         raise CompileError("a finished trace must carry its final observation")
     checkpoint = _compile_checkpoint(
         trace.final_observation, trace.checkpoint_index, read_values,
+        frozenset(d.example_value for d in trace.declared_inputs.values() if d.example_value),
     )
 
     inputs = {_identifier(k): d.spec for k, d in trace.declared_inputs.items()}
