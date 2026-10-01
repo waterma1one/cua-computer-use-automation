@@ -343,7 +343,8 @@ def discover(
                         f"observation unchanged across {unchanged} consecutive turns")
 
         try:
-            raw = llm.step(build_messages(goal, observation, history, prompt_inputs), DISCOVERY_TOOLS)
+            raw = llm.step(
+                build_messages(goal, observation, history, prompt_inputs), DISCOVERY_TOOLS)
         except LLMError as exc:
             if (halt := failed("llm_error", step_num, str(exc))) is not None:
                 return halt
