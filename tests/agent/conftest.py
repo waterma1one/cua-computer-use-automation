@@ -1,7 +1,10 @@
 """A scripted `Surface` for the discovery loop's own tests -- no Playwright, no page."""
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
+
+import pytest
 
 from cua.surface.base import Surface
 from cua.surface.locators import synthesize
@@ -18,6 +21,26 @@ from cua.surface.models import (
 )
 
 PATH = [SurfaceSegment(kind="window", name="main")]
+
+
+@dataclass
+class VirtualClock:
+    """Advances only when slept on -- the loop's post-action settle waits in virtual time."""
+
+    now_ms: int = 0
+
+    def monotonic_ms(self) -> int:
+        return self.now_ms
+
+    def sleep_ms(self, ms: int) -> None:
+        self.now_ms += ms
+
+
+@pytest.fixture(autouse=True)
+def _virtual_default_clock(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """A test that passes no `clock` gets a virtual one, so settling never really sleeps."""
+    monkeypatch.setattr("cua.agent.loop.SYSTEM_CLOCK", VirtualClock())
+    yield
 
 
 def node(role: str, name: str | None = None, value: str | None = None, index: int = 0) -> Node:
@@ -50,19 +73,27 @@ class FakeSurface:
     expand_calls: int = 0
     act_calls: list[Action] = field(default_factory=list)
     act_on_index_calls: list[tuple[int, int, str, str | None]] = field(default_factory=list)
+    advance_on_act: bool = False
+    acts: int = 0
+    shown: int = 0
 
     def _current(self) -> list[Node]:
+        if self.advance_on_act:
+            return self.frames[self.shown]
         return self.frames[min(max(self.generation - 1, 0), len(self.frames) - 1)]
 
     def observe(self) -> Observation:
         self.observe_calls += 1
         if self.observe_calls in self.observe_errors:
             raise self.observe_errors[self.observe_calls]
-        i = min(self.generation, len(self.frames) - 1)
+        source = self.acts if self.advance_on_act else self.generation
+        i = min(source, len(self.frames) - 1)
+        self.shown = i
         self.generation += 1
         return Observation(generation=self.generation, nodes=self.frames[i], truncated=False)
 
     def act(self, action: Action) -> ActionResult:
+        self.acts += 1
         self.act_calls.append(action)
         return ActionResult(ok=self.act_ok, action=action, read_value=self.act_read_value)
 
@@ -82,6 +113,7 @@ class FakeSurface:
         if self.raise_on_act_on_index is not None:
             raise self.raise_on_act_on_index
         current = self._current()
+        self.acts += 1
         locator = synthesize(current[index], current)
         return ActionResult(
             ok=self.act_ok,
