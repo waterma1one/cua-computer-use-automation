@@ -327,6 +327,11 @@ def serve(
     uvicorn.run(create_session_app(operator_token=token, headless=False), host=host, port=port)
 
 
+# Discovery evidence can hold page content from a real application, so unlike `replay` its
+# default lives in the user's cache directory, not the current working tree.
+_DISCOVER_EVIDENCE_ROOT = Path.home() / ".cache" / "cua"
+
+
 def _violation(surface: WebSurface) -> str | None:
     try:
         return surface.allowlist_violation()
@@ -343,13 +348,18 @@ def discover(
         ..., "--policy", help="Deployment policy YAML (see policy.example.yaml)."
     ),
     evidence_root: Path = typer.Option(  # noqa: B008
-        Path("."), "--evidence-root", help="Where evidence/<run_id>/ is written."
+        _DISCOVER_EVIDENCE_ROOT, "--evidence-root",
+        help="Where evidence/<run_id>/ is written (default: per-user cache, never the repo).",
     ),
     id: str = typer.Option(..., "--id", help="The capability id to save."),  # noqa: A002
     name: str = typer.Option(..., "--name", help="The capability's human-readable name."),
     version: int = typer.Option(1, "--version"),
     input_pairs: list[str] = typer.Option(  # noqa: B008
         [], "--input", help="name=example value of a declared input, repeatable."
+    ),
+    verify_pairs: list[str] = typer.Option(  # noqa: B008
+        [], "--verify-input",
+        help="name=value used instead of the discovery value when self-verifying.",
     ),
     secret_pairs: list[str] = typer.Option(  # noqa: B008
         [], "--secret-input", help="Like --input, but the input is declared sensitive."
@@ -389,7 +399,19 @@ def discover(
                 spec=InputSpec(type="string", sensitive=sensitive), example_value=value,
             )
 
-    writer = EvidenceWriter(evidence_root)
+    verify_values = {k: d.example_value for k, d in declared.items()}
+    for pair in verify_pairs:
+        key, sep, value = pair.partition("=")
+        if not sep or key not in declared:
+            typer.echo("--verify-input must be name=value for a declared input", err=True)
+            raise typer.Exit(code=2)
+        verify_values[key] = value
+
+    writer = EvidenceWriter(
+        evidence_root,
+        secrets=[d.example_value for d in declared.values() if d.spec.sensitive]
+        + [verify_values[k] for k, d in declared.items() if d.spec.sensitive],
+    )
     target = App(vendor_product=id.split(".")[0], variant="base", surface="web", entry="/")
     with launch_page(base_url) as page:
         surface = WebSurface(page, navigation_guard=navigation_guard(policy))
@@ -435,7 +457,7 @@ def discover(
             provenance=provenance,
         )
         verified = self_verify(
-            artifact, base_url, inputs={k: d.example_value for k, d in declared.items()},
+            artifact, base_url, inputs=dict(verify_values),
             policy=policy, evidence=writer,
         )
         path = save(verified, root)
