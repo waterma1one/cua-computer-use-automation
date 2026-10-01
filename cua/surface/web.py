@@ -97,6 +97,15 @@ _INTERACTIVE_ROLES = frozenset(
     }
 )
 
+# Form controls whose readable content is their `value`. Any other node (cell, text,
+# heading, ...) has no value; what it displays is its accessible name.
+_INPUT_ROLES = frozenset(
+    {
+        "textbox", "searchbox", "combobox", "spinbutton", "checkbox",
+        "radio", "switch", "slider", "listbox",
+    }
+)
+
 
 @dataclass
 class ObservationBudget:
@@ -623,10 +632,19 @@ class WebSurface:
             elif action.kind == "wait_for":
                 handle.wait_for(state="visible")
             elif action.kind == "read":
-                # I4: the value, and only the value -- an empty field must read back empty,
-                # not its own accessible name. `result.node.value` is already `None` for a
-                # protected node (spec §3.7.1), so this never leaks a password either.
-                return ActionResult(ok=True, action=action, read_value=result.node.value)
+                # I4: an input reads its value and only its value -- an empty field must
+                # read back None, not its own accessible name. A protected node never
+                # reads anything: `node.value` is already `None` for it (spec §3.7.1), and
+                # the name branch below is closed off for it too, whatever its role.
+                node = result.node
+                if node.state.protected:
+                    read_value = None
+                elif node.role in _INPUT_ROLES:
+                    read_value = node.value
+                else:
+                    # Non-input (cell, text, heading): what it displays is its name.
+                    read_value = node.value or node.name or None
+                return ActionResult(ok=True, action=action, read_value=read_value)
             else:
                 return ActionResult(ok=False, action=action, read_value=None)
         except PlaywrightError as exc:
