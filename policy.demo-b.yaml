@@ -1,0 +1,31 @@
+# Deployment policy for `cua replay --policy <file>`. Spec §6.1: the allowlist is
+# configuration, never the artifact -- the same artifact gets different permissions in a
+# different tenant. Copy this file per instance.
+#
+# Deny rules are evaluated first and win. `/account/close` sits inside the allowed origin
+# and inside the allowed prefix `/`, and the mock application mutates state on that GET;
+# allow-only rules cannot express this.
+
+policy_mode: strict            # strict | sandbox (governs discovery, spec §6.2)
+
+# Origins are compared literally, never resolved: `http://localhost:8000` and
+# `http://127.0.0.1:8812` are different origins, and so are `http://host:80` and
+# `http://host`. Spell the entry below exactly as `--base-url` is spelled.
+allowed_origins:
+  - http://127.0.0.1:8812       # the local mock application; one entry per instance
+
+allowed_paths:
+  - /
+
+denied_paths:
+  - /account/close
+
+allowed_actions:
+  - navigate
+  - click
+  - fill
+  - select
+  - press_key
+  - wait_for
+  - read
+  - dismiss_dialog

@@ -1,0 +1,89 @@
+targets: b
+base_id: mockcu.lookup_member_savings_balance
+base_version: 2
+verified: true
+locator_overrides:
+  s5:
+    name: Account Holder ID
+insert_after:
+  s6:
+  - id: s6a
+    action: select
+    locator:
+      strategy: role_name
+      role: combobox
+      name: Branch
+      name_match: exact
+      surface_path:
+      - kind: window
+        name: main
+      - kind: frame
+        name: content
+      require:
+        visible: true
+        enabled: true
+      fallbacks: []
+      rationale: role 'combobox' with accessible name 'Branch' on variant B's branch
+        screen.
+      confidence: high
+    value:
+      literal: Main
+    risk: safe
+    expects:
+    - when:
+        strategy: role_name
+        role: button
+        name: Continue
+        name_match: exact
+      outcome: continue
+      source: authored
+      verified: true
+  - id: s6b
+    action: click
+    locator:
+      strategy: role_name
+      role: button
+      name: Continue
+      name_match: exact
+      surface_path:
+      - kind: window
+        name: main
+      - kind: frame
+        name: content
+      require:
+        visible: true
+        enabled: true
+      fallbacks: []
+      rationale: role 'button' with accessible name 'Continue' on variant B's branch
+        screen.
+      confidence: high
+    risk: safe
+    expects:
+    - when:
+        strategy: role_name
+        role: cell
+        name: Savings
+        name_match: exact
+      outcome: continue
+      source: authored
+      verified: true
+skip_steps: []
+extend_expects:
+  s4:
+  - when:
+      strategy: role_name
+      role: textbox
+      name: Account Holder ID
+      name_match: exact
+    outcome: continue
+    source: authored
+    verified: true
+  s6:
+  - when:
+      strategy: role_name
+      role: combobox
+      name: Branch
+      name_match: exact
+    outcome: continue
+    source: authored
+    verified: true
