@@ -64,7 +64,9 @@ class DiscoveryLimits:
     `dead_end_repeats` counts consecutive re-observations (after an executed action, a
     failed one, or an `expand`) whose digest equals the one before: N turns in a row that
     changed nothing on the page. Turns that never touch the surface (malformed, refused,
-    provider errors) neither advance nor reset it -- they belong to the failure counter.
+    provider errors) neither advance nor reset it -- they belong to the failure counter. A
+    successful `read` is the same: it is expected to leave the page alone, so a flow reading
+    several outputs from one static page is not mistaken for a stuck loop.
     """
 
     max_steps: int = 40
@@ -228,9 +230,12 @@ def discover(
             return stop("consecutive_failures", detail)
         return None
 
-    def reobserve(fresh: Observation) -> None:
+    def reobserve(fresh: Observation, *, counts: bool = True) -> None:
+        """Adopt `fresh`. `counts=False` (a `read`, which never changes a page by design)
+        leaves the unchanged counter exactly where it was."""
         nonlocal observation, unchanged
-        unchanged = unchanged + 1 if _digest(fresh) == _digest(observation) else 0
+        if counts:
+            unchanged = unchanged + 1 if _digest(fresh) == _digest(observation) else 0
         observation = fresh
 
     def violation_stop() -> Trace | None:
@@ -344,6 +349,6 @@ def discover(
             observation=acted_on, raw_nodes=surface.raw_snapshot(),
         ))
         sink.event(kind="action", step=step_num, tool=call.name, ok=True)
-        reobserve(surface.observe())
+        reobserve(surface.observe(), counts=call.name != "read")
 
     return stop("max_steps", f"reached {active_limits.max_steps}")
