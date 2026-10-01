@@ -1,27 +1,76 @@
 # cua
 
-Record-once, replay-many automation for applications with no API.
+Record-once, replay-many automation for applications with no API. A model explores a web
+application once; the executed trace is compiled into a reviewed capability artifact; replay then
+runs that artifact with no model, with typed inputs and outputs, a three-way result
+(`Success`, `BusinessOutcome`, `Failure`), and a human-escalation path that takes over the live
+session. The design write-up is `REPORT.md`; run evidence is `evidence/README.md`; the decision log
+is `docs/context/DECISIONS.md`.
 
-This repository is in early spike. See `docs/specs/` and `docs/plans/` for the design
-specification, decision log, and phased implementation plan.
+## Setup
 
-## Development
+Python 3.12+.
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 .venv/bin/playwright install chromium
+cp .env.example .env     # only `cua discover` needs GEMINI_API_KEY filled in
 ```
 
-Run the checks:
+`cua` below is `.venv/bin/cua`. Checks (all clean on a fresh clone):
 
 ```bash
-.venv/bin/pytest -v
+.venv/bin/pytest
 .venv/bin/ruff check .
 .venv/bin/mypy cua mockapp
 ```
 
-## Running the target mock application
+### Without live services
+
+Only `cua discover` calls a model and needs a key and network. Replay, the catalog, approval and the
+operator console need neither: the target is a local mock app, and `evidence/` plus `artifacts/`
+already hold a discovered artifact to replay.
+
+## Demo path
+
+Start both mock variants in two terminals (see below), then, from the repository root:
+
+```bash
+# 1. Discover (needs GEMINI_API_KEY): the model drives a real browser, the trace is compiled to an
+#    artifact and replayed in a fresh session before it is saved as a draft. See "Discovery".
+# 2. Approve v2 of the saved capability. A human act, never automatic; the catalog refuses drafts.
+cua approve mockcu.lookup_member_savings_balance 2 --root . --approver <your-name>
+
+# 3. Replay it, no model: typed inputs in, typed outputs out.
+cua replay mockcu.lookup_member_savings_balance 2 --root . --evidence-root . \
+  --base-url http://127.0.0.1:8811 --policy policy.demo-a.yaml \
+  --input username=teller --input password=teller-demo-pw --input member_id=12345
+#   -> {"outputs":{"balance":"4218.60"}, ...}
+
+# 4. A business outcome is a result, not a crash (exit 0): member 00000 does not exist.
+cua replay mockcu.lookup_member_savings_balance 2 --root . --evidence-root . \
+  --base-url http://127.0.0.1:8811 --policy policy.demo-a.yaml \
+  --input username=teller --input password=teller-demo-pw --input member_id=00000
+#   -> {"code":"MEMBER_NOT_FOUND", ...}
+
+# 5. The same artifact on tenant variant B (renamed field, extra branch screen), via an overlay.
+cua replay mockcu.lookup_member_savings_balance 2 --root . --evidence-root . \
+  --base-url http://127.0.0.1:8812 --policy policy.demo-b.yaml \
+  --overlay artifacts/mockcu.lookup_member_savings_balance/overlays/v2.b.yaml \
+  --input username=teller --input password=teller-demo-pw --input member_id=12345
+#   Without --overlay the same command fails closed: NO_BRANCH_MATCHED at s4.
+
+# 6. Escalation: a wrong password stalls the run, a human takes the live session and hands it back.
+PYTHONPATH=. .venv/bin/python scripts/handoff_demo.py --policy policy.demo-a.yaml
+```
+
+Step 6 drives the production session service through its HTTP routes. `cua serve` is the interactive
+form: a headed browser the operator uses, with claim and hand back through the JSON API
+(`POST /interventions/{id}/claim`, `/handback`). The script scripts only the operator's hands.
+Every replay writes `evidence/<run_id>/`.
+
+## Target mock application
 
 `mockapp/` is the target application the automation system in `cua/` drives. It ships
 as two variants of the same synthetic credit-union back office -- same routes, different
@@ -51,7 +100,7 @@ one line naming what you typed and the valid variants, and exits, instead of cra
 
 No API key or network access is required to run either variant.
 
-## Discovery demo path
+## Discovery (the only step that needs a key)
 
 `cua discover` is the only command that needs a model API key (`GEMINI_API_KEY` in `.env`).
 Replay, the catalog and the operator console run without one.
@@ -61,7 +110,7 @@ origin to `http://127.0.0.1:8811` and keep `policy_mode: strict`. From the repos
 
 ```bash
 set -a; . ./.env; set +a
-PYTHONPATH=. .venv/bin/python -c "from cua.cli import app; app()" discover \
+cua discover \
   --goal "Log in using the declared username and password inputs, then look up the member whose id is the declared member_id input and read that member's current savings balance." \
   --root . --base-url http://127.0.0.1:8811 --policy <policy-file> --evidence-root . \
   --id mockcu.lookup_member_savings_balance --name "Look up member savings balance" \
@@ -85,13 +134,11 @@ records the leak check and lists every run, failures included.
 Saved artifacts are discoverable and gated by approval. None of these commands needs an API key.
 
 ```bash
-PYTHONPATH=. .venv/bin/python -c "from cua.cli import app; app()" catalog list --root .
-PYTHONPATH=. .venv/bin/python -c "from cua.cli import app; app()" approve \
-  mockcu.lookup_member_savings_balance 1 --root . --approver <your-name>
-PYTHONPATH=. .venv/bin/python -c "from cua.cli import app; app()" catalog invoke \
-  mockcu.lookup_member_savings_balance --root . --base-url http://127.0.0.1:8811 \
-  --policy <policy-file> --input username=teller --input password=teller-demo-pw \
-  --input member_id=12345
+cua catalog list --root .          # every capability with its status (draft or approved)
+cua approve mockcu.lookup_member_savings_balance 2 --root . --approver <your-name>
+cua catalog invoke mockcu.lookup_member_savings_balance --root . \
+  --base-url http://127.0.0.1:8811 --policy policy.demo-a.yaml \
+  --input username=teller --input password=teller-demo-pw --input member_id=12345
 ```
 
 `catalog invoke` refuses a draft (exit 2, the message names `cua approve`). An irreversible
