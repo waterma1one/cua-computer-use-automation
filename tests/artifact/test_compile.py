@@ -60,15 +60,16 @@ def _trace(steps, stop_reason="finish", declared_inputs=None, checkpoint_index=0
     # so 0 is always a valid checkpoint for a test that does not care about the checkpoint
     # itself -- tests that do (test_compile_sets_the_success_checkpoint_...) build their own
     # Trace directly instead of going through this helper. final_observation is set to the
-    # last step's own observation here purely as a convenient stand-in (this helper's callers
-    # never assert on checkpoint contents); it is deliberately not what discover() itself would
+    # fixed, value-free node here (a read cell would rightly be refused as a checkpoint);
+    # it is not what discover() itself would
     # produce -- see the Trace docstring.
     return Trace(goal="find member and read balance", target=_target(),
                 declared_inputs=declared_inputs or {}, steps=steps, stop_reason=stop_reason,
                 stop_detail="done",
                 checkpoint_index=checkpoint_index if stop_reason == "finish" else None,
-                final_observation=steps[-1].observation if steps and stop_reason == "finish"
-                else None)
+                final_observation=Observation(
+                    generation=9, nodes=[node("statictext", "Done", index=0)], truncated=False,
+                ) if steps and stop_reason == "finish" else None)
 
 
 def test_compile_refuses_a_trace_that_did_not_finish() -> None:
@@ -132,8 +133,37 @@ def test_compile_binds_a_named_output_and_a_local_value_differently() -> None:
     assert artifact.steps[3].into == "_s4"
 
 
+def _compile_with_final(steps, final_nodes, checkpoint_index):
+    trace = Trace(goal="g", target=_target(), declared_inputs={
+        "member_id": DeclaredInput(spec=InputSpec(type="string"), example_value="12345")},
+        steps=steps, stop_reason="finish", stop_detail="done",
+        checkpoint_index=checkpoint_index,
+        final_observation=Observation(generation=3, nodes=final_nodes, truncated=False))
+    return compile_artifact(
+        trace, id="x", version=1, name="x", description="x", app=_target(),
+        settle=Settle(timeout_ms=1000, poll_ms=50), max_duration_ms=60000,
+        outputs={"balance": OutputSpec(type="string")}, provenance=_provenance(),
+    )
+
+
 def test_compile_derives_a_next_step_lookahead_expect_and_leaves_the_last_step_empty() -> None:
-    steps = [_fill_step(0, "12345", "Member ID"), _read_step(0, "Savings", "1234.56", "balance")]
+    steps = [_fill_step(0, "12345", "Member ID"), _fill_step(0, "x", "Memo")]
+    artifact = compile_artifact(
+        _trace(steps, declared_inputs={"member_id": DeclaredInput(
+            spec=InputSpec(type="string"), example_value="12345")}),
+        id="x", version=1, name="x", description="x", app=_target(),
+        settle=Settle(timeout_ms=1000, poll_ms=50), max_duration_ms=60000,
+        outputs={}, provenance=_provenance(),
+    )
+    assert len(artifact.steps[1].expects) == 1
+    assert artifact.steps[1].expects[0].source == "observed"
+    assert artifact.steps[1].expects[0].verified is True
+    assert artifact.steps[2].expects == []
+
+
+def test_compile_emits_no_expect_before_a_read_step() -> None:
+    # The read target's name is the discovered value; pinning it would fail any other input.
+    steps = [_fill_step(0, "12345", "Member ID"), _read_step(0, "4,218.60", "4,218.60", "balance")]
     artifact = compile_artifact(
         _trace(steps, declared_inputs={"member_id": DeclaredInput(
             spec=InputSpec(type="string"), example_value="12345")}),
@@ -141,10 +171,33 @@ def test_compile_derives_a_next_step_lookahead_expect_and_leaves_the_last_step_e
         settle=Settle(timeout_ms=1000, poll_ms=50), max_duration_ms=60000,
         outputs={"balance": OutputSpec(type="string")}, provenance=_provenance(),
     )
-    assert len(artifact.steps[1].expects) == 1
-    assert artifact.steps[1].expects[0].source == "observed"
-    assert artifact.steps[1].expects[0].verified is True
-    assert artifact.steps[2].expects == []
+    assert artifact.steps[1].expects == []
+
+
+def test_compile_never_pins_a_read_value_in_the_checkpoint() -> None:
+    read = _read_step(0, "4,218.60", "4,218.60", "balance")
+    heading = node("heading", "Account summary", index=0)
+    cell = node("cell", "4,218.60", index=1)
+    artifact = _compile_with_final([_fill_step(0, "12345", "Member ID"), read],
+                                   [heading, cell], 1)
+    checkpoint = artifact.success.checkpoint
+    assert checkpoint.name == "Account summary"
+    assert checkpoint.role == "heading"
+    assert "4,218.60" not in checkpoint.model_dump_json()
+
+
+def test_compile_refuses_a_value_only_checkpoint_with_no_stable_neighbour() -> None:
+    read = _read_step(0, "4,218.60", "4,218.60", "balance")
+    cell = node("cell", "Balance 4,218.60", index=0)
+    with pytest.raises(CompileError, match="read value"):
+        _compile_with_final([_fill_step(0, "12345", "Member ID"), read], [cell], 0)
+
+
+def test_compile_keeps_a_checkpoint_that_holds_no_read_value() -> None:
+    read = _read_step(0, "4,218.60", "4,218.60", "balance")
+    done = node("statictext", "Balance updated", index=0)
+    artifact = _compile_with_final([_fill_step(0, "12345", "Member ID"), read], [done], 0)
+    assert artifact.success.checkpoint.name == "Balance updated"
 
 
 def test_compile_sets_the_success_checkpoint_from_finishs_checkpoint_index() -> None:

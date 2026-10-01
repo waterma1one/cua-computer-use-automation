@@ -73,6 +73,16 @@ def _matcher_from_node(node: Node) -> Matcher:
     return Matcher(strategy="text", role=None, name=node.value, name_match="exact")
 
 
+def _holds_read_value(node: Node, read_values: frozenset[str]) -> bool:
+    """Whether the node's own text is, or contains, a value discovery read off the page."""
+    texts = [t for t in (node.name, node.value) if t]
+    return any(rv in t for t in texts for rv in read_values)
+
+
+# Roles that label a region rather than carry its data; their text does not change with
+# the member (or other input) being looked up.
+_LABEL_ROLES = frozenset({"heading", "columnheader", "rowheader", "label"})
+
 _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 
 
@@ -115,17 +125,18 @@ def _verify_locator(step: TraceStep) -> None:
 def _compile_step(
     step: TraceStep, next_step: TraceStep | None, declared_inputs: dict[str, DeclaredInput],
     local_bindings: dict[str, str], step_id: str, output_names: set[str],
-    declared_outputs: frozenset[str],
+    declared_outputs: frozenset[str], read_values: frozenset[str] = frozenset(),
 ) -> Step:
     _verify_locator(step)
     name = cast(ActionKind, step.tool_call.name)
 
     expects: list[Expect] = []
-    if next_step is not None:
+    # A read's target is named by the very value being discovered, so nothing may pin it.
+    if next_step is not None and next_step.tool_call.name != "read":
         next_node = next_step.observation.nodes[
             _index_arg(next_step)
         ] if "index" in next_step.tool_call.args else None
-        if next_node is not None:
+        if next_node is not None and not _holds_read_value(next_node, read_values):
             expects = [Expect(when=_matcher_from_node(next_node), outcome="continue",
                               source="observed", verified=True)]
 
@@ -162,14 +173,35 @@ def _compile_step(
                into=into)
 
 
-def _compile_checkpoint(final_observation: Observation, checkpoint_index: int) -> Matcher:
+def _compile_checkpoint(
+    final_observation: Observation, checkpoint_index: int,
+    read_values: frozenset[str] = frozenset(),
+) -> Matcher:
     nodes = final_observation.nodes
     if not (0 <= checkpoint_index < len(nodes)):
         raise CompileError(
             f"finish's checkpoint_index {checkpoint_index} is out of range for the final "
             f"observation ({len(nodes)} nodes)"
         )
-    return _matcher_from_node(nodes[checkpoint_index])
+    chosen = nodes[checkpoint_index]
+    if not _holds_read_value(chosen, read_values):
+        return _matcher_from_node(chosen)
+    # The checkpoint cell holds a discovered value, which differs per input. A matcher has no
+    # role-only form (a None name matches only nameless nodes), so fall back to the nearest
+    # preceding label-like node whose text is value-independent.
+    candidates = [
+        n for n in nodes
+        if n.role in _LABEL_ROLES and n.name and not _holds_read_value(n, read_values)
+    ]
+    before = [n for n in candidates if n.index <= chosen.index]
+    pick = before[-1] if before else (candidates[0] if candidates else None)
+    if pick is None:
+        raise CompileError(
+            f"finish's checkpoint (node {checkpoint_index}) holds a read value, which would "
+            "pin one input's data into the artifact, and the final observation has no "
+            "value-independent heading or label to use instead"
+        )
+    return _matcher_from_node(pick)
 
 
 def compile(
@@ -185,6 +217,7 @@ def compile(
     if not recorded:
         raise CompileError("no replay-vocabulary actions were recorded")
 
+    read_values = frozenset(s.read_value for s in trace.steps if s.read_value)
     local_bindings: dict[str, str] = {}
     output_names: set[str] = set()
     steps: list[Step] = []
@@ -206,14 +239,16 @@ def compile(
         next_step = recorded[i + 1] if i + 1 < len(recorded) else None
         steps.append(_compile_step(
             step, next_step, trace.declared_inputs, local_bindings, step_id, output_names,
-            frozenset(outputs),
+            frozenset(outputs), read_values,
         ))
 
     if trace.checkpoint_index is None:
         raise CompileError("a finished trace must carry finish's checkpoint_index")
     if trace.final_observation is None:
         raise CompileError("a finished trace must carry its final observation")
-    checkpoint = _compile_checkpoint(trace.final_observation, trace.checkpoint_index)
+    checkpoint = _compile_checkpoint(
+        trace.final_observation, trace.checkpoint_index, read_values,
+    )
 
     inputs = {_identifier(k): d.spec for k, d in trace.declared_inputs.items()}
     missing_outputs = set(outputs) - output_names
