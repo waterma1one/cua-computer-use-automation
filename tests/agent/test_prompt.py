@@ -2,7 +2,7 @@
 observation rendered as an indexed list."""
 from __future__ import annotations
 
-from cua.agent.prompt import build_messages, observation_message
+from cua.agent.prompt import PromptInput, build_messages, observation_message, system_message
 from cua.llm.base import Message
 from cua.surface.models import Node, NodeState, Observation
 from tests.agent.conftest import PATH, node
@@ -41,3 +41,32 @@ def test_observation_rendering_shows_index_role_name_value_state_and_truncation(
     assert "1: cell \"Savings\" = '1234.56'" in text
     assert '2: button "Post" [disabled]' in text
     assert "\n3: generic" in text
+
+
+SECRET = "hunter2-s3cret"
+USER = "teller01"
+
+
+def _prompt_inputs() -> list[PromptInput]:
+    return [PromptInput(name="user", sensitive=False, example=USER),
+            PromptInput(name="password", sensitive=True, example=SECRET)]
+
+
+def test_system_prompt_lists_names_and_never_a_sensitive_value() -> None:
+    text = system_message("Log in.", _prompt_inputs()).text
+    assert "{{user}}" in text and "{{password}}" in text
+    assert USER in text
+    assert SECRET not in text
+    assert "sensitive" in text
+    assert "literal" in text
+
+
+def test_system_prompt_without_inputs_is_unchanged() -> None:
+    assert system_message("g", None).text == system_message("g").text
+    assert "{{" not in system_message("g").text
+
+
+def test_build_messages_threads_inputs_into_the_system_message() -> None:
+    obs = Observation(generation=1, nodes=[], truncated=False)
+    messages = build_messages("g", obs, [], _prompt_inputs())
+    assert "{{password}}" in messages[0].text
