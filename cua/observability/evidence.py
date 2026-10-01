@@ -37,8 +37,11 @@ class EvidenceWriter:
     life of this writer -- every method below writes under the same run directory.
     """
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, secrets: Iterable[str] = ()) -> None:
         self._root = root
+        # Literal secret values (e.g. a discovery run's sensitive example inputs). Any
+        # occurrence in an event or a snapshot is masked before it reaches disk.
+        self._secrets = [v for v in secrets if v]
         self.run_id = mint_run_id()
         self._writer = RedactingWriter()
 
@@ -49,9 +52,22 @@ class EvidenceWriter:
         """A pointer into this run's evidence trail, stored on every `ReplayResult`."""
         return f"evidence/{self.run_id}"
 
+    def _mask_secrets(self, value: object) -> object:
+        if isinstance(value, str):
+            for secret in self._secrets:
+                value = value.replace(secret, _REDACTION_MARKER)
+            return value
+        if isinstance(value, dict):
+            return {k: self._mask_secrets(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._mask_secrets(v) for v in value]
+        return value
+
     def event(self, **fields: object) -> None:
         """Delegates to an internal `RunLog` at `evidence/<run_id>/trace.jsonl`."""
-        RunLog(self._run_dir() / "trace.jsonl").event(**fields)
+        masked = self._mask_secrets(fields)
+        assert isinstance(masked, dict)
+        RunLog(self._run_dir() / "trace.jsonl").event(**masked)
 
     def frame(self, frame: EvidenceFrame, name: str) -> None:
         """Writes one `EvidenceFrame` under `name` (E16 of phase 4: both artifacts in one
@@ -65,7 +81,7 @@ class EvidenceWriter:
             screenshots_dir = run_dir / "screenshots"
             screenshots_dir.mkdir(parents=True, exist_ok=True)
             (screenshots_dir / f"{name}.png").write_bytes(frame.image_png)
-        scrubbed = scrub_protected_values(frame.snapshot_yaml)
+        scrubbed = str(self._mask_secrets(scrub_protected_values(frame.snapshot_yaml)))
         self._writer.put_text(run_dir / "snapshots" / f"{name}.yaml", scrubbed)
 
     def write_run(
