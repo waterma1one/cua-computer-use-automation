@@ -41,8 +41,16 @@ from cua.replay.engine import replay as run_replay
 from cua.replay.result import Failure
 from cua.replay.result import Success as ReplaySuccess
 from cua.surface.base import SurfaceError
-from cua.surface.locators import resolve_against
-from cua.surface.models import Action, ActionKind, Node, Observation, Unique, is_protected_name
+from cua.surface.locators import resolve_against, synthesize_value_independent
+from cua.surface.models import (
+    Action,
+    ActionKind,
+    Locator,
+    Node,
+    Observation,
+    Unique,
+    is_protected_name,
+)
 from cua.surface.web import WebSurface, launch_page
 
 __all__ = ["CompileError", "compile", "self_verify"]
@@ -111,10 +119,10 @@ def _promote_or_refuse(
     return LiteralValue(literal=value)
 
 
-def _verify_locator(step: TraceStep) -> None:
-    if step.locator is None:
+def _verify_locator(step: TraceStep, locator: Locator | None) -> None:
+    if locator is None:
         return
-    resolution = resolve_against(step.locator, step.raw_nodes)
+    resolution = resolve_against(locator, step.raw_nodes)
     if not isinstance(resolution, Unique):
         raise CompileError(
             f"step {step.index}'s locator does not resolve uniquely against its own "
@@ -127,8 +135,19 @@ def _compile_step(
     local_bindings: dict[str, str], step_id: str, output_names: set[str],
     declared_outputs: frozenset[str], read_values: frozenset[str] = frozenset(),
 ) -> Step:
-    _verify_locator(step)
     name = cast(ActionKind, step.tool_call.name)
+    locator = step.locator
+    if name == "read" and _holds_read_value(
+        step.observation.nodes[_index_arg(step)], read_values,
+    ):
+        # The target is named by the value being read, which differs per input, so locate
+        # it by role and position instead of by text. The observation is filtered and
+        # renumbered, so find the same node in the raw snapshot through the locator that
+        # was synthesized for it.
+        target = resolve_against(step.locator, step.raw_nodes) if step.locator else None
+        if isinstance(target, Unique):
+            locator = synthesize_value_independent(target.node, step.raw_nodes)
+    _verify_locator(step, locator)
 
     expects: list[Expect] = []
     # A read's target is named by the very value being discovered, so nothing may pin it.
@@ -168,7 +187,7 @@ def _compile_step(
         elif step.read_value is not None:
             local_bindings[step_id] = step.read_value
 
-    return Step(id=step_id, action=name, locator=step.locator, value=value,
+    return Step(id=step_id, action=name, locator=locator, value=value,
                risk=classify(name, node.name), expects=expects, extract=extract, parse=parse,
                into=into)
 
