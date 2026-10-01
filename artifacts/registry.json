@@ -1,17 +1,36 @@
 {
   "mockcu.lookup_member_savings_balance": {
     "1": {
+      "approved_at": null,
+      "approver": null,
+      "assisted_replays": 0,
       "replays": 0,
       "requires_human_approval": true,
+      "sandbox_discovered": false,
       "score": null,
       "status": "draft",
+      "successes": 0
+    },
+    "2": {
+      "approved_at": "2026-10-01T21:52:08.246621+00:00",
+      "approver": "Aditya Singh",
+      "assisted_replays": 0,
+      "replays": 0,
+      "requires_human_approval": true,
+      "sandbox_discovered": false,
+      "score": null,
+      "status": "approved",
       "successes": 0
     }
   },
   "mockcu.open_subaccount": {
     "1": {
+      "approved_at": null,
+      "approver": null,
+      "assisted_replays": 0,
       "replays": 0,
       "requires_human_approval": true,
+      "sandbox_discovered": false,
       "score": null,
       "status": "draft",
       "successes": 0
