@@ -1092,3 +1092,18 @@ itself demonstrate escalation. Run `run-20261001182705-3573`, whose goal require
 did: refused at step 8, no `POST /subaccount/post` reached the mock app.
 **Open for the owner:** whether this satisfies criterion 3 or discovery should call a real
 escalation path.
+
+## D62 — `cua discover` escalates at a non-safe step instead of only refusing
+Under `policy_mode: strict` the loop, given an `escalator` (the structural `Escalator` Protocol
+from `cua.replay.engine`; `cua.session` is not imported), calls
+`escalate(step_id="discover_NN", kind="POLICY_BLOCKED", acted=False)` before the surface is
+touched, emits an `escalation` event and a frame, and ends the run with stop reason and outcome
+`escalated`. Whatever the handback, the action is never executed and no artifact is saved. With
+no escalator the D61 path is unchanged (`policy_refused`, then `give_up`, outcome `refused`).
+`cua discover` passes a stub that records the escalation and returns `CannotResolve`;
+`result.json` carries an `escalations` list. No new `FailureKind` was needed.
+**Why:** owner decision on phase 8 criterion 3: discovery should call a real escalation path
+(D61 left this open), not only refuse.
+**Cost accepted:** the stub is non-interactive, so discovery never waits for or acts on a human
+answer; a real operator handback (resolve, resume) exists only in replay. A `Resolved` answer
+still ends discovery.

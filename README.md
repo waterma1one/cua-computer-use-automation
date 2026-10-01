@@ -73,6 +73,9 @@ The model sees `{{password}}`-style placeholders, never the secret. The artifact
 from the executed trace, then replayed in a fresh session with the `--verify-input` values; it
 is saved as `artifacts/<id>/v1.yaml` only if that replay passes. Evidence goes to
 `evidence/<run_id>/` (`run.json` with token counts, `result.json`, `artifact.yaml`,
-`trace.jsonl`, screenshots, snapshots). A goal that needs the irreversible Post is refused
-under `strict` policy and the run ends with outcome `refused`. `evidence/GREP-CHECK.md`
+`trace.jsonl`, screenshots, snapshots). A goal that needs the irreversible Post is escalated
+under `strict` policy: discovery holds the action, records the escalation (event, frame,
+`result.json`), never performs it, and the run ends with outcome `escalated` and nothing saved.
+The discovery escalator is non-interactive and declines; a real operator handback is
+replay-only. `evidence/GREP-CHECK.md`
 records the leak check and lists every run, failures included.
