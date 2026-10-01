@@ -133,3 +133,35 @@ def test_self_verify_writes_evidence_through_the_supplied_sink(live_mockapp, tmp
     writer = EvidenceWriter(tmp_path)
     self_verify(_artifact(), live_mockapp, inputs=INPUTS, evidence=writer)
     assert any(tmp_path.rglob("*.jsonl"))
+
+
+def _origin_refusing_policy() -> PolicyConfig:
+    # Passes every pre-check (validate and `permits_path` look at paths and actions only)
+    # but the navigation guard refuses the entry URL's origin at runtime.
+    return PolicyConfig(allowed_origins=["http://127.0.0.1:1"], allowed_paths=["/"],
+                        allowed_actions=["click", "fill", "navigate"])
+
+
+def test_self_verify_reports_a_guard_refused_entry_as_an_allowlist_violation(
+    live_mockapp,
+) -> None:
+    # D40: a recorded violation outranks the generic "could not open entry" reading.
+    with pytest.raises(CompileError) as caught:
+        self_verify(_artifact(), live_mockapp, inputs=INPUTS, policy=_origin_refusing_policy())
+    message = str(caught.value)
+    assert "allowlist violation" in message
+    assert "is not an allowed origin" in message
+    assert "could not open entry" not in message
+
+
+def test_self_verify_records_an_entry_violation_in_the_evidence_sink(
+    live_mockapp, tmp_path,
+) -> None:
+    from cua.observability.evidence import EvidenceWriter
+
+    writer = EvidenceWriter(tmp_path)
+    with pytest.raises(CompileError):
+        self_verify(_artifact(), live_mockapp, inputs=INPUTS,
+                    policy=_origin_refusing_policy(), evidence=writer)
+    events = "".join(p.read_text() for p in tmp_path.rglob("*.jsonl"))
+    assert '"allowlist_violation"' in events
