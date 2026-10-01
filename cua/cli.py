@@ -39,16 +39,18 @@ from cua.artifact.compile import compile as compile_artifact
 from cua.artifact.models import App, Artifact, InputSpec, Provenance, Settle
 from cua.artifact.store import RegistryEntry, load, read_registry, save, write_registry_entry
 from cua.artifact.validate import validate
+from cua.llm.base import LLMClient, usage_of
 from cua.llm.gemini import LLMError, load_gemini_client_from_env
+from cua.llm.pricing import estimate_cost_usd
 from cua.llm.retry import RetryingClient
 from cua.observability.evidence import EvidenceWriter
 from cua.policy.allowlist import navigation_guard
-from cua.policy.config import load_policy
+from cua.policy.config import PolicyConfig, load_policy
 from cua.replay.engine import replay as run_replay
 from cua.replay.engine import validate_inputs
 from cua.replay.result import Failure, Mode, mint_run_id
 from cua.session.service import create_app as create_session_app
-from cua.surface.base import SurfaceError
+from cua.surface.base import StaleObservationError, SurfaceError
 from cua.surface.models import Action
 from cua.surface.web import WebSurface, launch_page
 
@@ -396,7 +398,9 @@ def discover(
 
     The only command that needs a model API key (`GEMINI_API_KEY`, exit 2 if absent) or
     network beyond the target app (RULES.md S7). Every step is written to
-    `evidence/<run_id>/trace.jsonl` as it happens, and the saved artifact's
+    `evidence/<run_id>/trace.jsonl` as it happens; `run.json` (with token counts and cost),
+    `result.json`, per-step screenshots/snapshots and, when saved, `artifact.yaml` are
+    written on every path, refusals included. The saved artifact's
     `Provenance.trace_ref` names that run. Never marks anything `approved` (D9): approval
     is a separate, deliberate `cua approve`. Any refusal (unfinished run, uncompilable
     trace, failed self-verification) is a one-line message and exit 1, never a traceback.
@@ -438,6 +442,54 @@ def discover(
         secrets=[d.example_value for d in declared.values() if d.spec.sensitive]
         + [verify_values[k] for k, d in declared.items() if d.spec.sensitive],
     )
+    started_at = datetime.now(UTC)
+    # What `result.json` will say. Updated as the run progresses; written in `finally`, so
+    # a refusal or failure leaves the same audit pair a success does (phase 8, criterion 1).
+    state: dict[str, object] = {
+        "outcome": "failed", "stop_reason": None, "stop_detail": "", "verified": False,
+        "artifact": None, "failure_message": None,
+    }
+    try:
+        _discover_body(
+            goal, root, base_url, policy, llm, declared, verify_values, writer, state,
+            id=id, name=name, version=version,
+        )
+    finally:
+        _write_discovery_evidence(
+            writer, llm=llm, state=state, goal=goal, id=id, name=name, base_url=base_url,
+            policy=policy, declared=declared, started_at=started_at,
+        )
+
+
+def _write_discovery_evidence(
+    writer: EvidenceWriter, *, llm: LLMClient, state: dict[str, object], goal: str, id: str,  # noqa: A002
+    name: str, base_url: str, policy: PolicyConfig, declared: dict[str, DeclaredInput],
+    started_at: datetime,
+) -> None:
+    step_count = cast(int, state.get("step_count", 0))
+    usage = usage_of(llm)
+    model = str(getattr(llm, "model", "unknown"))
+    cost, note = estimate_cost_usd(model, usage)
+    writer.write_discovery_run(
+        goal=goal, capability={"id": id, "name": name},
+        inputs={k: d.example_value for k, d in declared.items()},
+        input_specs={k: d.spec for k, d in declared.items()},
+        policy_mode=policy.policy_mode, base_url=base_url, model=model,
+        tokens={"prompt": usage.prompt, "completion": usage.completion, "total": usage.total},
+        estimated_cost_usd=cost, cost_note=note, step_count=step_count,
+        started_at=started_at.isoformat(), ended_at=datetime.now(UTC).isoformat(),
+    )
+    writer.write_discovery_result(state)
+
+
+def _discover_body(
+    goal: str, root: Path, base_url: str, policy: PolicyConfig, llm: LLMClient,
+    declared: dict[str, DeclaredInput], verify_values: dict[str, str],
+    writer: EvidenceWriter, state: dict[str, object], *,
+    id: str, name: str, version: int,  # noqa: A002
+) -> None:
+    """Everything after the evidence writer exists. Records into `state` as it goes;
+    every refusal is a `typer.Exit(1)`."""
     target = App(vendor_product=id.split(".")[0], variant="base", surface="web", entry="/")
     with launch_page(base_url) as page:
         surface = WebSurface(page, navigation_guard=navigation_guard(policy))
@@ -455,26 +507,40 @@ def discover(
                 goal, target, surface, policy, llm, declared_inputs=declared, evidence=writer,
             )
             violation = _violation(surface)
+        # The page as discovery left it, so even a run with no successful step has a frame.
+        with contextlib.suppress(SurfaceError, StaleObservationError):
+            writer.frame(surface.capture(), "discover_final")
 
+    state["step_count"] = len(trace.steps) if trace is not None else 0
+    if trace is not None:
+        state["stop_reason"] = trace.stop_reason
+        state["stop_detail"] = trace.stop_detail
     if violation is not None:
-        typer.echo(writer.mask(
+        state.update(outcome="refused", stop_reason="allowlist_violation",
+                     stop_detail=f"allowlist violation: {violation}")
+        typer.echo(writer.scrub(
             f"discovery refused: allowlist violation: {violation}; nothing was saved"
         ), err=True)
         raise typer.Exit(code=1)
     if trace is None:
-        typer.echo(writer.mask(
+        state.update(outcome="failed", stop_reason="entry_unreachable",
+                     stop_detail=f"could not open entry {target.entry!r}")
+        typer.echo(writer.scrub(
             f"discovery could not open entry {target.entry!r}; nothing was saved"
         ), err=True)
         raise typer.Exit(code=1)
     if trace.stop_reason != "finish":
-        typer.echo(writer.mask(
+        state["outcome"] = {
+            "give_up": "refused", "dead_end": "dead_end",
+        }.get(trace.stop_reason, "failed")
+        typer.echo(writer.scrub(
             f"discovery did not finish (stop_reason={trace.stop_reason!r}: "
             f"{trace.stop_detail}); nothing was saved"
         ), err=True)
         raise typer.Exit(code=1)
 
     provenance = Provenance(
-        discovered_at=datetime.now(UTC), model=llm.model,
+        discovered_at=datetime.now(UTC), model=str(getattr(llm, "model", "unknown")),
         policy_mode=policy.policy_mode, provider_retention="training_permitted",
         run_id=writer.run_id, trace_ref=f"{writer.evidence_ref()}/trace.jsonl",
     )
@@ -492,9 +558,16 @@ def discover(
         _refuse_secret_in_artifact(verified, writer)
         path = save(verified, root)
     except (CompileError, FileExistsError, ValueError) as exc:
-        typer.echo(" ".join(writer.mask(str(exc)).split()), err=True)
+        message = " ".join(writer.scrub(str(exc)).split())
+        state.update(outcome="failed", failure_message=message)
+        typer.echo(message, err=True)
         raise typer.Exit(code=1) from exc
     write_registry_entry(
         root, verified.id, verified.version, RegistryEntry(status="draft"), artifact=verified,
+    )
+    writer.write_artifact(verified)
+    state.update(
+        outcome="saved", verified=verified.verified,
+        artifact={"id": verified.id, "version": verified.version, "path": str(path)},
     )
     typer.echo(f"saved {path}, verified={verified.verified}")
