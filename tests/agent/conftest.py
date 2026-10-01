@@ -34,6 +34,8 @@ class FakeSurface:
     `observe()` most recently returned (this double has no separate filtered/unfiltered
     distinction -- `WebSurface`'s own tests in Task 1 cover that split for real).
     `raise_on_act_on_index`, when set, makes `act_on_index` raise instead of returning.
+    `observe_errors` maps a 1-based `observe()` call number to the exception that call
+    raises; `raise_on_expand` makes `expand` raise (before it observes).
     """
 
     frames: list[list[Node]]
@@ -41,6 +43,9 @@ class FakeSurface:
     act_read_value: str | None = None
     violation: str | None = None
     raise_on_act_on_index: Exception | None = None
+    raise_on_expand: Exception | None = None
+    observe_errors: dict[int, Exception] = field(default_factory=dict)
+    observe_calls: int = 0
     generation: int = 0
     expand_calls: int = 0
     act_calls: list[Action] = field(default_factory=list)
@@ -50,6 +55,9 @@ class FakeSurface:
         return self.frames[min(max(self.generation - 1, 0), len(self.frames) - 1)]
 
     def observe(self) -> Observation:
+        self.observe_calls += 1
+        if self.observe_calls in self.observe_errors:
+            raise self.observe_errors[self.observe_calls]
         i = min(self.generation, len(self.frames) - 1)
         self.generation += 1
         return Observation(generation=self.generation, nodes=self.frames[i], truncated=False)
@@ -83,6 +91,8 @@ class FakeSurface:
 
     def expand(self) -> Observation:
         self.expand_calls += 1
+        if self.raise_on_expand is not None:
+            raise self.raise_on_expand
         return self.observe()
 
     def raw_snapshot(self) -> list[Node]:

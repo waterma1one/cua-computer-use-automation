@@ -209,6 +209,71 @@ def test_a_surface_exception_is_a_failed_turn_and_the_loop_re_observes(exc: Exce
     assert surface.act_on_index_calls[0][0] < surface.act_on_index_calls[1][0]
 
 
+@pytest.mark.parametrize("exc", [StaleObservationError("stale"), SurfaceError("boom")])
+def test_a_failing_initial_observe_returns_a_trace_instead_of_raising(exc: Exception) -> None:
+    surface = FakeSurface(frames=[[node("button", "X", index=0)]], observe_errors={1: exc})
+    trace = discover("goal", _target(), surface, _policy(), FakeClient(script=[]))
+    assert trace.stop_reason == "consecutive_failures"
+    assert "initial observe failed" in trace.stop_detail
+    assert trace.steps == []
+    assert trace.final_observation is None
+
+
+def test_an_initial_observe_error_behind_an_allowlist_violation_names_the_violation() -> None:
+    surface = FakeSurface(frames=[[node("button", "X", index=0)]], violation="off-allowlist",
+                          observe_errors={1: SurfaceError("frozen")})
+    trace = discover("goal", _target(), surface, _policy(), FakeClient(script=[]))
+    assert trace.stop_reason == "consecutive_failures"
+    assert "allowlist violation: off-allowlist" in trace.stop_detail
+
+
+@pytest.mark.parametrize("exc", [StaleObservationError("stale"), SurfaceError("boom")])
+def test_an_expand_error_is_a_failed_turn_not_a_crash(exc: Exception) -> None:
+    surface = FakeSurface(frames=[[node("button", "X", index=0)]], raise_on_expand=exc)
+    llm = FakeClient(script=[ToolCall(id=str(i), name="expand", args={}) for i in range(3)])
+    trace = discover("goal", _target(), surface, _policy(), llm,
+                     limits=DiscoveryLimits(max_consecutive_failures=2))
+    assert trace.stop_reason == "consecutive_failures"
+    assert surface.expand_calls == 2
+
+
+def test_an_expand_error_behind_an_allowlist_violation_stops_with_it() -> None:
+    surface = FakeSurface(frames=[[node("button", "X", index=0)]], violation="off-allowlist",
+                          raise_on_expand=SurfaceError("frozen"))
+    llm = FakeClient(script=[ToolCall(id="1", name="expand", args={})])
+    trace = discover("goal", _target(), surface, _policy(), llm)
+    assert "allowlist violation" in trace.stop_detail
+
+
+def test_a_reobserve_failing_inside_the_error_handler_stops_with_a_recorded_reason() -> None:
+    surface = FakeSurface(frames=[[node("button", "X", index=0)]],
+                          raise_on_act_on_index=StaleObservationError("stale"),
+                          observe_errors={2: SurfaceError("gone")})
+    llm = FakeClient(script=[ToolCall(id="1", name="click", args={"index": 0})])
+    trace = discover("goal", _target(), surface, _policy(), llm)
+    assert trace.stop_reason == "consecutive_failures"
+    assert "re-observing" in trace.stop_detail
+    assert trace.final_observation is not None
+
+
+def test_a_reobserve_failing_after_a_failed_action_stops_with_a_recorded_reason() -> None:
+    surface = FakeSurface(frames=[[node("button", "X", index=0)]], act_ok=False,
+                          observe_errors={2: SurfaceError("gone")})
+    llm = FakeClient(script=[ToolCall(id="1", name="click", args={"index": 0})])
+    trace = discover("goal", _target(), surface, _policy(), llm)
+    assert trace.stop_reason == "consecutive_failures"
+    assert "re-observing" in trace.stop_detail
+
+
+def test_a_reobserve_failing_after_a_successful_action_keeps_the_recorded_step() -> None:
+    surface = FakeSurface(frames=[[node("button", "X", index=0)]],
+                          observe_errors={2: StaleObservationError("stale")})
+    llm = FakeClient(script=[ToolCall(id="1", name="click", args={"index": 0})])
+    trace = discover("goal", _target(), surface, _policy(), llm)
+    assert trace.stop_reason == "consecutive_failures"
+    assert len(trace.steps) == 1
+
+
 def test_an_allowlist_violation_stops_the_run_immediately() -> None:
     surface = FakeSurface(frames=[[node("link", "Elsewhere", index=0)]],
                           violation="navigated off-allowlist")
