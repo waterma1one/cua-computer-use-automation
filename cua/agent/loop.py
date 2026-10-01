@@ -212,7 +212,19 @@ def discover(
     consecutive_failures = 0
     unchanged = 0
     start_ms = active_clock.monotonic_ms()
-    observation = surface.observe()
+    try:
+        observation = surface.observe()
+    except (StaleObservationError, SurfaceError) as exc:
+        # Nothing was ever seen, so there is no observation to hand back. D40: an allowlist
+        # violation behind the error is named as such.
+        violation = surface.allowlist_violation()
+        detail = (f"allowlist violation: {violation}" if violation is not None
+                  else f"initial observe failed: {exc}")
+        sink.event(kind="discovery_stop", reason="consecutive_failures", detail=detail,
+                   step_count=0)
+        return Trace(goal=goal, target=target, declared_inputs=declared, steps=steps,
+                     stop_reason="consecutive_failures", stop_detail=detail,
+                     final_observation=None)
 
     def stop(reason: StopReason, detail: str, *, checkpoint_index: int | None = None) -> Trace:
         sink.event(kind="discovery_stop", reason=reason, detail=detail, step_count=len(steps))
@@ -243,6 +255,22 @@ def discover(
         if violation is None:
             return None
         return stop("consecutive_failures", f"allowlist violation: {violation}")
+
+    def surface_stop(exc: Exception, doing: str) -> Trace:
+        """The surface raised while the loop was only looking (observe, snapshot) -- there is
+        nothing to retry against, so the run ends with a recorded reason, never a raise."""
+        return violation_stop() or stop("consecutive_failures",
+                                        f"surface error while {doing}: {exc}")
+
+    def refresh(*, counts: bool = True) -> Trace | None:
+        """Re-observe after a turn. Returns a stopping `Trace` if the surface cannot be
+        observed, `None` once `observation` is current."""
+        try:
+            fresh = surface.observe()
+        except (StaleObservationError, SurfaceError) as exc:
+            return surface_stop(exc, "re-observing")
+        reobserve(fresh, counts=counts)
+        return None
 
     for step_num in range(1, active_limits.max_steps + 1):
         if active_clock.monotonic_ms() - start_ms > active_limits.max_duration_ms:
@@ -284,7 +312,17 @@ def discover(
         if call.name == "give_up":
             return stop("give_up", str(call.args["reason"]))
         if call.name == "expand":
-            reobserve(surface.expand())
+            try:
+                expanded = surface.expand()
+            except (StaleObservationError, SurfaceError) as exc:
+                if (halt := violation_stop()) is not None:
+                    return halt
+                history.append(Message(role="tool", text=f"error: {exc}", tool_name="expand",
+                                       tool_call_id=call.id))
+                if (halt := failed("failed_call", step_num, str(exc))) is not None:
+                    return halt
+                continue
+            reobserve(expanded)
             history.append(Message(role="tool", text="expanded", tool_name="expand",
                                    tool_call_id=call.id))
             sink.event(kind="expand", step=step_num)
@@ -321,7 +359,8 @@ def discover(
                 return halt
             history.append(Message(role="tool", text=f"error: {exc}", tool_name=call.name,
                                    tool_call_id=call.id))
-            reobserve(surface.observe())
+            if (halt := refresh()) is not None:
+                return halt
             if (halt := failed("failed_call", step_num, str(exc))) is not None:
                 return halt
             continue
@@ -335,20 +374,26 @@ def discover(
         ))
 
         if not action_result.ok:
-            reobserve(surface.observe())
+            if (halt := refresh()) is not None:
+                return halt
             if (halt := failed("failed_call", step_num,
                                f"{call.name} reported ok=False")) is not None:
                 return halt
             continue
 
+        try:
+            raw_nodes = surface.raw_snapshot()
+        except (StaleObservationError, SurfaceError) as exc:
+            return surface_stop(exc, "snapshotting")
         consecutive_failures = 0
         steps.append(TraceStep(
             index=step_num, tool_call=call,
             discovery_only=call.name in DISCOVERY_ONLY_TOOL_NAMES, human_origin=False,
             ok=True, read_value=action_result.read_value, locator=action_result.action.locator,
-            observation=acted_on, raw_nodes=surface.raw_snapshot(),
+            observation=acted_on, raw_nodes=raw_nodes,
         ))
         sink.event(kind="action", step=step_num, tool=call.name, ok=True)
-        reobserve(surface.observe(), counts=call.name != "read")
+        if (halt := refresh(counts=call.name != "read")) is not None:
+            return halt
 
     return stop("max_steps", f"reached {active_limits.max_steps}")
