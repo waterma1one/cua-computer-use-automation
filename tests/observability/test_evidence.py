@@ -199,3 +199,15 @@ def test_a_non_sensitive_input_that_is_account_shaped_is_masked_in_run_json(tmp_
                      policy_mode="strict")
     data = json.loads((tmp_path / "evidence" / writer.run_id / "run.json").read_text())
     assert data["inputs"] == {"acct": "********5512", "member_id": "12345"}
+
+
+def test_event_and_frame_never_write_a_declared_secret(tmp_path) -> None:
+    from cua.observability.evidence import EvidenceWriter
+    from cua.surface.models import EvidenceFrame
+
+    writer = EvidenceWriter(tmp_path, secrets=["s3cr3t-value"])
+    writer.event(kind="act", args={"value": "s3cr3t-value", "nested": ["x s3cr3t-value y"]})
+    writer.frame(EvidenceFrame(generation=1, snapshot_yaml="- textbox: s3cr3t-value\n"), "f")
+    texts = [p.read_text() for p in tmp_path.rglob("*") if p.is_file()]
+    assert texts and all("s3cr3t-value" not in t for t in texts)
+    assert any("[REDACTED]" in t for t in texts)
