@@ -214,3 +214,5 @@ def test_a_compile_error_is_masked_before_whitespace_is_collapsed(
     assert result.exit_code == 1
     assert "spaces" not in result.output
     assert "newline" not in result.output
+    assert "cannot compile near" in result.output
+    assert "[REDACTED]" in result.output
