@@ -1,0 +1,16 @@
+{"kind": "action", "step": 1, "tool": "fill", "ok": true}
+{"kind": "action", "step": 2, "tool": "fill", "ok": true}
+{"kind": "action", "step": 3, "tool": "click", "ok": true}
+{"kind": "action", "step": 4, "tool": "fill", "ok": true}
+{"kind": "action", "step": 5, "tool": "click", "ok": true}
+{"kind": "action", "step": 6, "tool": "click", "ok": true}
+{"kind": "action", "step": 7, "tool": "click", "ok": true}
+{"kind": "discovery_stop", "reason": "finish", "detail": "Successfully logged in, searched for member 12345, opened a new savings sub-account, and reached the confirmation screen.", "step_count": 7}
+{"kind": "step_started", "step_id": "s1", "action": "navigate", "risk": "safe"}
+{"kind": "step_started", "step_id": "s2", "action": "fill", "risk": "safe"}
+{"kind": "step_started", "step_id": "s3", "action": "fill", "risk": "safe"}
+{"kind": "step_started", "step_id": "s4", "action": "click", "risk": "safe"}
+{"kind": "step_started", "step_id": "s5", "action": "fill", "risk": "safe"}
+{"kind": "step_started", "step_id": "s6", "action": "click", "risk": "safe"}
+{"kind": "step_started", "step_id": "s7", "action": "click", "risk": "safe"}
+{"kind": "step_started", "step_id": "s8", "action": "click", "risk": "safe"}

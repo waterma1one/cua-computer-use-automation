@@ -1,0 +1,13 @@
+{
+  "outcome": "saved",
+  "stop_reason": "finish",
+  "stop_detail": "Reached the confirmation screen for opening a new savings sub-account for member 12345, without submitting the final Post button.",
+  "verified": true,
+  "artifact": {
+    "id": "mockcu.open_subaccount",
+    "version": 1,
+    "path": "artifacts/mockcu.open_subaccount/v1.yaml"
+  },
+  "failure_message": null,
+  "step_count": 8
+}

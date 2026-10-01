@@ -1,0 +1,30 @@
+- document:
+  - iframe
+  - iframe
+- document:
+  - table:
+    - rowgroup:
+      - row "Meridian Credit Union":
+        - cell "Meridian Credit Union"
+      - row "Member Search":
+        - cell "Member Search":
+          - link "Member Search":
+            - /url: /search
+      - row "Account Servicing":
+        - cell "Account Servicing":
+          - link "Account Servicing":
+            - /url: /servicing
+- document:
+  - text: Open sub-account Member 12345 Dana Whitfield
+  - table:
+    - rowgroup:
+      - row "Account type Savings":
+        - cell "Account type"
+        - cell "Savings":
+          - combobox "Account type":
+            - option "Savings" [selected]
+            - option "Checking"
+            - option "Money Market"
+      - row "Continue":
+        - cell "Continue":
+          - button "Continue"

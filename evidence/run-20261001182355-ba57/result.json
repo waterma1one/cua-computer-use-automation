@@ -1,0 +1,13 @@
+{
+  "outcome": "saved",
+  "stop_reason": "finish",
+  "stop_detail": "Successfully logged in, looked up member {{member_id}}, and read their current savings balance: 4,218.60",
+  "verified": true,
+  "artifact": {
+    "id": "mockcu.lookup_member_savings_balance",
+    "version": 1,
+    "path": "artifacts/mockcu.lookup_member_savings_balance/v1.yaml"
+  },
+  "failure_message": null,
+  "step_count": 6
+}

@@ -1,0 +1,9 @@
+{"kind": "action", "step": 1, "tool": "fill", "ok": true}
+{"kind": "action", "step": 2, "tool": "fill", "ok": true}
+{"kind": "action", "step": 3, "tool": "click", "ok": true}
+{"kind": "action", "step": 4, "tool": "fill", "ok": true}
+{"kind": "action", "step": 5, "tool": "click", "ok": true}
+{"kind": "action", "step": 6, "tool": "click", "ok": true}
+{"kind": "action", "step": 7, "tool": "click", "ok": true}
+{"kind": "policy_refused", "step": 8, "detail": "'click' on 'Post' is classified 'irreversible'; refused under policy_mode=strict"}
+{"kind": "discovery_stop", "reason": "give_up", "detail": "The final Post button click is classified as irreversible under policy_mode=strict, so it cannot be executed.", "step_count": 7}
