@@ -1108,3 +1108,34 @@ no escalator the D61 path is unchanged (`policy_refused`, then `give_up`, outcom
 **Cost accepted:** the stub is non-interactive, so discovery never waits for or acts on a human
 answer; a real operator handback (resolve, resume) exists only in replay. A `Resolved` answer
 still ends discovery.
+
+## D63 — `ToolDefinition` wraps the exported schema; `invoke` resolves a version
+`ToolDefinition` is a frozen dataclass holding the `export_tool_schema` dict unmodified (the
+registry exports once and caches, so `describe(id).schema is` that dict), with `irreversible` and
+`status` as separate attributes. `invoke`/`describe` resolve the latest `approved` version, else the
+latest draft (which `invoke` then refuses); an optional `version=` overrides.
+**Why:** criterion 1 asks for one schema, not a hand-kept copy.
+
+## D64 — Irreversible `invoke` creates an intervention and never executes
+`invoke` takes an injected `Interventions`. For a capability with an irreversible step it creates an
+intervention (`reason_code=POLICY_BLOCKED`, `acted=False`, empty refs, allowed actions
+`approve`/`deny`) and returns without touching a surface. The CLI prints the intervention JSON and
+exits non-zero. No cross-process bridge: `Interventions` is in-memory (D34).
+**Cost accepted:** executing after a human approves is a documented seam, not built.
+
+## D65 — Catalog owns an in-memory idempotency ledger
+Key `(capability, version, key)`, injectable `Clock`, 24h retention window, burned at request time
+(nothing else burns it when invoke only requests). The engine's own key set stays as a second line.
+**Cost accepted:** protects our side only, and is lost on process exit.
+
+## D66 — Stability and approval bookkeeping lives in `RegistryEntry`
+Adds defaulted `approver`, `approved_at`, `sandbox_discovered`, `assisted_replays` to `RegistryEntry`
+(`cua/artifact/store.py`, outside the phase card's file list; defaults keep the committed
+`registry.json` loadable). Score = `successes / replays` over unassisted runs. Assisted runs bump
+`assisted_replays` only. `BusinessOutcome` and `Failure` count as an unassisted replay, no success.
+**Known gap, not fixed (owner ruling):** the engine returns `assistance="none"` after a `Resolved`
+handback, so a human-assisted run can be counted clean. Belongs in REPORT.md.
+
+## D67 — Catalog refuses with `CatalogRefusal`, and refuses all drafts
+`CatalogRefusal` carries a message naming `cua approve <id> <version>`; the CLI exits 2. Safe-only
+drafts are refused too, stricter than the engine, which lets them run.
