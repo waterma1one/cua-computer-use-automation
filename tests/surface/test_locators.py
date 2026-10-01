@@ -337,3 +337,81 @@ def test_matches_is_what_matches_locator_now_delegates_to() -> None:
     loc = Locator(role="button", name="Search", surface_path=PATH, rationale="x", confidence="high")
     assert matches(n, strategy=loc.strategy, role=loc.role, name=loc.name,
                   name_match=loc.name_match) == _matches_locator(n, loc)
+
+
+# name_match="any": matches whatever the accessible name is, so a locator can identify a
+# control by role and position alone.
+def test_name_matches_any_accepts_every_name_including_none() -> None:
+    from cua.surface.locators import name_matches
+
+    assert name_matches("4,218.60", None, "any")
+    assert name_matches(None, None, "any")
+    assert name_matches("", None, "any")
+
+
+def test_matches_any_still_checks_the_role() -> None:
+    n = node(0, "cell", "4,218.60")
+    assert matches(n, strategy="role_name", role="cell", name=None, name_match="any")
+    assert not matches(n, strategy="role_name", role="button", name=None, name_match="any")
+
+
+def test_locator_any_requires_a_role_and_no_name() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Locator(strategy="text", role=None, name=None, name_match="any",
+                surface_path=PATH, rationale="x", confidence="low")
+    with pytest.raises(ValidationError):
+        Locator(strategy="role_name", role="cell", name="1", name_match="any",
+                surface_path=PATH, rationale="x", confidence="low")
+
+
+def _balance_table() -> list[Node]:
+    rows = [("Checking", "********1111-01", "4,218.60"),
+            ("Savings", "********7431-01", "89,410.22")]
+    out: list[Node] = []
+    for r in rows:
+        out.append(node(len(out), "row", f"{r[0]} {r[1]} {r[2]} Select", depth=0))
+        for c in r:
+            out.append(node(len(out), "cell", c, depth=2))
+        out.append(node(len(out), "cell", "Select", depth=2))
+    return out
+
+
+def test_synthesize_value_independent_ignores_the_nodes_text() -> None:
+    from cua.surface.locators import synthesize_value_independent
+
+    nodes = _balance_table()
+    target = nodes[8]  # Savings balance cell
+    assert target.name == "89,410.22"
+    loc = synthesize_value_independent(target, nodes)
+    assert loc.strategy == "role_name" and loc.role == "cell"
+    assert loc.name is None and loc.name_match == "any"
+    assert loc.confidence == "low"
+    assert "89,410.22" not in loc.model_dump_json()
+    assert loc.rationale
+    result = resolve_against(loc, nodes)
+    assert result.kind == "unique" and result.node is target
+
+
+def test_synthesize_value_independent_resolves_when_values_change() -> None:
+    from cua.surface.locators import synthesize_value_independent
+
+    nodes = _balance_table()
+    loc = synthesize_value_independent(nodes[8], nodes)
+    other = [n.model_copy(update={"name": "9.99" if n.name == "89,410.22" else n.name})
+             for n in nodes]
+    result = resolve_against(loc, other)
+    assert result.kind == "unique" and result.node.index == 8
+
+
+def test_synthesize_value_independent_counts_only_its_own_surface_path() -> None:
+    from cua.surface.locators import synthesize_value_independent
+
+    foreign = Node(index=0, role="cell", name="x", value=None, depth=0,
+                   state=NodeState(), surface_path=OTHER_PATH)
+    nodes = [foreign, *_balance_table()]
+    target = nodes[3]
+    loc = synthesize_value_independent(target, nodes)
+    assert loc.ordinal == 1

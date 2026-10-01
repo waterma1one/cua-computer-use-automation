@@ -74,6 +74,8 @@ def name_matches(candidate: str | None, name: str | None, name_match: NameMatch)
     `cua.replay.settle` can check a plain string -- a dialog message, which is not a
     `Node` -- against the same predicate a `Node`-based match uses, without duplicating it.
     """
+    if name_match == "any":
+        return True
     if name is None:
         return candidate is None
     if candidate is None:
@@ -232,6 +234,32 @@ def synthesize(node: Node, among: list[Node]) -> Locator:
     return _synthesize_matching(
         node, candidates, strategy="ax_path", role=node.role, name=node.name,
         identity=f"role '{node.role}' with no usable name or text",
+    )
+
+
+def synthesize_value_independent(node: Node, among: list[Node]) -> Locator:
+    """A locator for `node` that never uses its text: role plus position among same-role
+    nodes on its surface. For a control whose text is a value read at discovery (a result
+    cell), which differs per input and so cannot be part of a replayable locator.
+    """
+    same_role = [
+        n for n in among if n.surface_path == node.surface_path and n.role == node.role
+    ]
+    ordinal = _position_of(node, same_role)
+    return Locator(
+        strategy="role_name",
+        role=node.role,
+        name=None,
+        name_match="any",
+        surface_path=node.surface_path,
+        ordinal=ordinal,
+        confidence="low",
+        rationale=(
+            "deliberately ignores the node's text, which is a value read at discovery and "
+            f"varies per input; using its position ({ordinal}) among the "
+            f"'{node.role}' controls on this surface instead. This should be reviewed -- "
+            "positional locators are fragile against reordering."
+        ),
     )
 
 

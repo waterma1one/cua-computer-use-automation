@@ -15,7 +15,10 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Confidence = Literal["high", "medium", "low"]
-NameMatch = Literal["exact", "contains", "prefix"]
+# "any" matches whatever the accessible name is (including none); it is only meaningful on a
+# `Locator` with a role, and is how a control is identified by role and position alone when
+# its own text is a per-input value.
+NameMatch = Literal["exact", "contains", "prefix", "any"]
 Strategy = Literal["role_name", "text", "ax_path"]
 
 # Credential-token vocabulary used to infer that a control holds a secret from its
@@ -170,6 +173,12 @@ class Locator(BaseModel):
     def _role_name_strategy_requires_a_role(self) -> Locator:
         if self.strategy == "role_name" and self.role is None:
             raise ValueError("a role_name locator requires a role")
+        return self
+
+    @model_validator(mode="after")
+    def _any_name_match_requires_a_role_and_no_name(self) -> Locator:
+        if self.name_match == "any" and (self.role is None or self.name is not None):
+            raise ValueError('name_match "any" requires a role and no name')
         return self
 
     @model_validator(mode="after")
