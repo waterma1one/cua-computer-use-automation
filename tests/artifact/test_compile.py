@@ -163,19 +163,6 @@ def test_compile_derives_a_next_step_lookahead_expect_and_leaves_the_last_step_e
     assert artifact.steps[2].expects == []
 
 
-def test_compile_emits_no_expect_before_a_read_step() -> None:
-    # The read target's name is the discovered value; pinning it would fail any other input.
-    steps = [_fill_step(0, "12345", "Member ID"), _read_step(0, "4,218.60", "4,218.60", "balance")]
-    artifact = compile_artifact(
-        _trace(steps, declared_inputs={"member_id": DeclaredInput(
-            spec=InputSpec(type="string"), example_value="12345")}),
-        id="x", version=1, name="x", description="x", app=_target(),
-        settle=Settle(timeout_ms=1000, poll_ms=50), max_duration_ms=60000,
-        outputs={"balance": OutputSpec(type="string")}, provenance=_provenance(),
-    )
-    assert artifact.steps[1].expects == []
-
-
 def test_compile_never_pins_a_read_value_in_the_checkpoint() -> None:
     read = _read_step(0, "4,218.60", "4,218.60", "balance")
     heading = node("heading", "Account summary", index=0)
@@ -468,3 +455,35 @@ def test_compile_refuses_when_no_value_independent_node_exists() -> None:
              node("cell", "Member 12345", index=2)]
     with pytest.raises(CompileError, match="value-independent"):
         _compile_with_final([_fill_step(0, "12345", "Member ID"), _read_balance()], nodes, 0)
+
+
+def _read_on_page(page, index: int) -> TraceStep:
+    target = page[index]
+    obs = Observation(generation=2, nodes=page, truncated=False)
+    return TraceStep(index=2, tool_call=ToolCall(id="2", name="read",
+                     args={"index": index, "output_name": "balance"}),
+                     discovery_only=False, human_origin=False, ok=True,
+                     read_value=target.value or target.name,
+                     locator=synthesize(target, page), observation=obs, raw_nodes=page)
+
+
+def test_compile_waits_on_a_value_independent_node_before_a_read_of_a_value_cell() -> None:
+    page = _member_page()
+    artifact = _compile_with_final(
+        [_fill_step(0, "12345", "Member ID"), _read_on_page(page, 6)], page, 6)
+    expects = artifact.steps[1].expects
+    assert len(expects) == 1
+    e = expects[0]
+    assert (e.outcome, e.source, e.verified) == ("continue", "observed", True)
+    assert e.when.name == "Savings"  # nearest preceding digit-free node; index 5 has digits
+    dumped = e.when.model_dump_json()
+    assert "89,410.22" not in dumped
+    assert not any(ch.isdigit() for ch in dumped)
+
+
+def test_compile_emits_no_expect_before_a_read_when_nothing_is_value_independent() -> None:
+    page = [node("cell", "89,410.22", index=0), node("cell", "Acct 7431", index=1)]
+    artifact = _compile_with_final(
+        [_fill_step(0, "12345", "Member ID"), _read_on_page(page, 0)],
+        [node("statictext", "Done", index=0)], 0)
+    assert artifact.steps[1].expects == []
