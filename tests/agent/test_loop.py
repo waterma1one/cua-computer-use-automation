@@ -12,6 +12,7 @@ from cua.artifact.models import App, InputSpec
 from cua.llm.base import Completion, Message, ToolCall
 from cua.llm.fake import FakeClient
 from cua.policy.config import PolicyConfig
+from cua.replay.result import CannotResolve, HandbackOutcome, Resolved
 from cua.surface.base import StaleObservationError, SurfaceError
 from tests.agent.conftest import FakeSurface, node
 
@@ -310,3 +311,90 @@ def test_evidence_gets_one_event_per_turn_and_a_stop_event() -> None:
     kinds = [e["kind"] for e in sink.events]
     assert kinds == ["malformed_call", "malformed_call", "action", "discovery_stop"]
     assert sink.events[-1]["reason"] == "give_up"
+
+
+@dataclass
+class RecordingEscalator:
+    outcome: HandbackOutcome = field(default_factory=lambda: CannotResolve(note="declined"))
+    calls: list[dict[str, object]] = field(default_factory=list)
+
+    def escalate(self, *, step_id: str | None, kind: str, expected: str, observed: str,
+                 acted: bool) -> HandbackOutcome:
+        self.calls.append({"step_id": step_id, "kind": kind, "expected": expected,
+                           "observed": observed, "acted": acted})
+        return self.outcome
+
+
+def _post_script() -> FakeClient:
+    return FakeClient(script=[
+        ToolCall(id="1", name="click", args={"index": 0}),
+        ToolCall(id="2", name="click", args={"index": 0}),
+    ])
+
+
+def test_strict_mode_escalates_before_post_and_never_executes_it() -> None:
+    surface = FakeSurface(frames=[[node("button", "Post", index=0)]])
+    escalator = RecordingEscalator()
+    sink = RecordingSink()
+    trace = discover("goal", _target(), surface, _policy("strict"), _post_script(),
+                     escalator=escalator, evidence=sink)
+    assert len(escalator.calls) == 1
+    call = escalator.calls[0]
+    assert call["acted"] is False
+    assert call["step_id"] == "discover_01"
+    assert call["kind"] == "POLICY_BLOCKED"
+    assert "Post" in str(call["observed"])
+    assert surface.act_on_index_calls == []
+    assert surface.act_calls == []
+    assert trace.stop_reason == "escalated"
+    assert trace.steps == []
+    (event,) = [e for e in sink.events if e["kind"] == "escalation"]
+    assert event["step"] == 1
+    assert event["action"] == "click"
+    assert event["subject"] == "Post"
+    assert event["outcome"] == "CannotResolve"
+
+
+def test_escalation_ends_the_run_whatever_the_operator_answers() -> None:
+    surface = FakeSurface(frames=[[node("button", "Post", index=0)]])
+    escalator = RecordingEscalator(outcome=Resolved())
+    trace = discover("goal", _target(), surface, _policy("strict"), _post_script(),
+                     escalator=escalator)
+    assert trace.stop_reason == "escalated"
+    assert len(escalator.calls) == 1
+    assert surface.act_on_index_calls == []
+
+
+def test_strict_mode_without_an_escalator_still_refuses_as_before() -> None:
+    surface = FakeSurface(frames=[[node("button", "Post", index=0)]])
+    llm = FakeClient(script=[
+        ToolCall(id="1", name="click", args={"index": 0}),
+        ToolCall(id="2", name="give_up", args={"reason": "cannot post"}),
+    ])
+    trace = discover("goal", _target(), surface, _policy("strict"), llm)
+    assert trace.stop_reason == "give_up"
+    assert surface.act_on_index_calls == []
+
+
+def test_a_safe_action_never_reaches_the_escalator() -> None:
+    surface = FakeSurface(frames=[[node("button", "Search", index=0)]])
+    escalator = RecordingEscalator()
+    llm = FakeClient(script=[
+        ToolCall(id="1", name="click", args={"index": 0}),
+        ToolCall(id="2", name="finish", args={"summary": "done", "checkpoint_index": 0}),
+    ])
+    trace = discover("goal", _target(), surface, _policy("strict"), llm, escalator=escalator)
+    assert trace.stop_reason == "finish"
+    assert escalator.calls == []
+
+
+def test_sandbox_mode_does_not_escalate() -> None:
+    surface = FakeSurface(frames=[[node("button", "Post", index=0)]])
+    escalator = RecordingEscalator()
+    llm = FakeClient(script=[
+        ToolCall(id="1", name="click", args={"index": 0}),
+        ToolCall(id="2", name="finish", args={"summary": "done", "checkpoint_index": 0}),
+    ])
+    trace = discover("goal", _target(), surface, _policy("sandbox"), llm, escalator=escalator)
+    assert trace.stop_reason == "finish"
+    assert escalator.calls == []

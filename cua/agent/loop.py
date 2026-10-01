@@ -27,7 +27,7 @@ from cua.llm.base import Completion, LLMClient, Message, ToolCall
 from cua.llm.gemini import LLMError
 from cua.policy.config import PolicyConfig
 from cua.policy.risk import classify
-from cua.replay.engine import EvidenceSink
+from cua.replay.engine import Escalator, EvidenceSink
 from cua.replay.settle import SYSTEM_CLOCK, Clock, settle_observation
 from cua.surface.base import StaleObservationError, Surface, SurfaceError
 from cua.surface.models import Action, ActionKind, ActionResult, Locator, Node, Observation
@@ -43,6 +43,7 @@ __all__ = [
 
 StopReason = Literal[
     "max_steps", "max_duration", "dead_end", "consecutive_failures", "finish", "give_up",
+    "escalated",
 ]
 
 
@@ -242,6 +243,7 @@ def discover(
     limits: DiscoveryLimits | None = None,
     evidence: EvidenceSink | None = None,
     clock: Clock | None = None,
+    escalator: Escalator | None = None,
 ) -> Trace:
     declared = declared_inputs or {}
     prompt_inputs = [PromptInput(name=n, sensitive=d.spec.sensitive, example=d.example_value)
@@ -401,6 +403,22 @@ def discover(
         subject = path if isinstance(path, str) else (
             observation.nodes[index].name if index is not None else None)
         refusal = _policy_refusal(kind, subject, policy)
+        if refusal is not None and escalator is not None:
+            # D62: hand the non-safe action to a human before the surface is touched. Whatever
+            # comes back, discovery does not perform it -- the run ends, nothing is saved.
+            handback = escalator.escalate(
+                step_id=f"discover_{step_num:02d}", kind="POLICY_BLOCKED",
+                expected="a safe action under policy_mode=strict",
+                observed=mask(refusal), acted=False)
+            outcome = type(handback).__name__
+            sink.event(kind="escalation", step=step_num, action=kind,
+                       subject=mask(subject) if subject is not None else None, outcome=outcome)
+            if evidence is not None:
+                # Best-effort: the page the action was held on.
+                with contextlib.suppress(StaleObservationError, SurfaceError):
+                    sink.frame(surface.capture(), f"discover_{step_num:02d}")
+            return stop("escalated", f"escalated, not executed: {mask(refusal)} "
+                                     f"(handback: {outcome})")
         if refusal is not None:
             history.append(Message(role="tool", text=f"refused: {refusal}", tool_name=call.name,
                                    tool_call_id=call.id))
