@@ -27,12 +27,12 @@ LOGIN = [
 FINISH = ToolCall(id="4", name="finish", args={"summary": "in", "checkpoint_index": 15})
 
 
-def _invoke(monkeypatch, tmp_path, origin, script, step_usage=None):
+def _invoke(monkeypatch, tmp_path, origin, script, step_usage=None, policy_mode="sandbox"):
     monkeypatch.setattr(cli_module, "load_gemini_client_from_env",
                         lambda: FakeClient(script=script, step_usage=step_usage))
     policy = tmp_path / "policy.yaml"
     policy.write_text(yaml.safe_dump({
-        "policy_mode": "sandbox", "allowed_origins": [origin], "allowed_paths": ["/"],
+        "policy_mode": policy_mode, "allowed_origins": [origin], "allowed_paths": ["/"],
         "denied_paths": [],
         "allowed_actions": ["navigate", "click", "fill", "select", "press_key", "wait_for",
                             "read", "dismiss_dialog"],
@@ -99,6 +99,41 @@ def test_a_refused_run_still_leaves_run_and_result(monkeypatch, tmp_path, live_m
     assert outcome["stop_reason"] == "give_up"
     assert outcome["verified"] is False
     assert outcome["artifact"] is None
+    _assert_clean(tmp_path, run_dir, result)
+
+
+def test_strict_mode_escalates_through_the_stub_and_records_it(
+    monkeypatch, tmp_path, live_mockapp,
+) -> None:
+    import cua.agent.loop as loop_module
+
+    # The sign-in click stands in for the irreversible Post: whatever it is called, the loop
+    # must hold it, hand it to the escalator and never press it.
+    monkeypatch.setattr(loop_module, "classify",
+                        lambda action, name: "irreversible" if action == "click" else "safe")
+    result, run_dir = _invoke(monkeypatch, tmp_path, live_mockapp, [*LOGIN, FINISH],
+                              policy_mode="strict")
+    assert result.exit_code == 1
+    assert "escalated" in result.output
+    assert "nothing was saved" in result.output
+    assert not (run_dir / "artifact.yaml").exists()
+    outcome = json.loads((run_dir / "result.json").read_text())
+    assert outcome["outcome"] == "escalated"
+    assert outcome["stop_reason"] == "escalated"
+    assert outcome["verified"] is False
+    assert outcome["artifact"] is None
+    assert outcome["escalations"] == [
+        {"step_id": "discover_03", "kind": "POLICY_BLOCKED", "outcome": "CannotResolve",
+         "acted": False, "expected": "a safe action under policy_mode=strict",
+         "observed": outcome["escalations"][0]["observed"]},
+    ]
+    assert "refused under policy_mode=strict" in outcome["escalations"][0]["observed"]
+    events = [json.loads(line) for line in (run_dir / "trace.jsonl").read_text().splitlines()]
+    (escalation,) = [e for e in events if e["kind"] == "escalation"]
+    assert escalation["step"] == 3 and escalation["action"] == "click"
+    assert escalation["outcome"] == "CannotResolve"
+    assert (run_dir / "snapshots" / "discover_03.yaml").is_file()
+    assert (run_dir / "run.json").is_file()
     _assert_clean(tmp_path, run_dir, result)
 
 

@@ -36,7 +36,7 @@ from cua.agent.loop import DeclaredInput
 from cua.agent.loop import discover as run_discover
 from cua.artifact.compile import CompileError, self_verify
 from cua.artifact.compile import compile as compile_artifact
-from cua.artifact.models import App, Artifact, InputSpec, Provenance, Settle
+from cua.artifact.models import App, Artifact, FailureKind, InputSpec, Provenance, Settle
 from cua.artifact.store import RegistryEntry, load, read_registry, save, write_registry_entry
 from cua.artifact.validate import validate
 from cua.llm.base import LLMClient, usage_of
@@ -48,7 +48,7 @@ from cua.policy.allowlist import navigation_guard
 from cua.policy.config import PolicyConfig, load_policy
 from cua.replay.engine import replay as run_replay
 from cua.replay.engine import validate_inputs
-from cua.replay.result import Failure, Mode, mint_run_id
+from cua.replay.result import CannotResolve, Failure, HandbackOutcome, Mode, mint_run_id
 from cua.session.service import create_app as create_session_app
 from cua.surface.base import StaleObservationError, SurfaceError
 from cua.surface.models import Action
@@ -445,20 +445,41 @@ def discover(
     started_at = datetime.now(UTC)
     # What `result.json` will say. Updated as the run progresses; written in `finally`, so
     # a refusal or failure leaves the same audit pair a success does (phase 8, criterion 1).
+    escalator = _DecliningEscalator()
     state: dict[str, object] = {
         "outcome": "failed", "stop_reason": None, "stop_detail": "", "verified": False,
-        "artifact": None, "failure_message": None,
+        "artifact": None, "failure_message": None, "escalations": [],
     }
     try:
         _discover_body(
             goal, root, base_url, policy, llm, declared, verify_values, writer, state,
-            id=id, name=name, version=version,
+            escalator, id=id, name=name, version=version,
         )
     finally:
         _write_discovery_evidence(
             writer, llm=llm, state=state, goal=goal, id=id, name=name, base_url=base_url,
             policy=policy, declared=declared, started_at=started_at,
         )
+
+
+class _DecliningEscalator:
+    """D62: the escalator `cua discover` hands the loop. A discovery run has no operator
+    attached, so it records each escalation and declines it; the loop then ends without
+    executing the held action. A real operator handback exists only in replay."""
+
+    def __init__(self) -> None:
+        self.records: list[dict[str, object]] = []
+
+    def escalate(
+        self, *, step_id: str | None, kind: FailureKind, expected: str, observed: str,
+        acted: bool,
+    ) -> HandbackOutcome:
+        handback = CannotResolve(
+            note="discovery is non-interactive; the action was held, not executed")
+        self.records.append({"step_id": step_id, "kind": kind, "expected": expected,
+                             "observed": observed, "acted": acted,
+                             "outcome": type(handback).__name__})
+        return handback
 
 
 def _write_discovery_evidence(
@@ -485,7 +506,7 @@ def _write_discovery_evidence(
 def _discover_body(
     goal: str, root: Path, base_url: str, policy: PolicyConfig, llm: LLMClient,
     declared: dict[str, DeclaredInput], verify_values: dict[str, str],
-    writer: EvidenceWriter, state: dict[str, object], *,
+    writer: EvidenceWriter, state: dict[str, object], escalator: _DecliningEscalator, *,
     id: str, name: str, version: int,  # noqa: A002
 ) -> None:
     """Everything after the evidence writer exists. Records into `state` as it goes;
@@ -505,12 +526,14 @@ def _discover_body(
         if violation is None and opened:
             trace = run_discover(
                 goal, target, surface, policy, llm, declared_inputs=declared, evidence=writer,
+                escalator=escalator,
             )
             violation = _violation(surface)
         # The page as discovery left it, so even a run with no successful step has a frame.
         with contextlib.suppress(SurfaceError, StaleObservationError):
             writer.frame(surface.capture(), "discover_final")
 
+    state["escalations"] = list(escalator.records)
     state["step_count"] = len(trace.steps) if trace is not None else 0
     if trace is not None:
         state["stop_reason"] = trace.stop_reason
@@ -531,7 +554,7 @@ def _discover_body(
         raise typer.Exit(code=1)
     if trace.stop_reason != "finish":
         state["outcome"] = {
-            "give_up": "refused", "dead_end": "dead_end",
+            "give_up": "refused", "dead_end": "dead_end", "escalated": "escalated",
         }.get(trace.stop_reason, "failed")
         typer.echo(writer.scrub(
             f"discovery did not finish (stop_reason={trace.stop_reason!r}: "
