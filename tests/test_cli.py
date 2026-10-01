@@ -1171,3 +1171,75 @@ def test_catalog_invoke_of_an_irreversible_capability_prints_an_intervention(
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
     assert payload["reason_code"] == "POLICY_BLOCKED" and payload["acted"] is False
+
+
+# --- replay --overlay ----------------------------------------------------------------------
+
+
+def _not_found_artifact(tmp_path):
+    artifact = base()
+    artifact.outputs = {}
+    artifact.steps = [Step(
+        id="s1", action="navigate", target=Target(path="/member/12345?fault=not_found"),
+        risk="safe",
+        expects=[Expect(when=Matcher(strategy="text", name_match="contains", name="No such"),
+                        outcome="continue", source="observed")],
+    )]
+    save(artifact, tmp_path)
+    return artifact
+
+
+def _overlay_file(tmp_path, artifact, **fields) -> str:
+    body = {"targets": "b", "base_id": artifact.id, "base_version": artifact.version, **fields}
+    path = tmp_path / "overlay.yaml"
+    path.write_text(yaml.safe_dump(body))
+    return str(path)
+
+
+def test_replay_overlay_extends_the_base_artifact_before_it_runs(tmp_path, live_mockapp) -> None:
+    artifact = _not_found_artifact(tmp_path)
+    extra = Expect(
+        when=Matcher(strategy="text", name_match="contains", name="No member found"),
+        outcome="business", code="MEMBER_NOT_FOUND", source="authored", verified=True,
+    ).model_dump(mode="json", exclude_none=True)
+    overlay = _overlay_file(tmp_path, artifact, extend_expects={"s1": [extra]})
+    args = [
+        "replay", artifact.id, str(artifact.version), "--root", str(tmp_path),
+        "--base-url", live_mockapp, "--policy", _policy_file(tmp_path, live_mockapp),
+        "--evidence-root", str(tmp_path / "ev"), "--input", "member_id=12345",
+    ]
+    # Without the overlay the base artifact has no clause for the page it lands on.
+    base_run = runner.invoke(app, args)
+    assert base_run.exit_code == 1
+    assert json.loads(base_run.stdout.splitlines()[-1])["kind"] == "NO_BRANCH_MATCHED"
+    result = runner.invoke(app, [*args, "--overlay", overlay])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout.splitlines()[-1])["code"] == "MEMBER_NOT_FOUND"
+
+
+def test_replay_overlay_for_another_artifact_is_refused_before_anything_runs(tmp_path) -> None:
+    artifact = _not_found_artifact(tmp_path)
+    overlay = _overlay_file(tmp_path, artifact)
+    path = tmp_path / "overlay.yaml"
+    path.write_text(path.read_text().replace(artifact.id, "someone.else"))
+    result = runner.invoke(app, [
+        "replay", artifact.id, str(artifact.version), "--root", str(tmp_path),
+        "--base-url", "http://127.0.0.1:1", "--policy", _policy_file(tmp_path),
+        "--overlay", overlay,
+    ])
+    assert result.exit_code == 2
+    assert "overlay refused" in result.output and "someone.else" in result.output
+
+
+def test_replay_overlay_that_changes_the_contract_is_refused(tmp_path) -> None:
+    artifact = _not_found_artifact(tmp_path)
+    overlay = _overlay_file(
+        tmp_path, artifact, inputs={"extra": {"type": "string", "required": True}},
+    )
+    result = runner.invoke(app, [
+        "replay", artifact.id, str(artifact.version), "--root", str(tmp_path),
+        "--base-url", "http://127.0.0.1:1", "--policy", _policy_file(tmp_path),
+        "--overlay", overlay,
+    ])
+    assert result.exit_code == 2
+    assert "OVERLAY_CHANGES_CONTRACT" in result.output
