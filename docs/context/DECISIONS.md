@@ -710,7 +710,7 @@ written — so a refused invocation still leaves a record under the `evidence_re
 `--input` pairs parsed and integer-typed inputs coerced, with a malformed pair or a failed
 coercion an `INVALID_INPUT` result; `validate_inputs` — the same public function the engine calls
 first — strictly before a browser launches (§5.4 forbids a session for invalid input, not a
-record of the refusal); `artifact.yaml` before the page opens; `result.json` after. `--evidence-root` defaults to `.` so the layout is `evidence/<run_id>/` at
+record of the refusal); `artifact.yaml` before the page opens; `result.json` after. `--evidence-root` defaults to `.` for `replay` (`discover` differs: see D55) so the layout is `evidence/<run_id>/` at
 the repository root, RULES.md's deliverable. A no-op Typer callback makes `replay` a subcommand
 later phases attach siblings to. Phase 2's browser fixture became module-scoped: Playwright
 allows one synchronous driver per thread, and the CLI test is the one place the real second
@@ -962,14 +962,16 @@ moment.
 A click returns as soon as the click is dispatched, before the navigation it triggers has
 committed, so an observation taken straight afterwards can still show the old page. The loop
 therefore calls `settle_observation` (the replay engine's settle logic, for callers with no
-`expects`) after each state-changing action and observes only once the page is quiet.
+`expects`) after each state-changing action and observes only once the page has settled: it changed, then two equal observations one poll
+apart.
 **Why:** observing early made the model act on a stale page and was the root of the flaky
 end-to-end test (a race, not a flake).
 **Cost accepted:** each such action waits for the settle poll, so a discovery run is slower.
 
-## D49 — `compile()` prepends a navigate step to `app.entry`
+## D49 — `compile()` adds a navigate step to `app.entry` unless the trace has one
 A fresh browser sits on a blank page, so the CLI navigates to `app.entry` before discovery
-starts and `compile()` writes the same `navigate` as the artifact's first step.
+starts and `compile()` adds the same `navigate` as the artifact's first step, unless the trace
+already begins with a navigate to `app.entry`.
 **Why:** the artifact must be replayable from a cold session, and a trace that begins on
 "wherever the page happened to be" is not.
 **Cost accepted:** the first step is synthesised rather than observed; a capability that
@@ -1012,3 +1014,20 @@ is downgraded to a local and a read-only capability (a balance lookup) returns n
 (§8.3) needs a declared-output flag that was not built.
 **Cost accepted (documented limit, review item I4):** discovery can find a lookup but cannot
 yet return its value; a later phase adds `--output name[:type]` (repeatable).
+
+## D54 — `dead_end` means N consecutive re-observations with an unchanged digest
+`dead_end` fires after `dead_end_repeats` (default 3) turns in a row whose re-observation
+digest equals the previous one. A successful `read` or `wait_for` neither advances nor resets
+the count; turns that never touch the surface belong to the failure counter (D50).
+**Why:** the earlier wording ("repeated observation digest") could not tell a stuck loop from
+a flow that reads several outputs off one static page.
+**Cost accepted:** a loop that alternates between two pages never trips it, and a `read` or
+`wait_for` run cannot break a real dead end, because it does not reset the count either.
+
+## D55 — `cua discover` writes evidence under `~/.cache/cua` by default
+`--evidence-root` for `discover` defaults to `~/.cache/cua`, whereas `replay` defaults to `.`
+(D36).
+**Why:** discovery evidence holds page content from a real application and must not land in
+the working tree, where it could be committed by accident.
+**Cost accepted:** the two commands differ, and evidence is not next to the repo unless the
+operator passes `--evidence-root`.
