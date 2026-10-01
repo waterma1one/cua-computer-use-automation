@@ -40,7 +40,9 @@ class Matcher(BaseModel):
 
     Reuses phase 2's `Strategy` and `NameMatch` literals rather than redeclaring them, so
     the two vocabularies cannot drift apart; in particular, `NameMatch` has no `regex`
-    member, so a matcher can never carry a regular expression either.
+    member, so a matcher can never carry a regular expression either. Its `"any"` member is
+    for step locators only (a matcher is checked against dialog text too, where "any" would
+    match everything), so a matcher rejects it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -49,6 +51,12 @@ class Matcher(BaseModel):
     role: str | None = None
     name: str | None = None
     name_match: NameMatch = "exact"
+
+    @model_validator(mode="after")
+    def _no_any_name_match(self) -> Matcher:
+        if self.name_match == "any":
+            raise ValueError('a matcher cannot use name_match "any"')
+        return self
 
 
 class Target(BaseModel):

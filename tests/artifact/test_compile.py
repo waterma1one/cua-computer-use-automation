@@ -2,6 +2,8 @@
 Task 5's loop. The scenario throughout is the same member-search-then-read-balance flow every
 other phase's fixtures use.
 """
+import dataclasses
+
 import pytest
 
 from cua.agent.loop import DeclaredInput, Trace, TraceStep
@@ -238,7 +240,9 @@ def test_compile_drops_discovery_only_and_human_origin_steps() -> None:
         provenance=_provenance(),
     )
     assert len(artifact.steps) == 2
-    assert artifact.steps[1].locator is not None and artifact.steps[1].locator.name == "Checking"
+    # The kept read's cell holds its read value, so it is located by role and position.
+    assert artifact.steps[1].locator is not None
+    assert artifact.steps[1].locator.name_match == "any"
 
 
 def test_compile_runs_load_time_validation_and_refuses_an_invalid_artifact() -> None:
@@ -335,3 +339,64 @@ def test_compile_does_not_duplicate_a_leading_navigate_to_the_entry_path() -> No
 def test_compile_prepends_when_the_leading_navigate_goes_elsewhere() -> None:
     steps = _compile_notes([_nav_step("/other"), _fill_step(0, "some text", "Notes")])
     assert [s.action for s in steps] == ["navigate", "navigate", "fill"]
+
+
+def _table_read_step(value: str) -> TraceStep:
+    from cua.surface.models import NodeState
+
+    rows = [("Checking", "4,218.60"), ("Savings", value)]
+    nodes = []
+    for label, amount in rows:
+        for text in (label, amount):
+            nodes.append(node("cell", text, index=len(nodes)).model_copy(
+                update={"state": NodeState()}))
+    target = nodes[3]
+    obs = Observation(generation=2, nodes=nodes, truncated=False)
+    return TraceStep(index=2, tool_call=ToolCall(id="2", name="read",
+                     args={"index": 3, "output_name": "balance"}),
+                     discovery_only=False, human_origin=False, ok=True, read_value=value,
+                     locator=synthesize(target, nodes), observation=obs, raw_nodes=nodes)
+
+
+def test_compile_gives_a_read_of_a_value_cell_a_value_independent_locator() -> None:
+    read = _table_read_step("89,410.22")
+    artifact = _compile_with_final([_fill_step(0, "12345", "Member ID"), read],
+                                   [node("statictext", "Done", index=0)], 0)
+    loc = artifact.steps[-1].locator
+    assert loc is not None
+    assert loc.name is None and loc.name_match == "any" and loc.role == "cell"
+    assert loc.ordinal == 3 and loc.confidence == "low"
+    assert "89,410.22" not in artifact.model_dump_json()
+
+
+def test_compile_keeps_the_synthesized_locator_for_a_read_of_a_label() -> None:
+    read = _table_read_step("89,410.22")
+    label = read.raw_nodes[2]
+    read2 = dataclasses.replace(
+        read, tool_call=ToolCall(id="2", name="read", args={"index": 2, "output_name": "balance"}),
+        locator=synthesize(label, read.raw_nodes),
+    )
+    artifact = _compile_with_final([_fill_step(0, "12345", "Member ID"), read2],
+                                   [node("statictext", "Done", index=0)], 0)
+    loc = artifact.steps[-1].locator
+    assert loc is not None and loc.name == "Savings" and loc.name_match == "exact"
+
+
+def test_artifact_with_a_value_independent_locator_round_trips() -> None:
+    read = _table_read_step("89,410.22")
+    artifact = _compile_with_final([_fill_step(0, "12345", "Member ID"), read],
+                                   [node("statictext", "Done", index=0)], 0)
+    from cua.artifact.validate import validate
+
+    again = type(artifact).model_validate_json(artifact.model_dump_json())
+    assert again == artifact
+    assert not [f for f in validate(again) if f.level == "error"]
+
+
+def test_a_matcher_rejects_name_match_any() -> None:
+    from pydantic import ValidationError
+
+    from cua.artifact.models import Matcher
+
+    with pytest.raises(ValidationError):
+        Matcher(strategy="role_name", role="cell", name=None, name_match="any")
