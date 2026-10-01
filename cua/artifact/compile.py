@@ -177,8 +177,21 @@ def compile(
     local_bindings: dict[str, str] = {}
     output_names: set[str] = set()
     steps: list[Step] = []
+    # Replay does not open `app.entry`; discovery began there, so the artifact must say so
+    # itself unless its first recorded step is already that navigation.
+    first = recorded[0]
+    opens_entry = (
+        first.tool_call.name == "navigate"
+        and str(first.tool_call.args.get("path", "")) == app.entry
+    )
+    offset = 0 if opens_entry else 1
+    if not opens_entry:
+        steps.append(Step(
+            id="s1", action="navigate", target=Target(path=app.entry),
+            risk=classify("navigate", app.entry), expects=[],
+        ))
     for i, step in enumerate(recorded):
-        step_id = f"s{i + 1}"
+        step_id = f"s{i + 1 + offset}"
         next_step = recorded[i + 1] if i + 1 < len(recorded) else None
         steps.append(_compile_step(
             step, next_step, trace.declared_inputs, local_bindings, step_id, output_names,

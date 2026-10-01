@@ -91,7 +91,7 @@ def test_compile_promotes_a_literal_matching_a_declared_input() -> None:
         settle=Settle(timeout_ms=1000, poll_ms=50), max_duration_ms=60000,
         outputs={"balance": OutputSpec(type="string", format="money")}, provenance=_provenance(),
     )
-    assert artifact.steps[0].value == FromInput(from_input="member_id")
+    assert artifact.steps[1].value == FromInput(from_input="member_id")
     assert artifact.verified is False
 
 
@@ -112,7 +112,7 @@ def test_compile_keeps_an_unmatched_unprotected_literal_as_a_literal() -> None:
         settle=Settle(timeout_ms=1000, poll_ms=50), max_duration_ms=60000, outputs={},
         provenance=_provenance(),
     )
-    assert artifact.steps[0].value == LiteralValue(literal="some text")
+    assert artifact.steps[1].value == LiteralValue(literal="some text")
 
 
 def test_compile_binds_a_named_output_and_a_local_value_differently() -> None:
@@ -128,8 +128,8 @@ def test_compile_binds_a_named_output_and_a_local_value_differently() -> None:
         settle=Settle(timeout_ms=1000, poll_ms=50), max_duration_ms=60000,
         outputs={"balance": OutputSpec(type="string")}, provenance=_provenance(),
     )
-    assert artifact.steps[1].into == "balance"
-    assert artifact.steps[2].into == "_s3"
+    assert artifact.steps[2].into == "balance"
+    assert artifact.steps[3].into == "_s4"
 
 
 def test_compile_derives_a_next_step_lookahead_expect_and_leaves_the_last_step_empty() -> None:
@@ -141,10 +141,10 @@ def test_compile_derives_a_next_step_lookahead_expect_and_leaves_the_last_step_e
         settle=Settle(timeout_ms=1000, poll_ms=50), max_duration_ms=60000,
         outputs={"balance": OutputSpec(type="string")}, provenance=_provenance(),
     )
-    assert len(artifact.steps[0].expects) == 1
-    assert artifact.steps[0].expects[0].source == "observed"
-    assert artifact.steps[0].expects[0].verified is True
-    assert artifact.steps[1].expects == []
+    assert len(artifact.steps[1].expects) == 1
+    assert artifact.steps[1].expects[0].source == "observed"
+    assert artifact.steps[1].expects[0].verified is True
+    assert artifact.steps[2].expects == []
 
 
 def test_compile_sets_the_success_checkpoint_from_finishs_checkpoint_index() -> None:
@@ -184,8 +184,8 @@ def test_compile_drops_discovery_only_and_human_origin_steps() -> None:
         max_duration_ms=60000, outputs={"balance": OutputSpec(type="string")},
         provenance=_provenance(),
     )
-    assert len(artifact.steps) == 1
-    assert artifact.steps[0].locator is not None and artifact.steps[0].locator.name == "Checking"
+    assert len(artifact.steps) == 2
+    assert artifact.steps[1].locator is not None and artifact.steps[1].locator.name == "Checking"
 
 
 def test_compile_runs_load_time_validation_and_refuses_an_invalid_artifact() -> None:
@@ -206,7 +206,7 @@ def test_compile_normalises_a_model_proposed_output_name() -> None:
         settle=Settle(timeout_ms=1000, poll_ms=50), max_duration_ms=60000,
         outputs={"account_balance": OutputSpec(type="string")}, provenance=_provenance(),
     )
-    assert artifact.steps[0].into == "account_balance"
+    assert artifact.steps[1].into == "account_balance"
 
 
 def test_compile_refuses_a_finished_trace_with_no_final_observation() -> None:
@@ -243,6 +243,42 @@ def test_compile_promotes_a_value_matching_an_earlier_local_read_to_from_step() 
         settle=Settle(timeout_ms=1000, poll_ms=50), max_duration_ms=60000, outputs={},
         provenance=_provenance(),
     )
-    assert artifact.steps[0].id == "s1"
-    assert artifact.steps[0].into == "_s1"
-    assert artifact.steps[1].value == FromStep(from_step="s1")
+    assert artifact.steps[1].id == "s2"
+    assert artifact.steps[1].into == "_s2"
+    assert artifact.steps[2].value == FromStep(from_step="s2")
+
+
+def _nav_step(path: str) -> TraceStep:
+    n = node("link", "Home", index=0)
+    obs = Observation(generation=1, nodes=[n], truncated=False)
+    return TraceStep(index=1, tool_call=ToolCall(id="n", name="navigate", args={"path": path}),
+                     discovery_only=False, human_origin=False, ok=True, read_value=None,
+                     locator=None, observation=obs, raw_nodes=[n])
+
+
+def _compile_notes(steps) -> list:
+    return compile_artifact(
+        _trace(steps), id="x", version=1, name="x", description="x", app=_target(),
+        settle=Settle(timeout_ms=1000, poll_ms=50), max_duration_ms=60000, outputs={},
+        provenance=_provenance(),
+    ).steps
+
+
+def test_compile_prepends_a_navigate_to_the_entry_path() -> None:
+    steps = _compile_notes([_fill_step(0, "some text", "Notes")])
+    assert steps[0].action == "navigate"
+    assert steps[0].target is not None and steps[0].target.path == "/teller/index.html"
+    assert steps[0].id == "s1"
+    assert steps[1].action == "fill" and steps[1].id == "s2"
+
+
+def test_compile_does_not_duplicate_a_leading_navigate_to_the_entry_path() -> None:
+    steps = _compile_notes(
+        [_nav_step("/teller/index.html"), _fill_step(0, "some text", "Notes")]
+    )
+    assert [s.action for s in steps] == ["navigate", "fill"]
+
+
+def test_compile_prepends_when_the_leading_navigate_goes_elsewhere() -> None:
+    steps = _compile_notes([_nav_step("/other"), _fill_step(0, "some text", "Notes")])
+    assert [s.action for s in steps] == ["navigate", "navigate", "fill"]
