@@ -56,6 +56,7 @@ from cua.catalog.invoke import IdempotencyLedger, InterventionRequested
 from cua.catalog.invoke import invoke as run_invoke
 from cua.catalog.registry import (
     CatalogRefusal,
+    entry_for,
     list_capabilities,
     load_gated,
     resolve_version,
@@ -398,6 +399,12 @@ def catalog_invoke(
         policy = load_policy(policy_path)
         resolved = resolve_version(root, artifact_id, version)
         artifact, _findings = load_gated(root, artifact_id, resolved)
+        if entry_for(root, artifact_id, resolved).status != "approved":
+            # Refuse a draft before input handling, so a bad --input cannot turn it into exit 1.
+            raise CatalogRefusal(
+                f"{artifact_id} v{resolved} is a draft and cannot be invoked; "
+                f"approve it first with `cua approve {artifact_id} {resolved} --approver <name>`"
+            )
     except (FileNotFoundError, ValueError, CatalogRefusal) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc

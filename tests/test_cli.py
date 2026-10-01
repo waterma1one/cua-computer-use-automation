@@ -1098,6 +1098,24 @@ def test_catalog_invoke_of_a_draft_exits_2_naming_cua_approve(tmp_path, monkeypa
     assert f"cua approve {artifact.id} 1" in result.output
 
 
+def test_catalog_invoke_of_a_draft_with_a_bad_input_still_exits_2_and_writes_no_evidence(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    artifact = base()
+    save(artifact, tmp_path)
+    evidence_root = tmp_path / "ev"
+    result = runner.invoke(app, [
+        "catalog", "invoke", artifact.id, "--root", str(tmp_path),
+        "--evidence-root", str(evidence_root),
+        "--base-url", "http://127.0.0.1:1", "--policy", _policy_file(tmp_path),
+        "--input", "bogus_name=1",
+    ])
+    assert result.exit_code == 2
+    assert f"cua approve {artifact.id} 1" in result.output
+    assert not evidence_root.exists() or not any(evidence_root.rglob("result.json"))
+
+
 def test_catalog_invoke_runs_an_approved_capability_with_no_api_key(
     tmp_path, monkeypatch
 ) -> None:
