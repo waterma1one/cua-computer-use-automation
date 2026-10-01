@@ -167,3 +167,28 @@ def test_a_secret_in_the_goal_is_refused_at_save_and_nothing_is_written(
     assert "declared secret" in result.output
     assert DEFAULT_LOGIN_PASSWORD not in result.output
     assert not (store / "artifacts").exists() or not list((store / "artifacts").rglob("*.yaml"))
+
+
+def test_a_compile_error_is_masked_before_whitespace_is_collapsed(
+    monkeypatch, tmp_path, live_mockapp,
+) -> None:
+    from cua.artifact.compile import CompileError
+
+    secret = "two  spaces\tand\nnewline"
+    monkeypatch.setattr(cli_module, "load_gemini_client_from_env",
+                        lambda: FakeClient(script=_login_script()))
+
+    def boom(*args, **kwargs):
+        raise CompileError(f"cannot compile near {secret} here")
+
+    monkeypatch.setattr(cli_module, "compile_artifact", boom)
+    result = runner.invoke(app, [
+        "discover", "--goal", "Log in.", "--root", str(tmp_path / "store"),
+        "--base-url", live_mockapp, "--policy", _policy(tmp_path, live_mockapp),
+        "--evidence-root", str(tmp_path / "ev"), "--id", "corebank.login", "--name", "login",
+        "--input", f"user={DEFAULT_LOGIN_USER}",
+        "--secret-input", f"password={secret}",
+    ])
+    assert result.exit_code == 1
+    assert "spaces" not in result.output
+    assert "newline" not in result.output
