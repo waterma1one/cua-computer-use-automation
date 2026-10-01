@@ -221,6 +221,25 @@ def _same_origin_policy(base_url: str) -> PolicyConfig:
     )
 
 
+def _raise_if_violated(
+    surface: WebSurface, evidence: EvidenceSink | None, entry: str,
+) -> None:
+    """D40: a violation the surface recorded outranks every other reading of a failed
+    entry navigation. The event has the engine's shape (`kind`, `step_id`, `reason`); the
+    entry navigation belongs to no step, so `step_id` is `None`."""
+    try:
+        reason = surface.allowlist_violation()
+    except SurfaceError:
+        return
+    if reason is None:
+        return
+    if evidence is not None:
+        evidence.event(kind="allowlist_violation", step_id=None, reason=reason)
+    raise CompileError(
+        f"self-verification refused: allowlist violation opening entry {entry!r}: {reason}"
+    )
+
+
 def self_verify(
     artifact: Artifact, base_url: str, inputs: dict[str, object], *,
     policy: PolicyConfig | None = None, evidence: EvidenceSink | None = None,
@@ -256,8 +275,10 @@ def self_verify(
         try:
             opened = surface.act(Action(kind="navigate", value=entry))
         except SurfaceError as exc:
+            _raise_if_violated(surface, evidence, entry)
             raise CompileError(f"self-verification could not open entry {entry!r}: {exc}") from exc
         if not opened.ok:
+            _raise_if_violated(surface, evidence, entry)
             raise CompileError(f"self-verification could not open entry {entry!r}")
         result = run_replay(
             artifact, inputs, surface, "embedded", deployment=effective,
