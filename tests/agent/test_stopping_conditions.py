@@ -89,6 +89,35 @@ def test_a_changing_observation_is_not_a_dead_end() -> None:
     assert trace.stop_reason == "max_steps"
 
 
+def test_reading_several_values_from_a_static_page_is_not_a_dead_end() -> None:
+    frame = [node("cell", "A", index=0), node("cell", "B", index=1)]
+    surface = FakeSurface(frames=[frame])  # a results page that never changes
+    llm = FakeClient(script=[
+        *[ToolCall(id=str(i), name="read", args={"index": i % 2}) for i in range(5)],
+        ToolCall(id="f", name="finish", args={"summary": "done", "checkpoint_index": 0}),
+    ])
+    trace = discover("goal", _target(), surface, _policy(), llm,
+                     limits=DiscoveryLimits(dead_end_repeats=3, max_steps=10))
+    assert trace.stop_reason == "finish"
+    assert len(trace.steps) == 5
+
+
+def test_a_read_neither_advances_nor_resets_the_unchanged_counter() -> None:
+    surface = FakeSurface(frames=[[node("button", "X", index=0)]])
+    llm = FakeClient(script=[
+        ToolCall(id="1", name="click", args={"index": 0}),
+        ToolCall(id="2", name="read", args={"index": 0}),
+        ToolCall(id="3", name="click", args={"index": 0}),
+        ToolCall(id="4", name="read", args={"index": 0}),
+        ToolCall(id="5", name="click", args={"index": 0}),
+        ToolCall(id="6", name="click", args={"index": 0}),
+    ])
+    trace = discover("goal", _target(), surface, _policy(), llm,
+                     limits=DiscoveryLimits(dead_end_repeats=3, max_steps=10))
+    assert trace.stop_reason == "dead_end"
+    assert len(trace.steps) == 5  # the three clicks after the first count; reads are skipped
+
+
 def test_repeated_expands_that_reveal_nothing_new_reach_dead_end() -> None:
     surface = FakeSurface(frames=[[node("button", "X", index=0)]])
     llm = FakeClient(script=[ToolCall(id=str(i), name="expand", args={}) for i in range(10)])
