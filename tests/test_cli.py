@@ -1061,3 +1061,113 @@ def test_discover_messages_never_echo_a_secret(monkeypatch, tmp_path) -> None:
     result = runner.invoke(app, args)
     assert result.exit_code == 1
     assert "hunter2" not in result.output
+
+
+# --- phase 9: catalog list / catalog invoke / approve --------------------------------------
+
+
+def test_approve_then_catalog_list_shows_the_approved_capability(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    artifact = base()
+    save(artifact, tmp_path)
+
+    listed = runner.invoke(app, ["catalog", "list", "--root", str(tmp_path)])
+    assert listed.exit_code == 0, listed.output
+    [tool] = json.loads(listed.stdout)
+    assert (tool["id"], tool["status"], tool["irreversible"]) == (artifact.id, "draft", False)
+    assert tool["schema"]["input_schema"]["type"] == "object"
+
+    approved = runner.invoke(app, [
+        "approve", artifact.id, "1", "--root", str(tmp_path), "--approver", "ops",
+    ])
+    assert approved.exit_code == 0, approved.output
+    [tool] = json.loads(runner.invoke(app, ["catalog", "list", "--root", str(tmp_path)]).stdout)
+    assert tool["status"] == "approved"
+
+
+def test_catalog_invoke_of_a_draft_exits_2_naming_cua_approve(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    artifact = base()
+    save(artifact, tmp_path)
+    result = runner.invoke(app, [
+        "catalog", "invoke", artifact.id, "--root", str(tmp_path),
+        "--base-url", "http://127.0.0.1:1", "--policy", _policy_file(tmp_path),
+        "--input", "member_id=12345",
+    ])
+    assert result.exit_code == 2
+    assert f"cua approve {artifact.id} 1" in result.output
+
+
+def test_catalog_invoke_runs_an_approved_capability_with_no_api_key(
+    tmp_path, monkeypatch
+) -> None:
+    import cua.catalog.invoke as invoke_module
+    import cua.cli as cli_module
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    artifact = base()
+    save(artifact, tmp_path)
+    assert runner.invoke(app, [
+        "approve", artifact.id, "1", "--root", str(tmp_path), "--approver", "ops",
+    ]).exit_code == 0
+
+    class _Quiet:
+        def route(self, *_a: object, **_k: object) -> None:
+            pass
+
+        def on(self, *_a: object, **_k: object) -> None:
+            pass
+
+    class _FakePage(_Quiet):
+        context = _Quiet()
+
+    @contextmanager
+    def _fake_launch_page(base_url: str):
+        yield _FakePage()
+
+    seen: dict[str, object] = {}
+
+    def _fake_replay(artifact, inputs, surface, mode, *, evidence=None, **kwargs):
+        seen.update(kwargs, inputs=inputs)
+        return Success(outputs={}, steps_run=[], evidence_ref="evidence/r")
+
+    monkeypatch.setattr(cli_module, "launch_page", _fake_launch_page)
+    monkeypatch.setattr(invoke_module, "run_replay", _fake_replay)
+
+    result = runner.invoke(app, [
+        "catalog", "invoke", artifact.id, "--root", str(tmp_path),
+        "--base-url", "http://127.0.0.1:1", "--policy", _policy_file(tmp_path),
+        "--evidence-root", str(tmp_path / "ev"), "--input", "member_id=12345",
+    ])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["evidence_ref"] == "evidence/r"
+    assert seen["status"] == "approved" and seen["inputs"] == {"member_id": "12345"}
+
+
+def test_catalog_invoke_of_an_irreversible_capability_prints_an_intervention(
+    tmp_path, monkeypatch
+) -> None:
+    import cua.cli as cli_module
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    artifact = base()
+    artifact.steps[0].risk = "irreversible"
+    save(artifact, tmp_path)
+    assert runner.invoke(app, [
+        "approve", artifact.id, "1", "--root", str(tmp_path), "--approver", "ops",
+    ]).exit_code == 0
+
+    @contextmanager
+    def _never(base_url: str):
+        raise AssertionError("an irreversible invoke must not open a browser")
+        yield
+
+    monkeypatch.setattr(cli_module, "launch_page", _never)
+    result = runner.invoke(app, [
+        "catalog", "invoke", artifact.id, "--root", str(tmp_path),
+        "--base-url", "http://127.0.0.1:1", "--policy", _policy_file(tmp_path),
+        "--input", "member_id=12345", "--confirm-irreversible", "--idempotency-key", "k1",
+    ])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "POLICY_BLOCKED" and payload["acted"] is False
