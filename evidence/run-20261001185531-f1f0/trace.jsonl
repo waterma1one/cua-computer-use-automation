@@ -1,0 +1,8 @@
+{"kind": "action", "step": 1, "tool": "fill", "ok": true}
+{"kind": "action", "step": 2, "tool": "fill", "ok": true}
+{"kind": "action", "step": 3, "tool": "click", "ok": true}
+{"kind": "action", "step": 4, "tool": "fill", "ok": true}
+{"kind": "llm_error", "step": 5, "detail": "Gemini request failed with HTTP 429"}
+{"kind": "llm_error", "step": 6, "detail": "Gemini request failed with HTTP 429"}
+{"kind": "llm_error", "step": 7, "detail": "Gemini request failed with HTTP 429"}
+{"kind": "discovery_stop", "reason": "consecutive_failures", "detail": "Gemini request failed with HTTP 429", "step_count": 4}

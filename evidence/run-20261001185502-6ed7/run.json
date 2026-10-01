@@ -1,0 +1,25 @@
+{
+  "goal": "Log in using the declared username and password inputs, then open a new savings sub-account for the member whose id is the declared member_id input, and submit it by pressing the final Post button on the confirmation screen.",
+  "capability": {
+    "id": "mockcu.open_subaccount_escalation_probe",
+    "name": "Open sub-account escalation probe"
+  },
+  "inputs": {
+    "username": "teller",
+    "member_id": "12345",
+    "password": "[REDACTED]"
+  },
+  "policy_mode": "strict",
+  "base_url": "http://127.0.0.1:8811",
+  "model": "gemini-3.5-flash-lite",
+  "tokens": {
+    "prompt": 13091,
+    "completion": 245,
+    "total": 13336
+  },
+  "estimated_cost_usd": null,
+  "cost_note": "no price on file for model 'gemini-3.5-flash-lite'; token counts are exact",
+  "step_count": 8,
+  "started_at": "2026-10-01T18:55:02.946414+00:00",
+  "ended_at": "2026-10-01T18:55:21.232689+00:00"
+}

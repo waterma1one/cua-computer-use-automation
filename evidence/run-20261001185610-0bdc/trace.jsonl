@@ -1,0 +1,11 @@
+{"kind": "action", "step": 1, "tool": "fill", "ok": true}
+{"kind": "action", "step": 2, "tool": "fill", "ok": true}
+{"kind": "action", "step": 3, "tool": "click", "ok": true}
+{"kind": "action", "step": 4, "tool": "fill", "ok": true}
+{"kind": "malformed_call", "step": 5, "detail": "'press_key' argument 'index' must be an integer, got '13'"}
+{"kind": "action", "step": 6, "tool": "click", "ok": true}
+{"kind": "action", "step": 7, "tool": "click", "ok": true}
+{"kind": "action", "step": 8, "tool": "select", "ok": true}
+{"kind": "action", "step": 9, "tool": "click", "ok": true}
+{"kind": "escalation", "step": 10, "action": "click", "subject": "Post", "outcome": "CannotResolve"}
+{"kind": "discovery_stop", "reason": "escalated", "detail": "escalated, not executed: 'click' on 'Post' is classified 'irreversible'; refused under policy_mode=strict (handback: CannotResolve)", "step_count": 8}
