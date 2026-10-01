@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from cua.llm.base import Completion, LLMClient, Message, ToolCall, ToolDef
+from cua.llm.base import Completion, LLMClient, Message, ToolCall, ToolDef, Usage, usage_of
 from cua.llm.gemini import LLMError
 
 __all__ = ["RetryingClient"]
@@ -32,6 +32,10 @@ class RetryingClient:
     @property
     def model(self) -> str:
         return str(getattr(self._inner, "model", "unknown"))
+
+    @property
+    def usage(self) -> Usage:
+        return usage_of(self._inner)
 
     def step(self, messages: list[Message], tools: list[ToolDef]) -> ToolCall | Completion:
         last: LLMError | None = None

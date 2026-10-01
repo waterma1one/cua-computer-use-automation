@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from cua.llm.base import Completion, LLMClient, Message, ToolCall, ToolDef
+from cua.llm.base import Completion, LLMClient, Message, ToolCall, ToolDef, Usage
 
 __all__ = ["FakeClient"]
 
@@ -20,6 +20,8 @@ class FakeClient:
 
     script: list[ToolCall | Completion]
     calls: list[tuple[list[Message], list[ToolDef]]] = field(default_factory=list)
+    step_usage: Usage | None = None
+    usage: Usage = field(default_factory=Usage)
     _next: int = field(default=0, repr=False)
 
     def step(self, messages: list[Message], tools: list[ToolDef]) -> ToolCall | Completion:
@@ -28,6 +30,8 @@ class FakeClient:
             raise AssertionError("FakeClient script exhausted")
         result = self.script[self._next]
         self._next += 1
+        if self.step_usage is not None:
+            self.usage.add(self.step_usage)
         return result
 
 

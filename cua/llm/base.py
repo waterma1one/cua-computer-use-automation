@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
 
-__all__ = ["Completion", "LLMClient", "Message", "ToolCall", "ToolDef"]
+__all__ = ["Completion", "LLMClient", "Message", "ToolCall", "ToolDef", "Usage", "usage_of"]
 
 
 @dataclass(frozen=True)
@@ -46,6 +46,27 @@ class Completion:
     """
 
     text: str
+
+
+@dataclass
+class Usage:
+    """Accumulated token counts over every `step()` of one client. Counts only -- never a
+    key, a prompt or a response."""
+
+    prompt: int = 0
+    completion: int = 0
+    total: int = 0
+
+    def add(self, other: Usage) -> None:
+        self.prompt += other.prompt
+        self.completion += other.completion
+        self.total += other.total
+
+
+def usage_of(client: object) -> Usage:
+    """The client's accumulated `usage`, or zeros for a client that reports none."""
+    usage = getattr(client, "usage", None)
+    return usage if isinstance(usage, Usage) else Usage()
 
 
 @dataclass(frozen=True)
