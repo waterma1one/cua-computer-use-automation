@@ -391,7 +391,7 @@ def _has_unverified_expect(artifact: Artifact) -> bool:
     return any(expect.verified is False for step in artifact.steps for expect in step.expects)
 
 
-def _has_irreversible_step(artifact: Artifact) -> bool:
+def has_irreversible_step(artifact: Artifact) -> bool:
     """§6.4 / ruling E15: does any step of `artifact` carry `risk="irreversible"`?
 
     Walks every step, not just `steps[0]` -- an irreversible action anywhere in the
@@ -487,7 +487,7 @@ def write_registry_entry(
                     f"{id} v{version} cannot be marked approved: it fails load-time "
                     f"validation with {len(errors)} error(s): {summary}"
                 )
-        if entry.requires_human_approval is False and _has_irreversible_step(resolved):
+        if entry.requires_human_approval is False and has_irreversible_step(resolved):
             raise ValueError(
                 f"{id} v{version} cannot clear requires_human_approval: it holds at "
                 f"least one step classified risk='irreversible' (§6.4) -- an irreversible "
