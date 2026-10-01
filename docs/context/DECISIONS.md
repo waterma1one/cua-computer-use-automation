@@ -957,3 +957,57 @@ by the three that remain (capability catalog, cross-tenant reuse, approval gatin
 score) — D5 accepted that cost when it tiered four instead of picking one or two; this
 decision does not revisit that, only executes the cut D5 already reserved for exactly this
 moment.
+
+## D48 — The discovery loop settles after every state-changing action
+A click returns as soon as the click is dispatched, before the navigation it triggers has
+committed, so an observation taken straight afterwards can still show the old page. The loop
+therefore calls `settle_observation` (the replay engine's settle logic, for callers with no
+`expects`) after each state-changing action and observes only once the page is quiet.
+**Why:** observing early made the model act on a stale page and was the root of the flaky
+end-to-end test (a race, not a flake).
+**Cost accepted:** each such action waits for the settle poll, so a discovery run is slower.
+
+## D49 — `compile()` prepends a navigate step to `app.entry`
+A fresh browser sits on a blank page, so the CLI navigates to `app.entry` before discovery
+starts and `compile()` writes the same `navigate` as the artifact's first step.
+**Why:** the artifact must be replayable from a cold session, and a trace that begins on
+"wherever the page happened to be" is not.
+**Cost accepted:** the first step is synthesised rather than observed; a capability that
+starts anywhere other than `app.entry` cannot be discovered yet.
+
+## D50 — Bounded `LLMError` retry lives at the CLI boundary
+`cua discover` wraps the Gemini client in `RetryingClient` (3 attempts, exponential backoff
+from 1 s). The loop still counts an `LLMError` that survives the retries as one failed turn.
+**Why:** live transient errors (404s, 5xx) are provider noise and should not spend the
+loop's failure budget; the loop and its tests stay free of sleeping.
+**Cost accepted:** permanent errors such as a bad key are retried too, at most about 9 calls
+(roughly 9 s) before a clean stop.
+
+## D51 — Self-verify can never approve, and reuses a different input value when given one
+Self-verification replays the compiled artifact in a fresh session and may mark it `verified`,
+never `approved` (D9). It replays with the discovery values unless `--verify-input name=value`
+supplies a different one.
+**Why:** a replay with the very value that was typed during discovery cannot tell a real
+input binding from a baked-in literal.
+**Cost accepted (acceptance criterion 8 limit):** without `--verify-input` the check reuses
+the discovery value, so it proves repeatability, not parameterisation. Promotion is also plain
+string equality, so a coincidental match can bind the wrong input.
+
+## D52 — A secret found in the serialised artifact refuses the save
+`cua discover` serialises the compiled artifact, and again after self-verify, and refuses to
+save if any declared secret input value (`--secret-input`, or a `--verify-input` for one)
+appears in it. Exit 1, one stderr line that does not echo the secret.
+**Why:** `description=goal` and near-miss literals reach `artifacts/`, which is committed, and
+evidence masking does not cover the store. `--goal` text is the operator's responsibility;
+`build_messages` is not redesigned.
+**Cost accepted:** the check is a literal match on the JSON text, so URL-encoded, split or
+JSON-escaped forms (a secret containing a newline or tab) are not caught. The better fix, giving
+the model input names and placeholders for sensitive values, is deferred.
+
+## D53 — Discovered artifacts have no outputs until a later phase adds `--output`
+`cua discover` passes `outputs={}` to `compile()`, so every model-proposed `output_name`
+is downgraded to a local and a read-only capability (a balance lookup) returns nothing.
+**Why:** the plan's Task 8 specifies it, and the spec's "model contributes the output schema"
+(§8.3) needs a declared-output flag that was not built.
+**Cost accepted (documented limit, review item I4):** discovery can find a lookup but cannot
+yet return its value; a later phase adds `--output name[:type]` (repeatable).
