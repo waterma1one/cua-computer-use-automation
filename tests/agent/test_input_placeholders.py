@@ -17,7 +17,6 @@ from cua.artifact.models import (
 from cua.llm.base import Message, ToolCall
 from cua.llm.fake import FakeClient
 from cua.observability.evidence import EvidenceWriter
-from cua.surface.models import Observation
 from tests.agent.conftest import FakeSurface, node
 from tests.agent.test_loop import _policy, _target
 
