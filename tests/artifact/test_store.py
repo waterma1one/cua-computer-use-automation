@@ -814,3 +814,31 @@ def test_approval_by_id_refuses_a_syntactically_malformed_file_the_same_way(tmp_
     path.write_text("steps: [\n")
     with pytest.raises(ValueError, match="could not be parsed"):
         write_registry_entry(tmp_path, "corebank.probe", 1, RegistryEntry(status="approved"))
+
+
+def test_registry_entry_carries_defaulted_approval_and_assist_fields() -> None:
+    entry = RegistryEntry()
+    assert entry.approver is None
+    assert entry.approved_at is None
+    assert entry.sandbox_discovered is False
+    assert entry.assisted_replays == 0
+
+
+def test_a_registry_written_before_the_new_fields_still_loads(tmp_path) -> None:
+    path = tmp_path / "artifacts" / "registry.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"x.y": {"1": {
+        "replays": 0, "requires_human_approval": True, "score": None,
+        "status": "draft", "successes": 0,
+    }}}))
+    entry = read_registry(tmp_path)["x.y"]["1"]
+    assert entry.approver is None and entry.assisted_replays == 0
+
+
+def test_the_new_registry_fields_round_trip(tmp_path) -> None:
+    write_registry_entry(tmp_path, "x.y", 1, RegistryEntry(
+        approver="ops", approved_at="2026-10-02T00:00:00+00:00",
+        sandbox_discovered=True, assisted_replays=2,
+    ))
+    entry = read_registry(tmp_path)["x.y"]["1"]
+    assert (entry.approver, entry.sandbox_discovered, entry.assisted_replays) == ("ops", True, 2)
