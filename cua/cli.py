@@ -33,13 +33,23 @@ from typing import Any, NoReturn, cast, get_args
 
 import typer
 import uvicorn
+import yaml
 from dotenv import load_dotenv
 
 from cua.agent.loop import DeclaredInput
 from cua.agent.loop import discover as run_discover
 from cua.artifact.compile import CompileError, self_verify
 from cua.artifact.compile import compile as compile_artifact
-from cua.artifact.models import App, Artifact, FailureKind, InputSpec, Provenance, Settle
+from cua.artifact.models import (
+    App,
+    Artifact,
+    FailureKind,
+    InputSpec,
+    Overlay,
+    Provenance,
+    Settle,
+)
+from cua.artifact.overlay import resolve_overlay
 from cua.artifact.store import RegistryEntry, load, read_registry, save, write_registry_entry
 from cua.artifact.validate import DeploymentAllowlist, validate
 from cua.catalog.invoke import IdempotencyLedger, InterventionRequested
@@ -199,8 +209,16 @@ def replay(
         [], "--input", help="KEY=VALUE, repeatable."
     ),
     mode: str = typer.Option("embedded", "--mode", help="embedded or supervised."),
+    overlay_path: Path | None = typer.Option(  # noqa: B008
+        None, "--overlay",
+        help="Tenant overlay YAML resolved onto the artifact before replay (spec 4.3).",
+    ),
 ) -> None:
     """Replays one capability artifact against a live target application.
+
+    `--overlay` resolves a tenant overlay onto the loaded base artifact first; the resolved
+    artifact is what is validated, replayed and written to evidence. An overlay that does
+    not target this artifact, or that resolution rejects, exits 2 before anything runs.
 
     `--policy` is required: a deployment allowlist YAML that is loaded before the
     artifact and, once the artifact loads, is checked against the artifact's own policy
@@ -255,6 +273,19 @@ def replay(
         # replay failed". No evidence is written: there is no artifact to record a run of.
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
+
+    if overlay_path is not None:
+        try:
+            overlay = Overlay.model_validate(yaml.safe_load(overlay_path.read_text()))
+            if (overlay.base_id, overlay.base_version) != (artifact.id, artifact.version):
+                raise ValueError(
+                    f"overlay targets {overlay.base_id} v{overlay.base_version}, "
+                    f"not {artifact.id} v{artifact.version}"
+                )
+            artifact = resolve_overlay(artifact, overlay)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            typer.echo(f"overlay refused: {exc}", err=True)
+            raise typer.Exit(code=2) from exc
 
     # E6: criterion 4 at the real path. `load()` has no allowlist to check narrowing
     # against; this is the first place both are in hand. Any error-level finding refuses.
