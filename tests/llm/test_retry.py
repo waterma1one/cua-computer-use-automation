@@ -56,3 +56,14 @@ def test_does_not_retry_a_non_llm_error() -> None:
 def test_model_is_taken_from_the_wrapped_client() -> None:
     assert RetryingClient(_Flaky(0)).model == "m"
     assert RetryingClient(object()).model == "unknown"  # type: ignore[arg-type]
+
+
+def test_usage_is_read_through_from_the_wrapped_client() -> None:
+    from cua.llm.base import Usage
+    from cua.llm.fake import FakeClient
+
+    inner = FakeClient(script=[CALL], step_usage=Usage(prompt=3, completion=2, total=5))
+    client = RetryingClient(inner)
+    client.step([], [])
+    assert client.usage.total == 5
+    assert RetryingClient(_Flaky(0)).usage.total == 0

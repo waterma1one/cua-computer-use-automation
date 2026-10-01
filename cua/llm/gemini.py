@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from cua.llm.base import Completion, Message, ToolCall, ToolDef
+from cua.llm.base import Completion, Message, ToolCall, ToolDef, Usage
 
 __all__ = ["GeminiClient", "LLMError", "load_gemini_client_from_env"]
 
@@ -93,6 +93,21 @@ def _parse_response(data: object) -> ToolCall | Completion:
     return Completion(text=text)
 
 
+def _parse_usage(data: object) -> Usage:
+    """Token counts from the response's `usageMetadata`; zeros when absent or malformed."""
+    meta = data.get("usageMetadata") if isinstance(data, dict) else None
+    if not isinstance(meta, dict):
+        return Usage()
+
+    def count(key: str) -> int:
+        value = meta.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    prompt, completion = count("promptTokenCount"), count("candidatesTokenCount")
+    return Usage(prompt=prompt, completion=completion,
+                 total=count("totalTokenCount") or prompt + completion)
+
+
 def _models_supporting_generate_content(client: httpx.Client, api_key: str) -> list[str]:
     response = client.get(
         f"{_BASE_URL}/models", headers={"x-goog-api-key": api_key}, params={"pageSize": 200},
@@ -115,6 +130,7 @@ class GeminiClient:
     api_key: str = field(repr=False)
     model: str
     _client: httpx.Client = field(default_factory=lambda: httpx.Client(timeout=30.0), repr=False)
+    usage: Usage = field(default_factory=Usage)
 
     def step(self, messages: list[Message], tools: list[ToolDef]) -> ToolCall | Completion:
         try:
@@ -137,6 +153,7 @@ class GeminiClient:
             raise LLMError(f"Gemini request failed: {type(exc).__name__}") from None
         except ValueError:
             raise LLMError("Gemini returned a non-JSON response") from None
+        self.usage.add(_parse_usage(data))
         return _parse_response(data)
 
 

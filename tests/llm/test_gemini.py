@@ -154,3 +154,26 @@ def test_load_from_env_refuses_with_no_key(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     with pytest.raises(LLMError, match="GEMINI_API_KEY"):
         load_gemini_client_from_env()
+
+
+def test_usage_accumulates_token_counts_from_usage_metadata() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "candidates": [{"content": {"parts": [{"text": "hm"}]}}],
+            "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 7,
+                              "totalTokenCount": 120},
+        })
+
+    client = _client(handler)
+    client.step([Message(role="user", text="go")], DISCOVERY_TOOLS)
+    client.step([Message(role="user", text="go")], DISCOVERY_TOOLS)
+    assert (client.usage.prompt, client.usage.completion, client.usage.total) == (200, 14, 240)
+
+
+def test_usage_stays_zero_when_the_response_has_no_metadata() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "x"}]}}]})
+
+    client = _client(handler)
+    client.step([Message(role="user", text="go")], DISCOVERY_TOOLS)
+    assert client.usage.total == 0
