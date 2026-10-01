@@ -4,10 +4,10 @@ Run on 2026-10-01 after the last discovery run, from the repository root:
 
     grep -rl '<the mock login password>' evidence artifacts
     grep -rEl '[0-9]{3}-[0-9]{2}-[0-9]{4}' evidence artifacts
-    grep -rl 'AIza' evidence artifacts
+    grep -rl 'AI[z]a' evidence artifacts
 
 Result: all three printed nothing. No evidence file or saved artifact contains the login
-password, a raw SSN-shaped string, or an API-key prefix. (This file names the password only
+password, a raw SSN-shaped string, or an API-key prefix. (The pattern `AI[z]a` is written with a bracket so the command does not match this file; this file names the password only
 by description, so the first grep does not match itself.)
 
 Limits: the greps read text. Screenshots (PNG) are binary and were not searched; the mock
@@ -38,4 +38,17 @@ as evidence of what had to be fixed:
   Post; the loop called the escalator at step 10 (`click` on `Post`, irreversible), handback
   `CannotResolve`, outcome `escalated`, nothing saved. The mock application's log shows no
   `POST /subaccount/post`. Text grep of these three runs for the login password, SSN-shaped
-  strings and `AIza` found nothing.
+  strings and the API-key prefix found nothing.
+
+Notes on specific runs and criteria:
+
+- The runs from `run-20261001164055-95e0` through `run-20261001181359-dc8d` predate D60 and
+  have no `run.json` or `result.json`, so they carry no token counts.
+- `run-20261001185502-6ed7`: its `result.json` `stop_detail` wrongly claims Post was pressed.
+  That is a model hallucination; the trace shows it stopped on the review page. Its artifact
+  path points at an artifact that has since been removed, and its `artifact.yaml` remains as
+  evidence only.
+- Criterion 3 (escalation) rests on `run-20261001185610-0bdc`, not on the run behind the saved
+  `open_subaccount` artifact.
+- `estimated_cost_usd` is null for `gemini-3.5-flash-lite` because no price is on file. Token
+  counts are exact, so the cost half of criterion 5 is not met.
