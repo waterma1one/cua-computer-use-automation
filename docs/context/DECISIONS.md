@@ -1139,3 +1139,24 @@ handback, so a human-assisted run can be counted clean. Belongs in REPORT.md.
 ## D67 — Catalog refuses with `CatalogRefusal`, and refuses all drafts
 `CatalogRefusal` carries a message naming `cua approve <id> <version>`; the CLI exits 2. Safe-only
 drafts are refused too, stricter than the engine, which lets them run.
+
+## D68 — Replay evidence comes from an authored v2 and a tenant overlay; `cua replay` gains `--overlay`
+Discovery (D53) emits only `continue` clauses and no outputs, so v1 can show neither a business
+outcome nor a returned value. `mockcu.lookup_member_savings_balance` v2 is v1 plus two
+`source: authored` business clauses on the Search step (`MEMBER_NOT_FOUND`, `MEMBER_RESTRICTED`) and
+one declared output (`balance`, money). The clauses were verified by replaying against the live mock
+app, then marked `verified: true` by hand, which is what lets `cua approve` accept v2 (D66's
+unverified-expect gate worked as intended). Variant B is served by a tenant overlay
+(`artifacts/<id>/overlays/v2.b.yaml`: renamed field, a two-step branch screen, extended `expects`),
+applied by a new `cua replay --overlay` option: the resolved artifact is what is validated, replayed
+and written to evidence. An overlay for another artifact or one `resolve_overlay` rejects exits 2
+before a browser opens. **Cost accepted:** the v2 edits are hand-authored, not discovered; the
+write-up says so. The escalation demo is `scripts/handoff_demo.py`, which drives the production
+service through its HTTP routes and stands in for only the human's hands.
+
+## D69 — D45 resolved by removing the dead console forms
+The console is a read-only view of interventions. Claim and handback go through the bearer-authed
+JSON API (`POST /interventions/{id}/claim`, `/handback`); the intervention page now says so and shows
+the body, instead of rendering forms that 404. Wiring cookie-authed POSTs would add an
+operator-identity concept the shared-token design does not have. **Cost accepted:** an operator needs
+`curl` or a client, not a button.
