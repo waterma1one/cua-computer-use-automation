@@ -676,3 +676,31 @@ def test_capture_before_any_observation_reports_a_distinguishable_generation(
     frame = surface.capture()
     assert frame.generation < 0
     assert frame.generation != surface.observe().generation
+
+
+# A non-input node (table cell, text) has no `value`; reading it must yield what it shows,
+# its accessible name, or discovery records no read and the compiler cannot tell one happened.
+def test_read_on_a_cell_returns_its_name(browser_page) -> None:
+    browser_page.set_content(
+        "<body><table><tr><th>Balance</th></tr><tr><td>4,218.60</td></tr></table></body>"
+    )
+    surface = WebSurface(browser_page, ObservationBudget(max_nodes=200))
+    obs = surface.observe()
+    target = next(n for n in obs.nodes if n.role == "cell" and n.name == "4,218.60")
+    loc = synthesize(target, obs.nodes)
+
+    result = surface.act(Action(kind="read", locator=loc, value=None))
+    assert result.ok is True
+    assert result.read_value == "4,218.60"
+
+
+def test_read_on_a_protected_named_non_input_never_returns_its_name(browser_page) -> None:
+    browser_page.set_content("<body><table><tr><td>Password hunter2</td></tr></table></body>")
+    surface = WebSurface(browser_page, ObservationBudget(max_nodes=200))
+    obs = surface.observe()
+    target = next(n for n in obs.nodes if n.role == "cell")
+    assert target.state.protected
+    loc = synthesize(target, obs.nodes)
+
+    result = surface.act(Action(kind="read", locator=loc, value=None))
+    assert result.read_value is None
