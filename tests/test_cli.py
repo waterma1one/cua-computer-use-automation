@@ -857,3 +857,161 @@ def test_serve_runs_the_session_service_headed_with_the_env_token(monkeypatch) -
     assert result.exit_code == 0, result.output
     assert built == {"operator_token": "s3cret", "headless": False}
     assert ran == {"app": "the-app", "host": "127.0.0.1", "port": 9123}
+
+
+def _discover_args(tmp_path) -> list[str]:
+    return [
+        "discover", "--goal", "g", "--root", str(tmp_path), "--base-url", "http://x",
+        "--policy", str(tmp_path / "missing.yaml"), "--id", "corebank.x", "--name", "x",
+    ]
+
+
+def test_discover_refuses_with_no_gemini_key(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    result = runner.invoke(app, _discover_args(tmp_path))
+    assert result.exit_code == 2
+    assert "GEMINI_API_KEY" in result.output
+
+
+def test_discover_refuses_a_missing_policy(monkeypatch, tmp_path) -> None:
+    import cua.cli as cli_module
+    from cua.llm.fake import FakeClient
+
+    monkeypatch.setattr(cli_module, "load_gemini_client_from_env", lambda: FakeClient(script=[]))
+    result = runner.invoke(app, _discover_args(tmp_path))
+    assert result.exit_code == 2
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def _fake_page_launch(monkeypatch) -> None:
+    import cua.cli as cli_module
+
+    class _Ctx:
+        def route(self, *_a: object, **_k: object) -> None:
+            pass
+
+        def on(self, *_a: object, **_k: object) -> None:
+            pass
+
+    class _Page:
+        context = _Ctx()
+
+        def on(self, *_a: object, **_k: object) -> None:
+            pass
+
+    @contextmanager
+    def _launch(base_url: str):
+        yield _Page()
+
+    monkeypatch.setattr(cli_module, "launch_page", _launch)
+
+
+class _OkSurface:
+    def __init__(self, page, *, navigation_guard) -> None:
+        pass
+
+    def act(self, action):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(ok=True)
+
+    def allowlist_violation(self) -> None:
+        return None
+
+
+def test_discover_reports_an_unfinished_run_without_a_traceback(monkeypatch, tmp_path) -> None:
+    import cua.cli as cli_module
+    from cua.agent.loop import Trace
+    from cua.artifact.models import App
+    from cua.llm.fake import FakeClient
+
+    monkeypatch.setattr(cli_module, "load_gemini_client_from_env", lambda: FakeClient(script=[]))
+    _fake_page_launch(monkeypatch)
+
+    def _unfinished(goal, target, surface, policy, llm, **_k):
+        return Trace(goal=goal, target=target, declared_inputs={}, steps=[],
+                     stop_reason="give_up", stop_detail="nope")
+
+    monkeypatch.setattr(cli_module, "WebSurface", _OkSurface)
+    monkeypatch.setattr(cli_module, "run_discover", _unfinished)
+    result = runner.invoke(app, [
+        "discover", "--goal", "g", "--root", str(tmp_path), "--base-url", "http://x",
+        "--policy", _policy_file(tmp_path, "http://x"), "--evidence-root", str(tmp_path),
+        "--id", "corebank.x", "--name", "x",
+    ])
+    assert result.exit_code == 1
+    assert "give_up" in result.output
+    assert isinstance(result.exception, SystemExit)
+    assert App  # imported for clarity of the Trace target type
+
+
+def test_discover_reports_a_compile_error_as_one_line(monkeypatch, tmp_path) -> None:
+    import cua.cli as cli_module
+    from cua.agent.loop import Trace
+    from cua.llm.fake import FakeClient
+
+    monkeypatch.setattr(cli_module, "load_gemini_client_from_env", lambda: FakeClient(script=[]))
+    _fake_page_launch(monkeypatch)
+
+    def _finished_without_observation(goal, target, surface, policy, llm, **_k):
+        return Trace(goal=goal, target=target, declared_inputs={}, steps=[],
+                     stop_reason="finish", stop_detail="d", checkpoint_index=0,
+                     final_observation=None)
+
+    monkeypatch.setattr(cli_module, "WebSurface", _OkSurface)
+    monkeypatch.setattr(cli_module, "run_discover", _finished_without_observation)
+    result = runner.invoke(app, [
+        "discover", "--goal", "g", "--root", str(tmp_path), "--base-url", "http://x",
+        "--policy", _policy_file(tmp_path, "http://x"), "--evidence-root", str(tmp_path),
+        "--id", "corebank.x", "--name", "x",
+    ])
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert len(result.output.strip().splitlines()) == 1
+    assert not (tmp_path / "artifacts").exists()
+
+
+def test_discover_reports_an_entry_allowlist_violation_first(monkeypatch, tmp_path) -> None:
+    import cua.cli as cli_module
+    from cua.llm.fake import FakeClient
+
+    monkeypatch.setattr(cli_module, "load_gemini_client_from_env", lambda: FakeClient(script=[]))
+    _fake_page_launch(monkeypatch)
+
+    class _Refusing:
+        def __init__(self, page, *, navigation_guard) -> None:
+            pass
+
+        def act(self, action):
+            from cua.surface.base import SurfaceError
+
+            raise SurfaceError("navigation blocked")
+
+        def allowlist_violation(self) -> str:
+            return "origin http://evil is not allowed"
+
+    def _must_not_run(*_a, **_k):
+        raise AssertionError("discovery must not run after a refused entry")
+
+    monkeypatch.setattr(cli_module, "WebSurface", _Refusing)
+    monkeypatch.setattr(cli_module, "run_discover", _must_not_run)
+    result = runner.invoke(app, [
+        "discover", "--goal", "g", "--root", str(tmp_path), "--base-url", "http://x",
+        "--policy", _policy_file(tmp_path, "http://x"), "--evidence-root", str(tmp_path),
+        "--id", "corebank.x", "--name", "x",
+    ])
+    assert result.exit_code == 1
+    assert "allowlist violation" in result.output
+    assert isinstance(result.exception, SystemExit)
+
+
+def test_discover_refuses_a_malformed_input_name(monkeypatch, tmp_path) -> None:
+    import cua.cli as cli_module
+    from cua.llm.fake import FakeClient
+
+    monkeypatch.setattr(cli_module, "load_gemini_client_from_env", lambda: FakeClient(script=[]))
+    args = _discover_args(tmp_path)
+    args[args.index("--policy") + 1] = _policy_file(tmp_path, "http://x")
+    result = runner.invoke(app, [*args, "--input", "Member-ID=1"])
+    assert result.exit_code == 2
+    assert "name=value" in result.output

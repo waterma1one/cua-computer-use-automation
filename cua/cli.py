@@ -21,7 +21,10 @@ the same shape `mockapp/__main__.py` uses for the mock app.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn, cast, get_args
 
@@ -29,9 +32,15 @@ import typer
 import uvicorn
 from dotenv import load_dotenv
 
-from cua.artifact.models import Artifact, InputSpec
-from cua.artifact.store import RegistryEntry, load, read_registry
+from cua.agent.loop import DeclaredInput
+from cua.agent.loop import discover as run_discover
+from cua.artifact.compile import CompileError, self_verify
+from cua.artifact.compile import compile as compile_artifact
+from cua.artifact.models import App, Artifact, InputSpec, Provenance, Settle
+from cua.artifact.store import RegistryEntry, load, read_registry, save, write_registry_entry
 from cua.artifact.validate import validate
+from cua.llm.gemini import LLMError, load_gemini_client_from_env
+from cua.llm.retry import RetryingClient
 from cua.observability.evidence import EvidenceWriter
 from cua.policy.allowlist import navigation_guard
 from cua.policy.config import load_policy
@@ -39,6 +48,8 @@ from cua.replay.engine import replay as run_replay
 from cua.replay.engine import validate_inputs
 from cua.replay.result import Failure, Mode, mint_run_id
 from cua.session.service import create_app as create_session_app
+from cua.surface.base import SurfaceError
+from cua.surface.models import Action
 from cua.surface.web import WebSurface, launch_page
 
 load_dotenv()
@@ -314,3 +325,124 @@ def serve(
         typer.echo(f"{_OPERATOR_TOKEN_ENV} must be set to a non-empty token", err=True)
         raise typer.Exit(code=2)
     uvicorn.run(create_session_app(operator_token=token, headless=False), host=host, port=port)
+
+
+def _violation(surface: WebSurface) -> str | None:
+    try:
+        return surface.allowlist_violation()
+    except SurfaceError:
+        return None
+
+
+@app.command()
+def discover(
+    goal: str = typer.Option(..., "--goal", help="What the discovery run should accomplish."),
+    root: Path = typer.Option(..., "--root", help="Artifact store root."),  # noqa: B008
+    base_url: str = typer.Option(..., "--base-url", help="Base URL of the target app."),
+    policy_path: Path = typer.Option(  # noqa: B008
+        ..., "--policy", help="Deployment policy YAML (see policy.example.yaml)."
+    ),
+    evidence_root: Path = typer.Option(  # noqa: B008
+        Path("."), "--evidence-root", help="Where evidence/<run_id>/ is written."
+    ),
+    id: str = typer.Option(..., "--id", help="The capability id to save."),  # noqa: A002
+    name: str = typer.Option(..., "--name", help="The capability's human-readable name."),
+    version: int = typer.Option(1, "--version"),
+    input_pairs: list[str] = typer.Option(  # noqa: B008
+        [], "--input", help="name=example value of a declared input, repeatable."
+    ),
+    secret_pairs: list[str] = typer.Option(  # noqa: B008
+        [], "--secret-input", help="Like --input, but the input is declared sensitive."
+    ),
+) -> None:
+    """Drives one discovery run, compiles the trace, self-verifies it against a fresh
+    session, and saves it `draft` only on success.
+
+    The only command that needs a model API key (`GEMINI_API_KEY`, exit 2 if absent) or
+    network beyond the target app (RULES.md S7). Every step is written to
+    `evidence/<run_id>/trace.jsonl` as it happens, and the saved artifact's
+    `Provenance.trace_ref` names that run. Never marks anything `approved` (D9): approval
+    is a separate, deliberate `cua approve`. Any refusal (unfinished run, uncompilable
+    trace, failed self-verification) is a one-line message and exit 1, never a traceback.
+    """
+    try:
+        llm = RetryingClient(load_gemini_client_from_env())
+    except LLMError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    try:
+        policy = load_policy(policy_path)
+    except (FileNotFoundError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    declared: dict[str, DeclaredInput] = {}
+    for pairs, sensitive in ((input_pairs, False), (secret_pairs, True)):
+        for pair in pairs:
+            key, sep, value = pair.partition("=")
+            if not sep or re.fullmatch(r"[a-z][a-z0-9_]*", key) is None:
+                typer.echo("an input must be name=value with name matching [a-z][a-z0-9_]*",
+                           err=True)
+                raise typer.Exit(code=2)
+            declared[key] = DeclaredInput(
+                spec=InputSpec(type="string", sensitive=sensitive), example_value=value,
+            )
+
+    writer = EvidenceWriter(evidence_root)
+    target = App(vendor_product=id.split(".")[0], variant="base", surface="web", entry="/")
+    with launch_page(base_url) as page:
+        surface = WebSurface(page, navigation_guard=navigation_guard(policy))
+        # The loop observes whatever page the surface is on; a fresh browser is on a blank
+        # page, so discovery is put where the capability begins, `app.entry`.
+        opened = False
+        with contextlib.suppress(SurfaceError):
+            opened = surface.act(Action(kind="navigate", value=target.entry)).ok
+        # D40: an allowlist violation outranks every other reading, so it is checked first,
+        # both after the entry navigation and after the run.
+        violation = _violation(surface)
+        trace = None
+        if violation is None and opened:
+            trace = run_discover(
+                goal, target, surface, policy, llm, declared_inputs=declared, evidence=writer,
+            )
+            violation = _violation(surface)
+
+    if violation is not None:
+        typer.echo(f"discovery refused: allowlist violation: {violation}; nothing was saved",
+                   err=True)
+        raise typer.Exit(code=1)
+    if trace is None:
+        typer.echo(f"discovery could not open entry {target.entry!r}; nothing was saved",
+                   err=True)
+        raise typer.Exit(code=1)
+    if trace.stop_reason != "finish":
+        typer.echo(
+            f"discovery did not finish (stop_reason={trace.stop_reason!r}: "
+            f"{trace.stop_detail}); nothing was saved", err=True,
+        )
+        raise typer.Exit(code=1)
+
+    provenance = Provenance(
+        discovered_at=datetime.now(UTC), model=llm.model,
+        policy_mode=policy.policy_mode, provider_retention="training_permitted",
+        run_id=writer.run_id, trace_ref=f"{writer.evidence_ref()}/trace.jsonl",
+    )
+    try:
+        artifact = compile_artifact(
+            trace, id=id, version=version, name=name, description=goal, app=target,
+            settle=Settle(timeout_ms=5000, poll_ms=200), max_duration_ms=60000, outputs={},
+            provenance=provenance,
+        )
+        verified = self_verify(
+            artifact, base_url, inputs={k: d.example_value for k, d in declared.items()},
+            policy=policy, evidence=writer,
+        )
+        path = save(verified, root)
+    except (CompileError, FileExistsError, ValueError) as exc:
+        typer.echo(" ".join(str(exc).split()), err=True)
+        raise typer.Exit(code=1) from exc
+    write_registry_entry(
+        root, verified.id, verified.version, RegistryEntry(status="draft"), artifact=verified,
+    )
+    typer.echo(f"saved {path}, verified={verified.verified}")
