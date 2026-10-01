@@ -73,12 +73,23 @@ def _matcher_from_node(node: Node) -> Matcher:
     return Matcher(strategy="text", role=None, name=node.value, name_match="exact")
 
 
+_PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
+
+
 def _promote_or_refuse(
     value: str, node: Node, declared_inputs: dict[str, DeclaredInput], local_names: dict[str, str],
 ) -> StepValue:
-    for name, declared in declared_inputs.items():
-        if value == declared.example_value:
-            return FromInput(from_input=_identifier(name))
+    # The discovery loop records a typed input as its `{{name}}` placeholder: the name is the
+    # promotion, and no value (a sensitive one above all) is ever compared or stored.
+    placeholder = _PLACEHOLDER.fullmatch(value)
+    if placeholder is not None and placeholder.group(1) in declared_inputs:
+        return FromInput(from_input=_identifier(placeholder.group(1)))
+    # A literal equal to a declared value is promoted too; when several inputs share that
+    # value the sensitive one wins, so a credential is never left as a plain input's twin.
+    matches = [(n, d) for n, d in declared_inputs.items() if value == d.example_value]
+    if matches:
+        matches.sort(key=lambda m: not m[1].spec.sensitive)
+        return FromInput(from_input=_identifier(matches[0][0]))
     for step_id, produced_value in local_names.items():
         if value == produced_value:
             return FromStep(from_step=step_id)

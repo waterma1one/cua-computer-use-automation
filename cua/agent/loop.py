@@ -15,10 +15,11 @@ backoff belongs to the caller that owns the real client, not here.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from cua.agent.prompt import build_messages
+from cua.agent.prompt import PromptInput, build_messages
 from cua.agent.tools import DISCOVERY_ONLY_TOOL_NAMES, DISCOVERY_TOOLS, validate_tool_call
 from cua.artifact.models import App, InputSpec
 from cua.llm.base import Completion, LLMClient, Message, ToolCall
@@ -201,6 +202,35 @@ def _policy_refusal(action: ActionKind, name_or_path: str | None,
     return None
 
 
+# A placeholder the model types to use a declared input: the whole `value`, nothing else.
+_PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
+_VALUE_TOOLS: frozenset[str] = frozenset({"fill", "select", "press_key"})
+
+
+def _placeholder_name(value: str) -> str | None:
+    match = _PLACEHOLDER.fullmatch(value)
+    return match.group(1) if match else None
+
+
+def _substitute(call: ToolCall, declared: dict[str, DeclaredInput]) -> str | None:
+    """The real value to hand the surface for `call`'s `value` (the text itself when it holds
+    no placeholder), or `None` if the call has no value. Raises `ValueError`, with a message
+    for the model, on a placeholder that names no declared input or is not the whole value."""
+    value = call.args.get("value")
+    if call.name not in _VALUE_TOOLS or not isinstance(value, str):
+        return value if isinstance(value, str) else None
+    name = _placeholder_name(value)
+    if name is not None:
+        if name not in declared:
+            known = ", ".join(sorted(declared)) or "none"
+            raise ValueError(f"placeholder {{{{{name}}}}} is not a declared input; "
+                             f"declared inputs: {known}")
+        return declared[name].example_value
+    if _PLACEHOLDER.search(value):
+        raise ValueError("a placeholder must be the whole value, not part of longer text")
+    return value
+
+
 def _describe(call: ToolCall) -> str:
     return f"called {call.name}({json.dumps(call.args, sort_keys=True, default=str)})"
 
@@ -213,6 +243,18 @@ def discover(
     clock: Clock | None = None,
 ) -> Trace:
     declared = declared_inputs or {}
+    prompt_inputs = [PromptInput(name=n, sensitive=d.spec.sensitive, example=d.example_value)
+                     for n, d in sorted(declared.items())]
+    secrets = sorted(((d.example_value, n) for n, d in declared.items()
+                      if d.spec.sensitive and d.example_value), key=lambda p: -len(p[0]))
+
+    def mask(text: str) -> str:
+        """`text` with any sensitive declared value replaced by its placeholder, for every
+        message the model or the evidence log is shown."""
+        for secret, name in secrets:
+            text = text.replace(secret, f"{{{{{name}}}}}")
+        return text
+
     active_limits = limits or DiscoveryLimits()
     sink: EvidenceSink = evidence if evidence is not None else _NullSink()
     active_clock: Clock = clock if clock is not None else SYSTEM_CLOCK
@@ -270,7 +312,7 @@ def discover(
         """The surface raised while the loop was only looking (observe, snapshot) -- there is
         nothing to retry against, so the run ends with a recorded reason, never a raise."""
         return violation_stop() or stop("consecutive_failures",
-                                        f"surface error while {doing}: {exc}")
+                                        f"surface error while {doing}: {mask(str(exc))}")
 
     def refresh(*, counts: bool = True, settle: bool = False) -> Trace | None:
         """Re-observe after a turn. Returns a stopping `Trace` if the surface cannot be
@@ -301,7 +343,7 @@ def discover(
                         f"observation unchanged across {unchanged} consecutive turns")
 
         try:
-            raw = llm.step(build_messages(goal, observation, history), DISCOVERY_TOOLS)
+            raw = llm.step(build_messages(goal, observation, history, prompt_inputs), DISCOVERY_TOOLS)
         except LLMError as exc:
             if (halt := failed("llm_error", step_num, str(exc))) is not None:
                 return halt
@@ -364,6 +406,15 @@ def discover(
                 return halt
             continue
 
+        try:
+            real_value = _substitute(call, declared)
+        except ValueError as exc:
+            history.append(Message(role="tool", text=f"error: {exc}", tool_name=call.name,
+                                   tool_call_id=call.id))
+            if (halt := failed("malformed_call", step_num, str(exc))) is not None:
+                return halt
+            continue
+
         acted_on = observation
         try:
             action_result: ActionResult
@@ -371,18 +422,16 @@ def discover(
                 action_result = surface.act(Action(
                     kind=kind, value=path if isinstance(path, str) else None))
             else:
-                value = call.args.get("value")
                 action_result = surface.act_on_index(
-                    observation.generation, index, kind,
-                    value if isinstance(value, str) else None)
+                    observation.generation, index, kind, real_value)
         except (StaleObservationError, SurfaceError) as exc:
             if (halt := violation_stop()) is not None:
                 return halt
-            history.append(Message(role="tool", text=f"error: {exc}", tool_name=call.name,
-                                   tool_call_id=call.id))
+            history.append(Message(role="tool", text=f"error: {mask(str(exc))}",
+                                   tool_name=call.name, tool_call_id=call.id))
             if (halt := refresh()) is not None:
                 return halt
-            if (halt := failed("failed_call", step_num, str(exc))) is not None:
+            if (halt := failed("failed_call", step_num, mask(str(exc)))) is not None:
                 return halt
             continue
 
@@ -391,7 +440,8 @@ def discover(
 
         history.append(Message(
             role="tool", tool_name=call.name, tool_call_id=call.id,
-            text=action_result.read_value or ("ok" if action_result.ok else "failed"),
+            text=mask(action_result.read_value) if action_result.read_value
+            else ("ok" if action_result.ok else "failed"),
         ))
 
         if not action_result.ok:
