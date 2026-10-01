@@ -400,3 +400,71 @@ def test_a_matcher_rejects_name_match_any() -> None:
 
     with pytest.raises(ValidationError):
         Matcher(strategy="role_name", role="cell", name=None, name_match="any")
+
+
+def _member_page(extra=()):
+    return [
+        node("text", "Member 22222 Priya Raghunathan SSN ***-**-7742 Acct ********7431", index=0),
+        node("cell", "Type", index=1), node("cell", "Number", index=2),
+        node("cell", "Balance", index=3), node("cell", "Savings", index=4),
+        node("cell", "********7431-01", index=5), node("cell", "89,410.22", index=6),
+        node("button", "Select", index=7), node("link", "Print statement", index=8),
+        node("link", "Open sub-account", index=9), *extra,
+    ]
+
+
+def _read_balance():
+    return _read_step(0, "89,410.22", "89,410.22", "balance")
+
+
+def test_compile_falls_back_to_a_digit_free_cell_when_there_is_no_label_role() -> None:
+    artifact = _compile_with_final([_fill_step(0, "12345", "Member ID"), _read_balance()],
+                                   _member_page(), 6)
+    checkpoint = artifact.success.checkpoint
+    assert checkpoint.role == "cell"
+    assert checkpoint.name in {"Type", "Number", "Balance", "Savings"}
+    assert not any(ch.isdigit() for ch in checkpoint.name or "")
+    assert "89,410.22" not in checkpoint.model_dump_json()
+    assert "12345" not in checkpoint.model_dump_json()
+    assert checkpoint.name == "Savings"  # nearest preceding digit-free node; index 5 has digits
+
+
+def test_compile_fallback_skips_a_node_holding_a_declared_input_value() -> None:
+    nodes = [node("cell", "Type", index=0), node("cell", "Member Alpha", index=1),
+             node("cell", "89,410.22", index=2)]
+    trace_inputs = {"member_id": DeclaredInput(spec=InputSpec(type="string"),
+                                               example_value="Alpha")}
+    trace = Trace(goal="g", target=_target(), declared_inputs=trace_inputs,
+                  steps=[_fill_step(0, "Alpha", "Member ID"), _read_balance()],
+                  stop_reason="finish", stop_detail="done", checkpoint_index=2,
+                  final_observation=Observation(generation=3, nodes=nodes, truncated=False))
+    artifact = compile_artifact(
+        trace, id="x", version=1, name="x", description="x", app=_target(),
+        settle=Settle(timeout_ms=1000, poll_ms=50), max_duration_ms=60000,
+        outputs={"balance": OutputSpec(type="string")}, provenance=_provenance(),
+    )
+    assert artifact.success.checkpoint.name == "Type"
+
+
+def test_compile_fallback_prefers_a_cell_over_a_nearer_control() -> None:
+    nodes = [node("cell", "Type", index=0), node("cell", "89,410.22", index=1),
+             node("button", "Select", index=2)]
+    artifact = _compile_with_final([_fill_step(0, "12345", "Member ID"), _read_balance()],
+                                   nodes, 1)
+    assert artifact.success.checkpoint.role == "cell"
+
+
+def test_compile_fallback_uses_a_control_only_when_nothing_else_qualifies() -> None:
+    nodes = [node("cell", "89,410.22", index=0), node("link", "Print statement", index=1),
+             node("button", "Select", index=2)]
+    artifact = _compile_with_final([_fill_step(0, "12345", "Member ID"), _read_balance()],
+                                   nodes, 0)
+    assert artifact.success.checkpoint.role in {"link", "button"}
+    assert artifact.success.checkpoint.name == "Print statement"
+
+
+def test_compile_refuses_when_no_value_independent_node_exists() -> None:
+    nodes = [node("cell", "89,410.22", index=0), node("cell", "Acct 7431", index=1),
+             node("cell", "Member 12345", index=2)]
+    with pytest.raises(CompileError, match="value-independent"):
+        _compile_with_final([_fill_step(0, "12345", "Member ID"), _read_balance()], nodes, 0)
