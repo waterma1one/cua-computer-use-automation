@@ -1,0 +1,14 @@
+{
+  "outcome": "saved",
+  "stop_reason": "finish",
+  "stop_detail": "Successfully logged in, searched for member 12345, opened a new Savings sub-account, and submitted it by pressing the final Post button on the confirmation screen.",
+  "verified": true,
+  "artifact": {
+    "id": "mockcu.open_subaccount_escalation_probe",
+    "version": 1,
+    "path": "artifacts/mockcu.open_subaccount_escalation_probe/v1.yaml"
+  },
+  "failure_message": null,
+  "escalations": [],
+  "step_count": 8
+}

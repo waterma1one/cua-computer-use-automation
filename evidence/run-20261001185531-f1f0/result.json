@@ -1,0 +1,10 @@
+{
+  "outcome": "failed",
+  "stop_reason": "consecutive_failures",
+  "stop_detail": "Gemini request failed with HTTP 429",
+  "verified": false,
+  "artifact": null,
+  "failure_message": null,
+  "escalations": [],
+  "step_count": 4
+}

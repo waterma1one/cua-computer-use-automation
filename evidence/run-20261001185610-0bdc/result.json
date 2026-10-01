@@ -1,0 +1,19 @@
+{
+  "outcome": "escalated",
+  "stop_reason": "escalated",
+  "stop_detail": "escalated, not executed: 'click' on 'Post' is classified 'irreversible'; refused under policy_mode=strict (handback: CannotResolve)",
+  "verified": false,
+  "artifact": null,
+  "failure_message": null,
+  "escalations": [
+    {
+      "step_id": "discover_10",
+      "kind": "POLICY_BLOCKED",
+      "expected": "a safe action under policy_mode=strict",
+      "observed": "'click' on 'Post' is classified 'irreversible'; refused under policy_mode=strict",
+      "acted": false,
+      "outcome": "CannotResolve"
+    }
+  ],
+  "step_count": 8
+}

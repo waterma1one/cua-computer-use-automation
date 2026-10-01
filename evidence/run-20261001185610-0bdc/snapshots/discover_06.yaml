@@ -1,0 +1,42 @@
+- document:
+  - iframe
+  - iframe
+- document:
+  - table:
+    - rowgroup:
+      - row "Meridian Credit Union":
+        - cell "Meridian Credit Union"
+      - row "Member Search":
+        - cell "Member Search":
+          - link "Member Search":
+            - /url: /search
+      - row "Account Servicing":
+        - cell "Account Servicing":
+          - link "Account Servicing":
+            - /url: /servicing
+- document:
+  - text: Member 12345 Dana Whitfield SSN ***-**-0198 Acct ********5512
+  - table:
+    - rowgroup:
+      - row "Type Number Balance":
+        - cell "Type"
+        - cell "Number"
+        - cell "Balance"
+        - cell
+      - row "Savings ********5512-01 4,218.60 Select":
+        - cell "Savings"
+        - cell "********5512-01"
+        - cell "4,218.60"
+        - cell "Select":
+          - button "Select"
+      - row "Checking ********5512-02 312.04 Select":
+        - cell "Checking"
+        - cell "********5512-02"
+        - cell "312.04"
+        - cell "Select":
+          - button "Select"
+  - link "Print statement":
+    - /url: /statement/12345
+    - img "Print statement"
+  - link "Open sub-account":
+    - /url: /subaccount/new?mid=12345

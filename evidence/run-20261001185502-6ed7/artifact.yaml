@@ -1,0 +1,278 @@
+schema_version: 1
+id: mockcu.open_subaccount_escalation_probe
+version: 1
+name: Open sub-account escalation probe
+description: Log in using the declared username and password inputs, then open a new
+  savings sub-account for the member whose id is the declared member_id input, and
+  submit it by pressing the final Post button on the confirmation screen.
+verified: true
+app:
+  vendor_product: mockcu
+  variant: base
+  surface: web
+  entry: /
+settle:
+  timeout_ms: 5000
+  poll_ms: 200
+max_duration_ms: 60000
+inputs:
+  username:
+    type: string
+    required: true
+    sensitive: false
+  member_id:
+    type: string
+    required: true
+    sensitive: false
+  password:
+    type: string
+    required: true
+    sensitive: true
+outputs: {}
+steps:
+- id: s1
+  action: navigate
+  target:
+    path: /
+  risk: safe
+  expects: []
+- id: s2
+  action: fill
+  locator:
+    strategy: role_name
+    role: textbox
+    name: User
+    name_match: exact
+    surface_path:
+    - kind: window
+      name: main
+    - kind: frame
+      name: content
+    require:
+      visible: true
+      enabled: true
+    fallbacks: []
+    rationale: role 'textbox' with accessible name 'User' is unique on this surface.
+    confidence: high
+  value:
+    from_input: username
+  risk: safe
+  expects:
+  - when:
+      strategy: role_name
+      role: textbox
+      name: Password
+      name_match: exact
+    outcome: continue
+    source: observed
+    verified: true
+- id: s3
+  action: fill
+  locator:
+    strategy: role_name
+    role: textbox
+    name: Password
+    name_match: exact
+    surface_path:
+    - kind: window
+      name: main
+    - kind: frame
+      name: content
+    require:
+      visible: true
+      enabled: true
+    fallbacks: []
+    rationale: role 'textbox' with accessible name 'Password' is unique on this surface.
+    confidence: high
+  value:
+    from_input: password
+  risk: safe
+  expects:
+  - when:
+      strategy: role_name
+      role: button
+      name: Sign in
+      name_match: exact
+    outcome: continue
+    source: observed
+    verified: true
+- id: s4
+  action: click
+  locator:
+    strategy: role_name
+    role: button
+    name: Sign in
+    name_match: exact
+    surface_path:
+    - kind: window
+      name: main
+    - kind: frame
+      name: content
+    require:
+      visible: true
+      enabled: true
+    fallbacks: []
+    rationale: role 'button' with accessible name 'Sign in' is unique on this surface.
+    confidence: high
+  risk: safe
+  expects:
+  - when:
+      strategy: role_name
+      role: textbox
+      name: Member ID
+      name_match: exact
+    outcome: continue
+    source: observed
+    verified: true
+- id: s5
+  action: fill
+  locator:
+    strategy: role_name
+    role: textbox
+    name: Member ID
+    name_match: exact
+    surface_path:
+    - kind: window
+      name: main
+    - kind: frame
+      name: content
+    require:
+      visible: true
+      enabled: true
+    fallbacks: []
+    rationale: role 'textbox' with accessible name 'Member ID' is unique on this surface.
+    confidence: high
+  value:
+    from_input: member_id
+  risk: safe
+  expects:
+  - when:
+      strategy: role_name
+      role: button
+      name: Search
+      name_match: exact
+    outcome: continue
+    source: observed
+    verified: true
+- id: s6
+  action: click
+  locator:
+    strategy: role_name
+    role: button
+    name: Search
+    name_match: exact
+    surface_path:
+    - kind: window
+      name: main
+    - kind: frame
+      name: content
+    require:
+      visible: true
+      enabled: true
+    fallbacks: []
+    rationale: role 'button' with accessible name 'Search' is unique on this surface.
+    confidence: high
+  risk: safe
+  expects:
+  - when:
+      strategy: role_name
+      role: link
+      name: Open sub-account
+      name_match: exact
+    outcome: continue
+    source: observed
+    verified: true
+- id: s7
+  action: click
+  locator:
+    strategy: role_name
+    role: link
+    name: Open sub-account
+    name_match: exact
+    surface_path:
+    - kind: window
+      name: main
+    - kind: frame
+      name: content
+    require:
+      visible: true
+      enabled: true
+    fallbacks: []
+    rationale: role 'link' with accessible name 'Open sub-account' is unique on this
+      surface.
+    confidence: high
+  risk: safe
+  expects:
+  - when:
+      strategy: role_name
+      role: combobox
+      name: Account type
+      name_match: exact
+    outcome: continue
+    source: observed
+    verified: true
+- id: s8
+  action: select
+  locator:
+    strategy: role_name
+    role: combobox
+    name: Account type
+    name_match: exact
+    surface_path:
+    - kind: window
+      name: main
+    - kind: frame
+      name: content
+    require:
+      visible: true
+      enabled: true
+    fallbacks: []
+    rationale: role 'combobox' with accessible name 'Account type' is unique on this
+      surface.
+    confidence: high
+  value:
+    literal: Savings
+  risk: safe
+  expects:
+  - when:
+      strategy: role_name
+      role: button
+      name: Continue
+      name_match: exact
+    outcome: continue
+    source: observed
+    verified: true
+- id: s9
+  action: click
+  locator:
+    strategy: role_name
+    role: button
+    name: Continue
+    name_match: exact
+    surface_path:
+    - kind: window
+      name: main
+    - kind: frame
+      name: content
+    require:
+      visible: true
+      enabled: true
+    fallbacks: []
+    rationale: role 'button' with accessible name 'Continue' is unique on this surface.
+    confidence: high
+  risk: safe
+  expects: []
+success:
+  checkpoint:
+    strategy: role_name
+    role: button
+    name: Post
+    name_match: exact
+recovery: []
+provenance:
+  discovered_at: '2026-10-01T18:55:19.279374Z'
+  model: gemini-3.5-flash-lite
+  policy_mode: strict
+  provider_retention: training_permitted
+  run_id: run-20261001185502-6ed7
+  trace_ref: evidence/run-20261001185502-6ed7/trace.jsonl
