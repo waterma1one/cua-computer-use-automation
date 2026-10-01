@@ -1,6 +1,7 @@
 """The whole pipeline, live, with a scripted FakeClient standing in for the model -- this
 phase never requires a real key (acceptance criterion 1); phase 8 is the one real run.
 """
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -140,10 +141,10 @@ def test_self_verify_replays_with_a_different_value_than_discovery_used(
     assert "12345" not in artifact.model_dump_json()
 
 
-def _login_script() -> list[ToolCall]:
+def _login_script(password: str = DEFAULT_LOGIN_PASSWORD) -> list[ToolCall]:
     return [
         ToolCall(id="1", name="fill", args={"index": 12, "value": DEFAULT_LOGIN_USER}),
-        ToolCall(id="2", name="fill", args={"index": 16, "value": DEFAULT_LOGIN_PASSWORD}),
+        ToolCall(id="2", name="fill", args={"index": 16, "value": password}),
         ToolCall(id="3", name="click", args={"index": 19}),
         ToolCall(id="4", name="finish", args={"summary": "in", "checkpoint_index": 15}),
     ]
@@ -166,6 +167,27 @@ def test_a_secret_in_the_goal_is_refused_at_save_and_nothing_is_written(
     assert result.exit_code == 1
     assert "declared secret" in result.output
     assert DEFAULT_LOGIN_PASSWORD not in result.output
+    assert not (store / "artifacts").exists() or not list((store / "artifacts").rglob("*.yaml"))
+
+
+@pytest.mark.parametrize("secret", ['pa"ss', "pa\\ss"])
+def test_a_secret_with_a_quote_or_backslash_in_the_goal_is_refused(
+    monkeypatch, tmp_path, live_mockapp, secret,
+) -> None:
+    monkeypatch.setattr(cli_module, "load_gemini_client_from_env",
+                        lambda: FakeClient(script=_login_script(secret)))
+    store = tmp_path / "store"
+    result = runner.invoke(app, [
+        "discover", "--goal", f"Log in with password {secret}.",
+        "--root", str(store), "--base-url", live_mockapp,
+        "--policy", _policy(tmp_path, live_mockapp),
+        "--evidence-root", str(tmp_path / "ev"), "--id", "corebank.login", "--name", "login",
+        "--input", f"user={DEFAULT_LOGIN_USER}",
+        "--secret-input", f"password={secret}",
+    ])
+    assert result.exit_code == 1
+    assert "declared secret" in result.output
+    assert secret not in result.output
     assert not (store / "artifacts").exists() or not list((store / "artifacts").rglob("*.yaml"))
 
 

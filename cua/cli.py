@@ -327,22 +327,34 @@ def serve(
     uvicorn.run(create_session_app(operator_token=token, headless=False), host=host, port=port)
 
 
-# Discovery evidence can hold page content from a real application, so unlike `replay` its
-# default lives in the user's cache directory, not the current working tree.
 def _refuse_secret_in_artifact(artifact: Artifact, writer: EvidenceWriter) -> None:
     """Raises `ValueError` if the serialised artifact holds any declared secret value.
 
-    Covers the description (the operator's `--goal`), literals and navigate paths in one
-    check; the message never carries the secret itself.
+    Covers the description (the operator's `--goal`), literals and navigate paths. Checks
+    each string leaf (and dict key) of the model dump rather than its JSON text, because
+    JSON escaping (`"` -> `\\"`, `\\` -> `\\\\`) would hide those characters from a match
+    while the saved YAML writes them literally. The message never carries the secret.
     """
-    text = artifact.model_dump_json()
-    if writer.mask(text) != text:
+    if _holds_secret(artifact.model_dump(mode="json"), writer):
         raise ValueError(
             "discovery refused: the artifact contains a declared secret input value "
             "(for example in --goal); nothing was saved"
         )
 
 
+def _holds_secret(value: object, writer: EvidenceWriter) -> bool:
+    if isinstance(value, str):
+        return writer.mask(value) != value
+    if isinstance(value, dict):
+        return any(_holds_secret(k, writer) or _holds_secret(v, writer)
+                   for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_holds_secret(v, writer) for v in value)
+    return False
+
+
+# Discovery evidence can hold page content from a real application, so unlike `replay` its
+# default lives in the user's cache directory, not the current working tree.
 _DISCOVER_EVIDENCE_ROOT = Path.home() / ".cache" / "cua"
 
 

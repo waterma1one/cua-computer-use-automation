@@ -1000,9 +1000,10 @@ appears in it. Exit 1, one stderr line that does not echo the secret.
 **Why:** `description=goal` and near-miss literals reach `artifacts/`, which is committed, and
 evidence masking does not cover the store. `--goal` text is the operator's responsibility;
 `build_messages` is not redesigned.
-**Cost accepted:** the check is a literal match on the JSON text, so URL-encoded, split or
-JSON-escaped forms (a secret containing a newline or tab) are not caught. The better fix, giving
-the model input names and placeholders for sensitive values, is deferred.
+**Cost accepted:** the check is a literal match on each string leaf and key of the model dump
+(not on JSON text, so `"` and `\` in a secret are caught, as are newlines and tabs); URL-encoded
+or split forms are not caught. The better fix, giving the model input names and placeholders for
+sensitive values, is deferred.
 
 ## D53 — Discovered artifacts have no outputs until a later phase adds `--output`
 `cua discover` passes `outputs={}` to `compile()`, so every model-proposed `output_name`
