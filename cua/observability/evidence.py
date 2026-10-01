@@ -30,6 +30,14 @@ from cua.surface.snapshot import scrub_protected_values
 _REDACTION_MARKER = "[REDACTED]"
 
 
+def mask_secrets(value: str, secrets: Iterable[str]) -> str:
+    """Masks every occurrence of each secret in `value`, longest secret first so a secret
+    that contains another is never left with a leaking tail. Empty secrets are skipped."""
+    for secret in sorted({v for v in secrets if v}, key=len, reverse=True):
+        value = value.replace(secret, _REDACTION_MARKER)
+    return value
+
+
 class EvidenceWriter:
     """Writes one run's evidence under `root/evidence/<run_id>/`.
 
@@ -41,7 +49,7 @@ class EvidenceWriter:
         self._root = root
         # Literal secret values (e.g. a discovery run's sensitive example inputs). Any
         # occurrence in an event or a snapshot is masked before it reaches disk.
-        self._secrets = [v for v in secrets if v]
+        self._secrets = sorted({v for v in secrets if v}, key=len, reverse=True)
         self.run_id = mint_run_id()
         self._writer = RedactingWriter()
 
@@ -52,11 +60,14 @@ class EvidenceWriter:
         """A pointer into this run's evidence trail, stored on every `ReplayResult`."""
         return f"evidence/{self.run_id}"
 
+    def mask(self, text: str) -> str:
+        """`text` with this writer's declared secrets masked (for messages shown to the
+        operator as well as for files)."""
+        return mask_secrets(text, self._secrets)
+
     def _mask_secrets(self, value: object) -> object:
         if isinstance(value, str):
-            for secret in self._secrets:
-                value = value.replace(secret, _REDACTION_MARKER)
-            return value
+            return self.mask(value)
         if isinstance(value, dict):
             return {k: self._mask_secrets(v) for k, v in value.items()}
         if isinstance(value, (list, tuple)):

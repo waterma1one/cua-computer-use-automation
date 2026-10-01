@@ -1015,3 +1015,39 @@ def test_discover_refuses_a_malformed_input_name(monkeypatch, tmp_path) -> None:
     result = runner.invoke(app, [*args, "--input", "Member-ID=1"])
     assert result.exit_code == 2
     assert "name=value" in result.output
+
+
+def test_discover_messages_never_echo_a_secret(monkeypatch, tmp_path) -> None:
+    import cua.cli as cli_module
+    from cua.agent.loop import Trace
+    from cua.llm.fake import FakeClient
+
+    monkeypatch.setattr(cli_module, "load_gemini_client_from_env", lambda: FakeClient(script=[]))
+    _fake_page_launch(monkeypatch)
+    monkeypatch.setattr(cli_module, "WebSurface", _OkSurface)
+
+    def _unfinished(goal, target, surface, policy, llm, **_k):
+        return Trace(goal=goal, target=target, declared_inputs={}, steps=[],
+                     stop_reason="give_up", stop_detail="model typed hunter2 somewhere")
+
+    monkeypatch.setattr(cli_module, "run_discover", _unfinished)
+    args = [
+        "discover", "--goal", "g", "--root", str(tmp_path), "--base-url", "http://x",
+        "--policy", _policy_file(tmp_path, "http://x"), "--evidence-root", str(tmp_path),
+        "--id", "corebank.x", "--name", "x", "--secret-input", "password=hunter2",
+    ]
+    result = runner.invoke(app, args)
+    assert result.exit_code == 1
+    assert "hunter2" not in result.output
+    assert "[REDACTED]" in result.output
+
+    def _boom(*_a, **_k):
+        raise cli_module.CompileError("bad value hunter2 here")
+
+    monkeypatch.setattr(cli_module, "run_discover", lambda *a, **k: Trace(
+        goal="g", target=a[1], declared_inputs={}, steps=[], stop_reason="finish",
+        stop_detail="d", checkpoint_index=0, final_observation=None))
+    monkeypatch.setattr(cli_module, "compile_artifact", _boom)
+    result = runner.invoke(app, args)
+    assert result.exit_code == 1
+    assert "hunter2" not in result.output
