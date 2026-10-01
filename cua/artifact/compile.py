@@ -153,10 +153,34 @@ def _verify_locator(step: TraceStep, locator: Locator | None) -> None:
         )
 
 
+def _pick_value_independent(
+    nodes: list[Node], target_index: int, read_values: frozenset[str],
+    input_examples: frozenset[str],
+) -> Node | None:
+    """Pick a node whose text does not vary with the data looked up. Preference: label-role
+    nodes; then any other non-control node; then controls. Within a tier, the nearest
+    preceding the target, else the first. None when no node qualifies."""
+    independent = [
+        n for n in nodes
+        if (n.name or n.value) and _is_value_independent(n, read_values, input_examples)
+    ]
+    tiers = (
+        [n for n in independent if n.role in _LABEL_ROLES],
+        [n for n in independent if n.role not in _LABEL_ROLES and n.role not in _CONTROL_ROLES],
+        [n for n in independent if n.role in _CONTROL_ROLES],
+    )
+    for candidates in tiers:
+        if candidates:
+            before = [n for n in candidates if n.index <= target_index]
+            return before[-1] if before else candidates[0]
+    return None
+
+
 def _compile_step(
     step: TraceStep, next_step: TraceStep | None, declared_inputs: dict[str, DeclaredInput],
     local_bindings: dict[str, str], step_id: str, output_names: set[str],
     declared_outputs: frozenset[str], read_values: frozenset[str] = frozenset(),
+    input_examples: frozenset[str] = frozenset(),
 ) -> Step:
     name = cast(ActionKind, step.tool_call.name)
     locator = step.locator
@@ -173,13 +197,20 @@ def _compile_step(
     _verify_locator(step, locator)
 
     expects: list[Expect] = []
-    # A read's target is named by the very value being discovered, so nothing may pin it.
-    if next_step is not None and next_step.tool_call.name != "read":
-        next_node = next_step.observation.nodes[
-            _index_arg(next_step)
-        ] if "index" in next_step.tool_call.args else None
-        if next_node is not None and not _holds_read_value(next_node, read_values):
-            expects = [Expect(when=_matcher_from_node(next_node), outcome="continue",
+    if next_step is not None and "index" in next_step.tool_call.args:
+        next_nodes = next_step.observation.nodes
+        next_index = _index_arg(next_step)
+        next_node = next_nodes[next_index]
+        expect_node: Node | None = next_node
+        if _holds_read_value(next_node, read_values):
+            # The target is named by the value being discovered, so nothing may pin it; wait
+            # on a value-independent node of the same page instead, so replay still waits
+            # for that page to load.
+            expect_node = _pick_value_independent(
+                next_nodes, next_index, read_values, input_examples,
+            )
+        if expect_node is not None:
+            expects = [Expect(when=_matcher_from_node(expect_node), outcome="continue",
                               source="observed", verified=True)]
 
     if name == "navigate":
@@ -233,21 +264,7 @@ def _compile_checkpoint(
     # role-only form (a None name matches only nameless nodes), so fall back to a
     # value-independent node. Preference: label-role nodes; then any other non-control node;
     # then controls. Within a tier, the nearest preceding the checkpoint, else the first.
-    independent = [
-        n for n in nodes
-        if (n.name or n.value) and _is_value_independent(n, read_values, input_examples)
-    ]
-    tiers = (
-        [n for n in independent if n.role in _LABEL_ROLES],
-        [n for n in independent if n.role not in _LABEL_ROLES and n.role not in _CONTROL_ROLES],
-        [n for n in independent if n.role in _CONTROL_ROLES],
-    )
-    pick = None
-    for candidates in tiers:
-        if candidates:
-            before = [n for n in candidates if n.index <= chosen.index]
-            pick = before[-1] if before else candidates[0]
-            break
+    pick = _pick_value_independent(nodes, checkpoint_index, read_values, input_examples)
     if pick is None:
         raise CompileError(
             f"finish's checkpoint (node {checkpoint_index}) holds a read value, which would "
@@ -272,6 +289,9 @@ def compile(
         raise CompileError("no replay-vocabulary actions were recorded")
 
     read_values = frozenset(s.read_value for s in trace.steps if s.read_value)
+    input_examples = frozenset(
+        d.example_value for d in trace.declared_inputs.values() if d.example_value
+    )
     local_bindings: dict[str, str] = {}
     output_names: set[str] = set()
     steps: list[Step] = []
@@ -293,7 +313,7 @@ def compile(
         next_step = recorded[i + 1] if i + 1 < len(recorded) else None
         steps.append(_compile_step(
             step, next_step, trace.declared_inputs, local_bindings, step_id, output_names,
-            frozenset(outputs), read_values,
+            frozenset(outputs), read_values, input_examples,
         ))
 
     if trace.checkpoint_index is None:
@@ -301,8 +321,7 @@ def compile(
     if trace.final_observation is None:
         raise CompileError("a finished trace must carry its final observation")
     checkpoint = _compile_checkpoint(
-        trace.final_observation, trace.checkpoint_index, read_values,
-        frozenset(d.example_value for d in trace.declared_inputs.values() if d.example_value),
+        trace.final_observation, trace.checkpoint_index, read_values, input_examples,
     )
 
     inputs = {_identifier(k): d.spec for k, d in trace.declared_inputs.items()}
