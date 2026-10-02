@@ -1167,3 +1167,10 @@ the final `Success` reports `assistance="human"` when it is set. `Resolved` and 
 runs therefore bump `assisted_replays` and no longer count toward the stability score. The two
 handoff integration tests that asserted `"none"` were updated. Evidence runs recorded before this
 change still say `assistance: none` for the escalation run; they were not regenerated.
+
+## D71 — D44 accepted for loopback-only use; cost left null
+D44 is accepted as is for a local demo: the console and API bind `127.0.0.1` by default, and the
+mock app holds only synthetic data. A deployment beyond loopback would need TLS, a per-session
+cookie id and a guard on `cua serve --host`; none of that is built, and REPORT.md lists D44 as
+unfinished. `estimated_cost_usd` stays null: no model price is on file, and inventing one would
+make the number look measured. Token counts are exact and are reported.
