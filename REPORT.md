@@ -8,7 +8,7 @@ Run evidence is in `evidence/README.md`.
 
 ## 1. Architecture
 
-Two processes, and only because one boundary is forced: the brief wants a human to take over the
+Two processes, and only because one boundary is forced: a human must be able to take over the
 *same* live session the automation was using, so the session (and the control lease) must outlive any
 single replay call. `cua serve` is that session service and the operator console. Everything else is a
 library behind one CLI (`discover`, `replay`, `catalog`, `approve`, `serve`). `replay` runs

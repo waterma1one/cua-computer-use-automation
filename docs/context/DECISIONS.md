@@ -5,10 +5,10 @@ Every non-trivial decision, with the reason. Source material for REPORT.md.
 ## D1 — Target application: purpose-built hostile legacy web app (local)
 A small mock credit-union back-office: framesets/iframes, table-based layout,
 server-rendered, no test IDs, no semantic markup.
-**Why:** the brief's environment is explicitly legacy surfaces with no clean DOM. A
+**Why:** the target environment is legacy surfaces with no clean DOM. A
 public demo site with clean test IDs would make the locator-robustness and error-handling
 sections theoretical. Owning the app also lets us inject the exact runtime conditions the
-brief grades on (validation error, record not found, permission denied, session timeout,
+replay engine must handle (validation error, record not found, permission denied, session timeout,
 unexpected dialog, slow load) and lets a reviewer run everything offline.
 **Cost accepted:** we build the target app as well as the system.
 
@@ -24,7 +24,7 @@ needs a second locator representation); raw DOM/CSS selectors (contradicts the s
 environment, no path to desktop).
 
 ## D3 — Language and runtime: Python, Playwright, Pydantic
-**Why:** the artifact schema is the graded centerpiece; Pydantic gives typed models,
+**Why:** the artifact schema is the centerpiece; Pydantic gives typed models,
 validation of replay inputs and outputs, and JSON Schema export, which lets the same
 artifact double as an agent-callable tool definition. Playwright Python has full
 accessibility-tree and CDP support. Anthropic SDK is first-class.
@@ -36,11 +36,11 @@ releases the lease; a minimal operator console shows goal, current step, screens
 reason, with Take Control / Hand Back; the human drives the same window while a CDP
 listener records their actions into the run log; handback restores the lease and the run
 resumes from the paused step.
-**Why:** the brief requires control of the *same* live session and asks us to model who is
-in control. An explicit lease makes that a first-class concept and leaves a clean seam for
+**Why:** a human must be able to take control of the *same* live session, and who is in
+control has to be modelled. An explicit lease makes that a first-class concept and leaves a clean seam for
 a real remote operator console later.
 **Rejected:** in-process pause (control ownership stays implicit); containerized noVNC
-(infrastructure the brief tells us not to build).
+(infrastructure out of scope here).
 
 ## D5 — Stretch goals: four selected, tiered by depth
 - Tier 1, fully built: agent-facing capability catalog; cross-tenant reuse against a
@@ -50,14 +50,14 @@ a real remote operator console later.
 - Tier 3, deliberately fenced: assisted fallback — off by default, single step only,
   allowlist-checked, never on risky actions, recorded as evidence, and the replay result
   is marked as assisted so it is never reported as a clean deterministic replay.
-**Why tiered:** the brief says at most one or two stretch goals and does not reward
-breadth. Tiering keeps all four while making the depth ordering explicit, and the fence
+**Why tiered:** depth matters more than breadth, so at most one or two stretch goals
+should be deep. Tiering keeps all four while making the depth ordering explicit, and the fence
 on assisted fallback protects the "no LLM in the decision loop" property that replay is
 evaluated on.
 
 ## D6 — Corrections from design review (pre-implementation)
 - The package module for run logging is `cua/observability/`, not `cua/evidence/`, because
-  `/evidence/` at the repository root is a required deliverable and the names would collide.
+  `/evidence/` at the repository root holds the committed run evidence and the names would collide.
 - Perception uses `locator.aria_snapshot()` per frame rather than the legacy
   `page.accessibility.snapshot()`. Aria snapshots return no element handles, so the surface
   layer parses the snapshot, assigns its own stable node indices, and synthesizes a locator
@@ -70,12 +70,12 @@ evaluated on.
   written, because the schema's locator representation depends on what the surface can
   actually produce.
 
-## D7 — Mock application must be built to exercise the graded paths
+## D7 — Mock application must be built to exercise the required paths
 The target app is specified to make each required behaviour demonstrable rather than
 theoretical: it carries fake regulated-looking data (account numbers, SSN-shaped values,
 balances) so redaction has something to redact; it contains at least one irreversible
 action so the risky-action policy is exercised rather than asserted; and it exposes
-deterministic fault injection for every runtime condition the brief names (validation
+deterministic fault injection for every runtime condition replay must handle (validation
 error, record not found, permission denied, unexpected dialog, session timeout, slow or
 failed load) so evidence runs are reproducible.
 
@@ -91,7 +91,7 @@ list of things that could block the one discovery run that must be real.
 trusting design-time assumptions.
 
 ## D9 — Corrections from the full cross-section review
-- Every locator carries `rationale` and `confidence`. The brief asks explicitly for the
+- Every locator carries `rationale` and `confidence`. The artifact must record the
   reasoning about how each control is identified, and reviewability is a stated goal of the
   artifact; a locator without a stated reason cannot be reviewed.
 - Discovery stopping conditions are explicit: max steps, max wall-clock duration, repeated
@@ -246,7 +246,7 @@ recorded evidence. The design as it stands (spec §3.2/§3.3) cannot rely solely
 to omit password values from the perception layer; any component that redacts sensitive
 values (the evidence writer, the perception layer, or both) must do so explicitly by
 filtering known-sensitive fields before the snapshot text is stored or logged, rather than
-assuming Chromium's `aria_snapshot()` does this for us. Per the brief, the documented
+assuming Chromium's `aria_snapshot()` does this for us. The documented
 fallback (CDP `Accessibility.getFullAXTree`) is not evaluated here — that decision belongs to
 the controller design, not to this spike.
 
@@ -279,9 +279,9 @@ OAuth-style access token, not a Gemini Developer API key, and the `generativelan
 REST endpoint used by `client.models.generate_content(...)` / `client.models.list()` when the
 `google-genai` `Client` is constructed with `api_key=...` does not accept it. No alternative auth
 mechanism (service account, ADC, Vertex AI project/location credentials) was attempted — out of
-scope per the brief.
+scope.
 
-**Documentation check (performed before running, per the brief's warning that the design-time
+**Documentation check (performed before running, because the design-time
 snippet may be stale).** Fetched `ai.google.dev/gemini-api/docs/models` and
 `ai.google.dev/gemini-api/docs/pricing` directly:
 - The design-time snippet's model, `gemini-2.0-flash`, is listed as shut down. The cheapest
@@ -711,7 +711,7 @@ written — so a refused invocation still leaves a record under the `evidence_re
 coercion an `INVALID_INPUT` result; `validate_inputs` — the same public function the engine calls
 first — strictly before a browser launches (§5.4 forbids a session for invalid input, not a
 record of the refusal); `artifact.yaml` before the page opens; `result.json` after. `--evidence-root` defaults to `.` for `replay` (`discover` differs: see D55) so the layout is `evidence/<run_id>/` at
-the repository root, RULES.md's deliverable. A no-op Typer callback makes `replay` a subcommand
+the repository root, where committed evidence lives. A no-op Typer callback makes `replay` a subcommand
 later phases attach siblings to. Phase 2's browser fixture became module-scoped: Playwright
 allows one synchronous driver per thread, and the CLI test is the one place the real second
 launch is exercised.
@@ -942,17 +942,16 @@ reported as a clean deterministic replay) moves into REPORT.md §7 as designed-b
 citing that file directly rather than re-deriving the design in prose.
 **What stays:** phases 7 (discovery loop), 8 (the real discovery run), 9 (catalog + approval
 gate + stability score — D5's tier 1 and tier 2 stretch goals are not cut), and 11
-(README/REPORT/evidence writeup) are all still required deliverables per `RULES.md` §3's
-table and the plan's own gate column. "Quickly" is read as *build these four phases thin but
-real* (RULES.md §5: "prefer a thin but real version of every required capability over a
-polished subset"), not as cutting further into the core path — D5 already drew that line at
+(README/REPORT/evidence writeup) are all still required by the plan's gate column. "Quickly"
+is read as *build these four phases thin but real* (a thin but real version of every required
+capability beats a polished subset), not as cutting further into the core path — D5 already drew that line at
 assisted fallback specifically so the four required phases would not be the next thing cut
 if time ran short.
 **Next candidate if more time pressure appears:** D5's own second-in-line cut is the
 stability score specifically (not all of phase 9) — approval gating stays either way, since
 `requires_human_approval` is load-bearing in the registry (D30) independent of stretch-goal
 status.
-**Cost accepted:** the brief's "at most one or two stretch goals" framing is already exceeded
+**Cost accepted:** the "at most one or two stretch goals" guideline is already exceeded
 by the three that remain (capability catalog, cross-tenant reuse, approval gating + stability
 score) — D5 accepted that cost when it tiered four instead of picking one or two; this
 decision does not revisit that, only executes the cut D5 already reserved for exactly this
