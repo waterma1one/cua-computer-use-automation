@@ -69,7 +69,7 @@ def test_mint_run_id_matches_the_documented_shape() -> None:
     assert re.fullmatch(r"run-\d{14}-[0-9a-f]{4}", run_id), run_id
 
 
-def test_a_minted_run_id_never_trips_the_criterion_1_scan(tmp_path) -> None:
+def test_a_minted_run_id_never_trips_the_content_scan(tmp_path) -> None:
     run_id = mint_run_id()
     artifact = base()
     artifact.provenance.run_id = run_id

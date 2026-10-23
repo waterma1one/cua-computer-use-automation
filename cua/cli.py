@@ -288,7 +288,7 @@ def replay(
             typer.echo(f"overlay refused: {exc}", err=True)
             raise typer.Exit(code=2) from exc
 
-    # E6: criterion 4 at the real path. `load()` has no allowlist to check narrowing
+    # E6: requirement 4 at the real path. `load()` has no allowlist to check narrowing
     # against; this is the first place both are in hand. Any error-level finding refuses.
     errors = [f for f in validate(artifact, policy) if f.level == "error"]
     if errors:
@@ -607,7 +607,7 @@ def discover(
     )
     started_at = datetime.now(UTC)
     # What `result.json` will say. Updated as the run progresses; written in `finally`, so
-    # a refusal or failure leaves the same audit pair a success does (phase 8, criterion 1).
+    # a refusal or failure leaves the same audit pair a success does (phase 8, content rule).
     escalator = _DecliningEscalator()
     state: dict[str, object] = {
         "outcome": "failed", "stop_reason": None, "stop_detail": "", "verified": False,

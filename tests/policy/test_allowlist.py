@@ -16,7 +16,7 @@ DEPLOYMENT = DeploymentAllowlist(
 )
 
 
-# --- criterion 1 ---------------------------------------------------------------------------
+# --- requirement 1 ---------------------------------------------------------------------------
 
 def test_a_denied_path_inside_an_allowed_origin_and_prefix_is_still_refused() -> None:
     # /account/close sits inside the allowed origin and inside the allowed prefix "/".
@@ -125,7 +125,7 @@ def test_credentials_in_a_url_never_reach_the_reason() -> None:
     assert DEPLOYMENT.permits_url(f"http://user:pw@{host}/member/1") is True
 
 
-# --- criterion 4: narrowing -----------------------------------------------------------------
+# --- requirement 4: narrowing -----------------------------------------------------------------
 
 def test_a_policy_narrows_paths_and_actions_by_intersection() -> None:
     policy = CapabilityPolicy(allowed_paths=["/member/"], allowed_actions=["read", "click"])

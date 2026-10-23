@@ -110,7 +110,7 @@ def test_transfer_from_none_is_refused() -> None:
         lease.transfer("operator")
 
 
-# --- LeasedSurface: acceptance criterion 1, proven directly ---------------------------------
+# --- LeasedSurface: the artifact content rule, proven directly ---------------------------------
 
 def test_act_without_the_current_token_is_rejected() -> None:
     lease = Lease()
@@ -182,7 +182,7 @@ def test_lease_error_is_a_surface_error() -> None:
     assert issubclass(LeaseError, SurfaceError)
 
 
-# --- rebind: E18, acceptance criterion 7's real fix ------------------------------------------
+# --- rebind: E18, requirement 7's real fix ------------------------------------------
 
 def test_rebind_lets_the_same_wrapper_accept_a_new_token_after_a_transfer() -> None:
     # This is the mechanism a session-owning replay thread's own LeasedSurface (Task 6) uses

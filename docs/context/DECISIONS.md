@@ -990,7 +990,7 @@ never `approved` (D9). It replays with the discovery values unless `--verify-inp
 supplies a different one.
 **Why:** a replay with the very value that was typed during discovery cannot tell a real
 input binding from a baked-in literal.
-**Cost accepted (acceptance criterion 8 limit):** without `--verify-input` the check reuses
+**Cost accepted (requirement 8 limit):** without `--verify-input` the check reuses
 the discovery value, so it proves repeatability, not parameterisation. Promotion is also plain
 string equality, so a coincidental match can bind the wrong input.
 

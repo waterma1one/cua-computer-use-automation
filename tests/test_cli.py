@@ -187,7 +187,7 @@ def test_a_missing_artifact_is_a_clean_cli_error(tmp_path, monkeypatch) -> None:
 
 def test_an_artifact_that_fails_to_load_is_a_clean_cli_error(tmp_path, monkeypatch) -> None:
     # Fix round 2, item 1: an artifact that saves cleanly (FAIL_CODE_NOT_A_FAILURE_KIND is
-    # not in CRITERION_1_CODES) but refuses to load (it is an error-level finding) used to
+    # not in ARTIFACT_CONTENT_CODES) but refuses to load (it is an error-level finding) used to
     # raise `ValueError` straight through the CLI -- same fixture shape as
     # tests/artifact/test_store.py::test_a_fail_clause_with_no_code_saves_but_refuses_to_load.
     import cua.cli as cli_module
@@ -582,7 +582,7 @@ def test_a_syntactically_malformed_policy_file_is_a_clean_cli_error(
 def test_a_widening_capability_policy_is_refused_at_the_cli_with_exit_2(
     tmp_path, monkeypatch,
 ) -> None:
-    # Criterion 4 at the real path: `load()` has no allowlist; the CLI does.
+    # requirement 4 at the real path: `load()` has no allowlist; the CLI does.
     import cua.cli as cli_module
     from cua.artifact.models import CapabilityPolicy
     artifact = base(policy=CapabilityPolicy(allowed_paths=["/account/close"]))
@@ -705,7 +705,7 @@ def test_an_approved_registry_entry_reaches_the_engine_as_approved(tmp_path, mon
 def test_a_redact_output_is_masked_in_result_json_and_printed_to_the_caller(
     tmp_path, monkeypatch,
 ) -> None:
-    # Criterion 7 at the CLI: stdout is the caller's channel; result.json is evidence.
+    # requirement 7 at the CLI: stdout is the caller's channel; result.json is evidence.
     import cua.cli as cli_module
 
     artifact = base(outputs={"balance": OutputSpec(type="string", format="money", redact=True)})
@@ -747,7 +747,7 @@ def test_a_redact_output_is_masked_in_result_json_and_printed_to_the_caller(
     assert json.loads((run_dir / "result.json").read_text())["outputs"] == {"balance": "**18.60"}
 
 
-# --- Criterion 8: no credential anywhere in the evidence directory after a login-bearing run
+# --- requirement 8: no credential anywhere in the evidence directory after a login-bearing run
 
 def test_no_credential_appears_anywhere_in_the_evidence_of_a_login_bearing_run(
     tmp_path, live_mockapp,

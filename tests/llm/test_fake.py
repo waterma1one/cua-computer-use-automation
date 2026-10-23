@@ -1,4 +1,4 @@
-"""FakeClient is every other task's LLM double from here on -- acceptance criterion 1 (every
+"""FakeClient is every other task's LLM double from here on -- the artifact content rule (every
 test in this phase uses FakeClient; no test requires a key or a network) starts here.
 """
 import pytest

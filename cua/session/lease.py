@@ -82,7 +82,7 @@ class Lease:
 
 class LeasedSurface:
     """A `Surface` that requires `lease.holds(token)` before `act`/`act_on_index` reach the
-    underlying surface (acceptance criterion 1). `token` is the value this wrapper was built
+    underlying surface (the artifact content rule). `token` is the value this wrapper was built
     with at construction -- it is re-checked, not cached as "was valid once," so a lease
     transfer immediately revokes it.
     """

@@ -1,4 +1,4 @@
-"""Criterion 2 at the surface, against the phase-1 application: an application-initiated
+"""requirement 2 at the surface, against the phase-1 application: an application-initiated
 navigation to a denied URL is refused and the session freezes.
 
 Two enforcement points (E2), both live here. Request-stage interception *prevents* what
@@ -246,7 +246,7 @@ def test_freeze_is_first_wins() -> None:
     assert surface.allowlist_violation() == "first"
 
 
-# --- Criterion 2 through the engine ----------------------------------------------------------
+# --- requirement 2 through the engine ----------------------------------------------------------
 
 
 def _artifact(steps: list[Step]) -> Artifact:

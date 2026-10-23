@@ -78,7 +78,7 @@ def test_expire_if_due_moves_an_unclaimed_intervention_past_its_ttl() -> None:
 
 
 def test_expire_if_due_leaves_a_claim_alone_until_its_own_claim_ttl() -> None:
-    # Acceptance criterion 3: a claim holds the ttl -- an operator actively working an
+    # requirement 3: a claim holds the ttl -- an operator actively working an
     # intervention must not have it expire out from under them.
     clock = FakeClock()
     interventions = Interventions(clock=clock)

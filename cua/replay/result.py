@@ -148,11 +148,11 @@ HandbackOutcome = Resolved | ResolvedManually | RestartFrom | CannotResolve
 
 
 def mint_run_id() -> str:
-    """A fresh run id, shaped so it can never trip the artifact's criterion-1 content scan.
+    """A fresh run id, shaped so it can never trip the artifact's artifact content scan.
 
     `run-<14-digit UTC timestamp>-<4 hex chars>` contains no `://`, no `//`, no `[@`, no
     `::`, and no TLD-shaped suffix -- the shapes `cua.artifact.validate`'s forbidden-content
-    scan (`CRITERION_1_CODES`) looks for. `tests/replay/test_result_contract.py` pins this
+    scan (`ARTIFACT_CONTENT_CODES`) looks for. `tests/replay/test_result_contract.py` pins this
     by saving an artifact carrying a minted run id through `cua.artifact.store.save`.
     """
     timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")

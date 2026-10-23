@@ -9,7 +9,7 @@ This module is the only one in `cua/artifact/` that touches the filesystem. Ever
 else in the package is pure data shaping (`models.py`, `validate.py`, `overlay.py`,
 `schema.py`); this is where that data actually gets written and read back.
 
-Two acceptance criteria a reviewer checks first are both pinned here:
+Two requirements checked first are both pinned here:
 
 1. The serialized artifact contains no hostname, credential, CSS selector, XPath, or
    regular expression (with the one declared exception, `InputSpec.pattern`). Enforced
@@ -45,7 +45,7 @@ def test_a_saved_artifact_round_trips(tmp_path) -> None:
 def test_the_serialized_artifact_contains_no_hostname_selector_xpath_or_credential(
     tmp_path,
 ) -> None:
-    # Acceptance criterion 1, asserted against the bytes on disk rather than against the model,
+    # the artifact content rule, asserted against the bytes on disk rather than against the model,
     # because the file is the reviewable deliverable. This scan is deliberately blunt and will
     # over-trigger by design -- it is meant to catch a forbidden value arriving through any
     # field, including one added by a phase not yet written. If a legitimate value ever trips
@@ -66,7 +66,7 @@ def test_an_input_pattern_survives_serialization(tmp_path) -> None:
 
 
 def test_status_and_stability_never_reach_the_artifact_file(tmp_path) -> None:
-    # Acceptance criterion 2, and §4.1: the artifact file is immutable, lifecycle state is not.
+    # requirement 2, and §4.1: the artifact file is immutable, lifecycle state is not.
     #
     # Restored to the brief's original order -- register, THEN save (fix round 2, item 2). Fix
     # round 1 reordered this to save-then-register to satisfy ruling E18's ghost-id refusal,
@@ -110,7 +110,7 @@ def test_saving_over_an_existing_version_is_refused(tmp_path) -> None:
 
 
 def test_an_artifact_holding_an_unverified_expect_cannot_be_marked_approved(tmp_path) -> None:
-    # Acceptance criterion 6, and §8.3 step 5: the compiler cannot invent knowledge of states it
+    # requirement 6, and §8.3 step 5: the compiler cannot invent knowledge of states it
     # never saw, so an artifact that admits it has unproven branches does not get promoted.
     a = base()
     a.steps[0].expects = [
@@ -140,7 +140,7 @@ def test_an_artifact_with_no_expects_at_all_can_be_approved(tmp_path) -> None:
 
 
 def test_an_explicitly_verified_expect_does_not_block_approval(tmp_path) -> None:
-    # Criterion 6 reads "any unverified expect", not "any proposed expect" -- the two are not
+    # requirement 6 reads "any unverified expect", not "any proposed expect" -- the two are not
     # the same thing, because `source="observed"` may later be marked `verified=True` by
     # self-verification (only `source="proposed"` is permanently barred from `verified=True`
     # by the model validator on `Expect`). An observed-and-verified clause must not block
@@ -160,7 +160,7 @@ def test_an_explicitly_verified_expect_does_not_block_approval(tmp_path) -> None
 
 def test_an_observed_but_unverified_expect_also_blocks_approval(tmp_path) -> None:
     # The other half of the same distinction: an `observed` clause that has *not* been marked
-    # verified is still unverified, and criterion 6 says "any unverified expect" -- not "any
+    # verified is still unverified, and requirement 6 says "any unverified expect" -- not "any
     # proposed expect" -- so this must be blocked exactly like the proposed case is.
     a = base()
     a.steps[0].expects = [
@@ -472,7 +472,7 @@ def test_the_irreversible_refusal_walks_every_step_not_just_the_first(tmp_path) 
         )
 
 
-# --- E16: criterion 1 enforced at save(), pinned against every injection the reviewer used,
+# --- E16: requirement 1 enforced at save(), pinned against every injection tried,
 # and against the legitimate values the check must not reproduce M1's false positives on. ---
 
 
@@ -583,7 +583,7 @@ def _hand_edit(root, old: str, new: str) -> None:
 
 
 def test_load_refuses_a_file_hand_edited_to_carry_a_hostname(tmp_path) -> None:
-    # C3 / E22: criterion 1 is a property of the artifact, not of "an artifact that happened
+    # C3 / E22: requirement 1 is a property of the artifact, not of "an artifact that happened
     # to be written through save()". The reviewer saved a clean artifact, edited the bytes on
     # disk, and `load` handed it back with only the allowlist note.
     save(base(), tmp_path)
@@ -601,8 +601,8 @@ def test_approval_by_id_refuses_a_file_hand_edited_to_carry_a_hostname(tmp_path)
         write_registry_entry(tmp_path, "corebank.probe", 1, RegistryEntry(status="approved"))
 
 
-def test_save_still_accepts_an_artifact_with_a_non_criterion_1_error(tmp_path) -> None:
-    # E22's scope: `save` refuses on the criterion-1 family only. E19 deliberately lets a
+def test_save_still_accepts_an_artifact_with_a_non_content_rule_error(tmp_path) -> None:
+    # E22's scope: `save` refuses on the content-rule family only. E19 deliberately lets a
     # draft with `RISK_UNCLASSIFIED` be saved and registered; `load` and approval still
     # refuse it. `test_e19_draft_registers_a_file_that_fails_load_time_validation` pins the
     # registration half; this pins the save half by name.
@@ -789,7 +789,7 @@ def test_a_fail_clause_with_no_code_saves_but_refuses_to_load(tmp_path) -> None:
                                         outcome="fail", source="observed")]),
                     Step(id="s2", action="read", locator=loc("y"), extract="text",
                          into="balance", risk="safe")])
-    save(a, tmp_path)  # FAIL_CODE_NOT_A_FAILURE_KIND is not in CRITERION_1_CODES
+    save(a, tmp_path)  # FAIL_CODE_NOT_A_FAILURE_KIND is not in ARTIFACT_CONTENT_CODES
     with pytest.raises(ValueError, match="FAIL_CODE_NOT_A_FAILURE_KIND"):
         load(a.id, a.version, tmp_path)
 

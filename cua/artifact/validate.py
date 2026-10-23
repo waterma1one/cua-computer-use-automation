@@ -17,10 +17,10 @@ gate; warnings and notes are for the reviewer.
 fixed by breaking the loop, so collapsing both into "invalid reference" would throw away
 the only part of the finding a caller could act on.
 
-*Acceptance criterion 1 -- no hostname, credential, CSS selector, XPath or regular
+*the artifact content rule -- no hostname, credential, CSS selector, XPath or regular
 expression in the artifact -- is a finding family here, not a check the store owns.* Ruling
 E22: `save`, `load` and the registry's approval gate all inherit it from this one place
-(`CRITERION_1_CODES`), so a property of *the artifact* is enforced identically whichever
+(`ARTIFACT_CONTENT_CODES`), so a property of *the artifact* is enforced identically whichever
 door the artifact comes through. Before E22 the pattern detectors lived in `store.py` and ran
 on the write path only, so a file hand-edited on disk loaded clean.
 
@@ -58,11 +58,11 @@ from cua.surface.models import ActionKind, Locator, is_protected_name
 
 FindingLevel = Literal["error", "warning", "note"]
 
-# Acceptance criterion 1's finding family (ruling E22). `save` refuses on exactly these codes
+# the artifact content rule's finding family (ruling E22). `save` refuses on exactly these codes
 # and on nothing else: E19 deliberately lets a draft carrying `RISK_UNCLASSIFIED` be saved and
 # registered, so "any error" is the wrong gate for the write path. `load` and the approval
 # gate refuse on every error-level finding, which includes these.
-CRITERION_1_CODES: frozenset[str] = frozenset({
+ARTIFACT_CONTENT_CODES: frozenset[str] = frozenset({
     "FORBIDDEN_CONTENT",
     "LITERAL_FROM_PROTECTED_FIELD",
     "LITERAL_WITHOUT_LOCATOR",
@@ -546,7 +546,7 @@ def _literal_findings(artifact: Artifact, step: Step, where: str) -> list[Findin
     return []
 
 
-# --- Acceptance criterion 1: the pattern detectors (rulings E16 and E22) ------------------
+# --- the artifact content rule: the pattern detectors (rulings E16 and E22) ------------------
 #
 # These ran in `store.py` on the write path alone until E22 moved them here, so that `save`,
 # `load` and the approval gate enforce one rule from one place. They are pattern-based and
@@ -629,7 +629,7 @@ def _iter_string_leaves(value: Any, path: str) -> Iterator[tuple[str, str]]:
 
 
 def _pattern_violations(text: str) -> list[str]:
-    """What, if anything, in `text` acceptance criterion 1 forbids -- one entry per kind."""
+    """What, if anything, in `text` the artifact content rule forbids -- one entry per kind."""
     hits: list[str] = []
     if _URL_SCHEME_RE.search(text):
         hits.append(f"a URL scheme in {text!r}")
@@ -649,7 +649,7 @@ def _pattern_violations(text: str) -> list[str]:
 
 
 def _forbidden_content_findings(artifact: Artifact) -> list[Finding]:
-    """Acceptance criterion 1 over every string leaf of the artifact's serialized tree.
+    """the artifact content rule over every string leaf of the artifact's serialized tree.
 
     Runs on `model_dump(mode="json")` -- the exact tree `save` writes -- so a hostname or
     selector arriving through *any* field is covered, including one a later phase adds
@@ -660,7 +660,7 @@ def _forbidden_content_findings(artifact: Artifact) -> list[Finding]:
     differ*; here they do not. A hostname in `description`, a CSS selector in `rationale`
     and an XPath in `name` are all fixed the same way -- delete the value, or replace it
     with the path or accessible name the artifact is allowed to carry -- so per-kind codes
-    would give a caller nothing it could act on differently, while making `CRITERION_1_CODES`
+    would give a caller nothing it could act on differently, while making `ARTIFACT_CONTENT_CODES`
     a set that must be kept in lockstep with the detector list, which is exactly the kind of
     drift a single code cannot suffer. The kind is still in every message, and `where`
     names the field, so a reviewer loses nothing.

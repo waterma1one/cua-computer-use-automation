@@ -124,7 +124,7 @@ def test_a_snapshot_with_an_ssn_is_shape_redacted_on_write(tmp_path) -> None:
 def test_a_redact_output_is_masked_in_result_json_and_untouched_in_the_result(
     tmp_path,
 ) -> None:
-    # Criterion 7, both halves on one object: the caller asked for the balance and gets it;
+    # requirement 7, both halves on one object: the caller asked for the balance and gets it;
     # the evidence copy is masked, shape kept.
     writer = EvidenceWriter(tmp_path)
     result = Success(outputs={"balance": "4218.60", "kind": "Savings"}, steps_run=["s1"],

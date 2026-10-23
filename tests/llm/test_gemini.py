@@ -1,5 +1,5 @@
 """GeminiClient, tested against httpx.MockTransport -- no test here reaches a real network,
-and none needs a real key (acceptance criterion 1 holds for this adapter too, even though
+and none needs a real key (the artifact content rule holds for this adapter too, even though
 it is the one module in this phase that speaks HTTP at all).
 """
 

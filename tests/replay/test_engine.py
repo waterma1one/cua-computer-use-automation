@@ -54,7 +54,7 @@ def _artifact(**steps_kwargs) -> Artifact:
 
 
 class PoisonSurface:
-    """Every method raises. Proves acceptance criterion 6: invalid input must be refused
+    """Every method raises. Proves requirement 6: invalid input must be refused
     before the surface is touched at all.
     """
 
@@ -1395,7 +1395,7 @@ def _middle_resume_artifact() -> Artifact:
 
 
 def test_resolved_on_a_middle_step_resumes_through_the_next_step_to_success() -> None:
-    # Acceptance criterion 7's first half, and I2's own missing case: s2 escalates, is
+    # requirement 7's first half, and I2's own missing case: s2 escalates, is
     # resolved, and the run continues into T+1 (s3) and all the way to Success -- proving
     # `_resume_after`'s own T+1 probe and continuation, never exercised anywhere before.
     withheld, full = _withheld_and_full_frames()

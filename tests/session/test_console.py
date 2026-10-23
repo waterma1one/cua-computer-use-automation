@@ -1,4 +1,4 @@
-"""Acceptance criterion 8: the console requires the shared token from CUA_OPERATOR_TOKEN.
+"""requirement 8: the console requires the shared token from CUA_OPERATOR_TOKEN.
 
 No live session or browser is needed for any test here: `GET /console` and
 `GET /console/interventions/{id}` only ever read `self._sessions` (empty in every test

@@ -233,7 +233,7 @@ def test_compile_drops_discovery_only_and_human_origin_steps() -> None:
 
 
 def test_compile_runs_load_time_validation_and_refuses_an_invalid_artifact() -> None:
-    # An id containing '://' trips criterion 1's forbidden-content scan (cua.artifact.validate).
+    # An id containing '://' trips the content rule's forbidden-content scan.
     steps = [_read_step(0, "Savings", "1234.56", "balance")]
     with pytest.raises(CompileError):
         compile_artifact(

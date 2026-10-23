@@ -2,7 +2,7 @@
 
 Two vocabularies, deliberately: credentials keep the `[REDACTED]` marker (phase 2/4 --
 a password's shape is not something to preserve); PII-shaped values get a shape-preserving
-mask so a mismatch stays debuggable (criterion 6).
+mask so a mismatch stays debuggable (requirement 6).
 """
 import json
 
@@ -11,7 +11,7 @@ from cua.replay.result import mint_run_id
 
 
 def test_an_ssn_keeps_its_shape_and_its_last_four_digits() -> None:
-    # Criterion 6: the last four survive so a mismatch stays debuggable.
+    # requirement 6: the last four survive so a mismatch stays debuggable.
     assert redact("SSN 412-55-0198") == "SSN ***-**-0198"
     assert redact("SSN 412-55-0198").endswith("0198")
 
@@ -35,7 +35,7 @@ def test_short_numbers_and_money_are_untouched() -> None:
 
 
 def test_a_run_id_survives_redaction() -> None:
-    # D35 pinned the run-id shape against the criterion-1 scan; the same care here. The
+    # D35 pinned the run-id shape against the content scan; the same care here. The
     # fourteen-digit timestamp must never look account-shaped, or every evidence_ref
     # written to disk would point nowhere.
     run_id = mint_run_id()

@@ -3,7 +3,7 @@ real `WebSurface` and the replay engine.
 
 Test-only: this module wires Tasks 1-6 against a live Chromium page (via `browser` and
 `live_mockapp` in `tests/conftest.py`), rather than any fake or in-process double.
-Discharges acceptance criterion 9.
+Discharges requirement 9.
 
 Live-capture reconciliation (E25): before any `Matcher`/`Locator` below was finalized,
 a local live-snapshot capture file was extended with real captures of the

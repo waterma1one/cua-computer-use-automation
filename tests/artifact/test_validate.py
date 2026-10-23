@@ -18,7 +18,7 @@ from cua.artifact.models import (
     OutputSpec,
     Step,
 )
-from cua.artifact.validate import CRITERION_1_CODES, DeploymentAllowlist, Finding, validate
+from cua.artifact.validate import ARTIFACT_CONTENT_CODES, DeploymentAllowlist, Finding, validate
 from cua.surface.models import Locator
 from tests.artifact.factories import PATH, base, loc
 
@@ -430,7 +430,7 @@ def test_a_from_input_on_a_step_with_no_locator_is_not_a_literal_finding() -> No
     assert "LITERAL_WITHOUT_LOCATOR" not in codes(a)
 
 
-# --- E22: acceptance criterion 1 is a finding family in `validate()`, inherited by the store ---
+# --- E22: the artifact content rule is a finding family in `validate()`, inherited by the store ---
 
 
 def forbidden(artifact: Artifact) -> list[Finding]:
@@ -501,11 +501,11 @@ def test_an_origin_shaped_string_under_policy_is_forbidden_content_like_any_othe
     assert hits and all(f.where == "policy.allowed_paths[0]" for f in hits)
 
 
-def test_the_criterion_1_family_is_exactly_the_codes_save_gates_on() -> None:
+def test_the_content_rule_family_is_exactly_the_codes_save_gates_on() -> None:
     # `save` refuses on this family and nothing else (E19 lets a draft with
     # `RISK_UNCLASSIFIED` be saved), so the family is named in one place and pinned here.
     expected = {"FORBIDDEN_CONTENT", "LITERAL_FROM_PROTECTED_FIELD", "LITERAL_WITHOUT_LOCATOR"}
-    assert set(CRITERION_1_CODES) == expected
+    assert set(ARTIFACT_CONTENT_CODES) == expected
 
 
 def test_a_cyclic_locator_says_the_content_scan_did_not_run() -> None:

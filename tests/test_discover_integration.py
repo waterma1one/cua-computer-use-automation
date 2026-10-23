@@ -1,5 +1,5 @@
 """The whole pipeline, live, with a scripted FakeClient standing in for the model -- this
-phase never requires a real key (acceptance criterion 1); phase 8 is the one real run.
+phase never requires a real key (the artifact content rule); phase 8 is the one real run.
 """
 import pytest
 import yaml

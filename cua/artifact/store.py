@@ -38,7 +38,7 @@ clean, `artifact.verified`, registry `status != draft`) on whoever calls
 narrower and different, and (rulings E18, E19, E23) now has four parts instead of one:
 
 1. `write_registry_entry` refuses to set `status="approved"` on an artifact that still
-   carries an unverified `Expect` (acceptance criterion 6, §8.3 step 5) -- a promotion-time
+   carries an unverified `Expect` (requirement 6, §8.3 step 5) -- a promotion-time
    check about the artifact's own admitted state.
 2. `write_registry_entry` refuses `requires_human_approval=False` wherever it cannot prove
    the flag clearable: on an artifact holding any step classified `risk="irreversible"`
@@ -68,14 +68,14 @@ narrower and different, and (rulings E18, E19, E23) now has four parts instead o
    `requires_human_approval=False` entry with nothing to check it against, were all silent
    holes in the original gate, closed here.
 
-**Criterion 1 is enforced by `validate()`, and this module inherits it (ruling E22).** A
+**The content rule is enforced by `validate()`, and this module inherits it (ruling E22).** A
 hostname, an IP address, a URL scheme, a CSS selector, an XPath, or a credential literal
 must never reach the artifact file, whichever field it arrives through. Ruling E16 first
 put that check inside `save`, which closed the write path and nothing else: a file
 hand-edited on disk loaded clean and could be approved by id (C3). The detectors now live
 in `cua.artifact.validate` as the `FORBIDDEN_CONTENT` finding family, so `load` refuses
 through its existing error-level rule, the approval gate refuses through
-`_load_time_errors`, and `save` refuses on `CRITERION_1_CODES` -- that family only, not
+`_load_time_errors`, and `save` refuses on `ARTIFACT_CONTENT_CODES` -- that family only, not
 every error, because E19 deliberately lets a draft carrying `RISK_UNCLASSIFIED` be saved
 and registered. One rule, one place, three doors.
 
@@ -118,7 +118,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict
 
 from cua.artifact.models import Artifact, RegistryStatus
-from cua.artifact.validate import CRITERION_1_CODES, Finding, validate
+from cua.artifact.validate import ARTIFACT_CONTENT_CODES, Finding, validate
 
 logger = logging.getLogger(__name__)
 
@@ -238,8 +238,8 @@ def save(artifact: Artifact, root: Path) -> Path:
     Refuses (`FileExistsError`) to overwrite an existing version file -- §4.1: the
     artifact file is immutable, and a new revision is a new version number, never an
     in-place edit. Refuses (`ValueError`, rulings E16 and E22) to write an artifact on
-    which `validate()` reports any finding in acceptance criterion 1's family
-    (`CRITERION_1_CODES`: a hostname, IP address, URL scheme, CSS selector or XPath in any
+    which `validate()` reports any finding in the artifact content rule's family
+    (`ARTIFACT_CONTENT_CODES`: a hostname, IP address, URL scheme, CSS selector or XPath in any
     string field, a credential literal written into a protected control, or a literal on a
     step with no locator to check it against). Only that family: E19 lets a draft with
     `RISK_UNCLASSIFIED` be saved and registered, and `load` is where every error-level
@@ -261,7 +261,7 @@ def save(artifact: Artifact, root: Path) -> Path:
             f"{path} already exists; artifacts/<id>/v<version>.yaml is immutable -- "
             f"write a new version instead of overwriting this one"
         )
-    violations = [f for f in validate(artifact) if f.code in CRITERION_1_CODES]
+    violations = [f for f in validate(artifact) if f.code in ARTIFACT_CONTENT_CODES]
     if violations:
         raise ValueError(
             f"refusing to save {artifact.id} v{artifact.version}: the artifact carries "
@@ -327,7 +327,7 @@ def load(id: str, version: int, root: Path) -> tuple[Artifact, list[Finding]]:
     `_parse_artifact`). Runs `validate()` (with no `DeploymentAllowlist` -- this store has
     no way to obtain one; every load therefore carries Task 2's `ALLOWLIST_NOT_CHECKED`
     note) and raises `ValueError` if any finding is `error`-level, so a caller can never
-    receive an `Artifact` back that the validator considers broken. Acceptance criterion 1
+    receive an `Artifact` back that the validator considers broken. the artifact content rule
     is among those errors (`FORBIDDEN_CONTENT`, ruling E22), so a file hand-edited on disk
     to carry a hostname is refused here exactly as `save` would have refused it.
 
@@ -375,13 +375,13 @@ def read_registry(root: Path) -> dict[str, dict[str, RegistryEntry]]:
 
 
 def _has_unverified_expect(artifact: Artifact) -> bool:
-    """Acceptance criterion 6 / §8.3 step 5: any `Expect` this artifact carries that is
+    """requirement 6 / §8.3 step 5: any `Expect` this artifact carries that is
     not `verified` -- regardless of `source` -- disqualifies it from `approved`.
 
     Not narrowed to `source == "proposed"`: a `proposed` expect is always unverified (the
     model validator on `Expect` forbids the opposite combination), so checking `verified`
     directly already covers it, and also covers an `observed`/`authored` clause that
-    simply has not been verified yet -- which criterion 6's wording ("any unverified
+    simply has not been verified yet -- which requirement 6's wording ("any unverified
     expect") does not exempt.
 
     Walks every step and every expect on it (not `steps[0]` or `expects[0]` alone, per
@@ -428,7 +428,7 @@ def write_registry_entry(
     With something resolved, regardless of which of the two resolution paths produced it:
 
     - `status="approved"` is refused if the artifact holds any unverified `Expect`
-      (acceptance criterion 6, §8.3 step 5), or if it fails load-time validation --
+      (requirement 6, §8.3 step 5), or if it fails load-time validation --
       any `error`-level finding from `validate()` (ruling E19; `_load_time_errors` is the
       same filter `load` applies, not a second definition of what counts as an error).
       Every finding the gate saw is logged through `_log_findings` first, whichever path

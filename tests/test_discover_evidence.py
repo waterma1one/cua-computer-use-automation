@@ -1,4 +1,4 @@
-"""`cua discover` leaves a full evidence directory for every run (phase 8, criteria 1/5):
+"""`cua discover` leaves a full evidence directory for every run (phase 8, requirements 1/5):
 run.json, trace.jsonl, result.json, artifact.yaml (when saved), screenshots and snapshots,
 on success and on refusal/failure alike -- and none of it holds a secret or an SSN.
 """

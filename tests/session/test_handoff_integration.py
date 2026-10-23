@@ -1,6 +1,6 @@
 """The live proof: escalate, claim, take control, hand back, resume -- against the real mock
 app, through the real HTTP surface, on real threads. Discharges the phase's acceptance
-criteria end to end; the per-task tests already proved each mechanism in isolation.
+requirements end to end; the per-task tests already proved each mechanism in isolation.
 
 The human at the keyboard. In `cua serve` the operator drives the headed browser directly;
 a test has no hands, and E15 forbids touching a session's `Page` from any thread but the
@@ -198,7 +198,7 @@ def test_escalate_claim_resolve_and_resume_to_a_real_success(
     assert claimed.status_code == 200
     assert client.get(f"/sessions/{sid}", headers=AUTH).json()["controller"] == "operator"
     operator.wait()
-    # Criterion 1, live: inside the human window the automation's own surface was refused.
+    # requirement 1, live: inside the human window the automation's own surface was refused.
     assert operator.agent_refused is not None
     assert "operator" in str(operator.agent_refused)
 
