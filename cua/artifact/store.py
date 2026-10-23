@@ -265,7 +265,7 @@ def save(artifact: Artifact, root: Path) -> Path:
     if violations:
         raise ValueError(
             f"refusing to save {artifact.id} v{artifact.version}: the artifact carries "
-            f"content acceptance criterion 1 forbids: "
+            "forbidden content (hostname, address, URL, CSS selector or XPath): "
             + "; ".join(f"{f.code}: {f.message}" for f in violations)
         )
     _write_atomically(path, dump_yaml(artifact))

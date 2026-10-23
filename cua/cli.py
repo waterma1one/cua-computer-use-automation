@@ -1,7 +1,7 @@
 """The `cua` command-line entry point.
 
 Only `cua discover` (a later phase) requires a model API key; this module's `replay`
-command runs with no key and no network beyond the target application (RULES.md S7).
+command runs with no key and no network beyond the target application.
 
 This module never names the driver package directly. Chromium is launched behind
 `cua.surface.web.launch_page`, the one factory in the system permitted to do that, and
@@ -212,7 +212,7 @@ def replay(
     mode: str = typer.Option("embedded", "--mode", help="embedded or supervised."),
     overlay_path: Path | None = typer.Option(  # noqa: B008
         None, "--overlay",
-        help="Tenant overlay YAML resolved onto the artifact before replay (spec 4.3).",
+        help="Tenant overlay YAML resolved onto the artifact before replay.",
     ),
 ) -> None:
     """Replays one capability artifact against a live target application.
@@ -460,7 +460,7 @@ def approve(
     root: Path = typer.Option(..., "--root", help="Artifact store root."),  # noqa: B008
     approver: str = typer.Option(..., "--approver", help="Who is approving."),
 ) -> None:
-    """Approves one capability version for invocation (spec 6.2). Never automatic."""
+    """Approves one capability version for invocation. Never automatic."""
     try:
         entry = approve_capability(root, artifact_id, version, approver)
     except (FileNotFoundError, ValueError) as exc:
@@ -477,7 +477,7 @@ def serve(
     host: str = typer.Option("127.0.0.1", "--host", help="Interface to bind."),
     port: int = typer.Option(8800, "--port", help="Port to bind."),
 ) -> None:
-    """Runs the session service (spec S7): sessions, interventions, and the control lease.
+    """Runs the session service: sessions, interventions, and the control lease.
 
     Requires `CUA_OPERATOR_TOKEN` in the environment (see `.env.example`) -- the shared
     token the intervention endpoints check -- and refuses to start without one (exit 2)
@@ -560,7 +560,7 @@ def discover(
     session, and saves it `draft` only on success.
 
     The only command that needs a model API key (`GEMINI_API_KEY`, exit 2 if absent) or
-    network beyond the target app (RULES.md S7). Every step is written to
+    network beyond the target app. Every step is written to
     `evidence/<run_id>/trace.jsonl` as it happens; `run.json` (with token counts and cost),
     `result.json`, per-step screenshots/snapshots and, when saved, `artifact.yaml` are
     written on every path, refusals included. The saved artifact's

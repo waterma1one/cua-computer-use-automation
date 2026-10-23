@@ -697,7 +697,7 @@ def _forbidden_content_findings(artifact: Artifact) -> list[Finding]:
                 level="error", code="FORBIDDEN_CONTENT", where=path,
                 message=(
                     f"{path} carries {hit}; an artifact never holds a hostname, an "
-                    f"address, a URL, a CSS selector or an XPath (acceptance criterion 1)"
+                    f"address, a URL, a CSS selector or an XPath"
                 ),
             ))
     return findings
